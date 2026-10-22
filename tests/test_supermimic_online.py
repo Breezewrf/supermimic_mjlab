@@ -43,9 +43,9 @@ DEVICE = os.environ.get(
 )
 
 
-def make_starts(library, default_q, count=2):
+def make_starts(library, default_q, count=2, *, frame_id=0):
   motion = torch.zeros(count, dtype=torch.long, device=library.device)
-  frame = torch.zeros_like(motion)
+  frame = torch.full_like(motion, frame_id)
   root = library.root_state(motion, frame)
   ref = library.get_frame(motion, frame)
   state = torch.cat((root[:, :7], ref["joint_pos"], root[:, 7:], ref["joint_vel"]), -1)
@@ -163,20 +163,73 @@ class ImaginationTests(unittest.TestCase):
     self.assertGreater(float(feedback.abs().sum()), 0.0)
     self.assertTrue(torch.isfinite(feedback).all())
 
-  def test_motion_end_cuts_survival_and_bootstrap(self):
+  def test_imagination_rejects_any_start_without_full_reference_horizon(self):
     actor, world, critic = self.models()
     starts = make_starts(self.library, actor.default_q)
-    starts["frame_id"].fill_(int(self.library.lengths[0]) - 2)
-    with frozen_parameters(world, critic):
-      trace = imagine(
-        actor, world, critic, self.library, starts, horizon=4, sensor_noise=False
-      )
-    self.assertTrue((trace["mask"].sum(1) == 1).all())
-    self.assertTrue((trace["continuation"] == 0).all())
-    torch.testing.assert_close(trace["objective"], trace["rewards"][:, 0].mean())
-    torch.testing.assert_close(
-      trace["states"][:, 1:], trace["states"][:, 1:2].expand(-1, 4, -1)
+    # A mixed batch must reject even one insufficient start (only 3 successors).
+    starts["frame_id"][1] = int(self.library.lengths[0]) - 4
+    with self.assertRaisesRegex(ValueError, "full reference horizon"):
+      imagine(actor, world, critic, self.library, starts, horizon=4, sensor_noise=False)
+
+  def test_last_reference_frame_preserves_bootstrap_unless_physical_failure(self):
+    actor, world, critic = self.models()
+    horizon, gamma = 4, 0.9
+    starts = make_starts(
+      self.library,
+      actor.default_q,
+      frame_id=int(self.library.lengths[0]) - 1 - horizon,
     )
+    with torch.no_grad():
+      for parameter in critic.parameters():
+        parameter.zero_()
+      critic.value[-1].bias.fill_(5.0)
+    original_heads = world.task_heads
+    for failure in (0.0, 1.0):
+
+      def constant_heads(*args, failure=failure):
+        result = original_heads(*args)
+        result["reward"] = torch.ones_like(result["reward"])
+        result["termination_probability"] = torch.full_like(result["reward"], failure)
+        return result
+
+      with (
+        self.subTest(physical_failure=failure),
+        frozen_parameters(world, critic),
+        patch.object(world, "task_heads", side_effect=constant_heads),
+      ):
+        trace = imagine(
+          actor,
+          world,
+          critic,
+          self.library,
+          starts,
+          horizon=horizon,
+          gamma=gamma,
+          sensor_noise=False,
+        )
+        self.assertTrue(trace["mask"].all())
+        torch.testing.assert_close(
+          trace["continuation"], torch.full((2, horizon), 1 - failure)
+        )
+        bootstrap = gamma**horizon * (1 - failure) ** horizon * 5
+        expected_reward = sum((gamma * (1 - failure)) ** t for t in range(horizon))
+        torch.testing.assert_close(
+          trace["bootstrap_objective"], torch.tensor(bootstrap)
+        )
+        torch.testing.assert_close(
+          trace["objective"], torch.tensor(expected_reward + bootstrap)
+        )
+        targets = gae_targets(
+          trace["rewards"], trace["continuation"], trace["values"], gamma, lam=1.0
+        )
+        expected = torch.tensor(
+          [
+            sum((gamma * (1 - failure)) ** t for t in range(steps))
+            + (gamma * (1 - failure)) ** steps * 5
+            for steps in range(horizon, 0, -1)
+          ]
+        )
+        torch.testing.assert_close(targets, expected.expand(2, -1))
 
   def test_collection_timeout_does_not_cut_imagination_or_gae_bootstrap(self):
     actor, world, critic = self.models()
@@ -226,6 +279,9 @@ class ImaginationTests(unittest.TestCase):
 
   def test_terminal_bootstrap_keeps_its_state_gradient(self):
     actor, world, critic = self.models()
+    starts = make_starts(
+      self.library, actor.default_q, frame_id=int(self.library.lengths[0]) - 3
+    )
     original_heads = world.task_heads
 
     def zero_reward(*args):
@@ -243,7 +299,7 @@ class ImaginationTests(unittest.TestCase):
         world,
         critic,
         self.library,
-        make_starts(self.library, actor.default_q),
+        starts,
         horizon=2,
         gamma=0.9,
         sensor_noise=False,

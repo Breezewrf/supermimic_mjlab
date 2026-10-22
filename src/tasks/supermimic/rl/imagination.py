@@ -65,16 +65,16 @@ def imagine(
     starts["motion_id"],
     starts["frame_id"],
   )
-  # Include the final state's full future window for the terminal bootstrap.
-  future = library.get_future(motion, frame, horizon + 10)
   # A simulator collection timeout is a truncation, not a physical failure.
   # Imagination follows the reference independently of the real episode clock.
-  budget = library.lengths[motion] - 1 - frame
-  if (budget <= 0).any():
-    raise ValueError("An imagined start must have a successor")
+  # Match the reference's inclusive clip-end bound: f + H <= last frame.
+  if (frame + horizon >= library.lengths[motion]).any():
+    raise ValueError("An imagined start must have a full reference horizon")
+  # Future goal features pad at the last frame, including at the bootstrap state.
+  future = library.get_future(motion, frame, horizon + 10)
   survival = state.new_ones(len(state))
   reward_objective = state.new_zeros(len(state))
-  rewards, continuations, values, features, masks = [], [], [], [], []
+  rewards, continuations, values, features = [], [], [], []
   actions, states = [], [state]
   for t in range(horizon):
     reference = {key: value[:, t : t + 10] for key, value in future.items()}
@@ -83,10 +83,8 @@ def imagine(
     features.append(critic_input.detach())
     with torch.no_grad():
       values.append(critic.value(critic_input.detach()).squeeze(-1))
-    active = t < budget
-    action = torch.where(active[:, None], actor.forward_features(history, goal), 0.0)
-    predicted_state = world(state, action, context)
-    next_state = torch.where(active[:, None], predicted_state, state)
+    action = actor.forward_features(history, goal)
+    next_state = world(state, action, context)
     prediction = world.task_heads(
       next_state,
       action,
@@ -94,19 +92,18 @@ def imagine(
       {key: value[:, t + 1] for key, value in future.items()},
       history[:, -1, -29:],
     )
-    reward = prediction["reward"] * active
-    continuation = (1 - prediction["termination_probability"]) * ((t + 1) < budget)
+    reward = prediction["reward"]
+    # Clip end is a truncation, so only physical failure cuts continuation.
+    continuation = 1 - prediction["termination_probability"]
     reward_objective = reward_objective + gamma**t * survival * reward
     survival = survival * continuation
     observation = prediction["clean_observation"]
     if sensor_noise:
       observation = add_sensor_noise(observation, generator)
-    appended = torch.cat((history[:, 1:], observation[:, None]), 1)
-    history = torch.where(active[:, None, None], appended, history)
+    history = torch.cat((history[:, 1:], observation[:, None]), 1)
     state = next_state
     rewards.append(reward)
     continuations.append(continuation)
-    masks.append(active)
     actions.append(action)
     states.append(state)
   terminal_reference = {
@@ -116,15 +113,16 @@ def imagine(
   bootstrap_objective = gamma**horizon * survival * terminal_value
   objective = reward_objective + bootstrap_objective
   values.append(terminal_value.detach())
+  rewards = torch.stack(rewards, 1)
   return {
     "objective": objective.mean(),
     "reward_objective": reward_objective.mean(),
     "bootstrap_objective": bootstrap_objective.mean(),
-    "rewards": torch.stack(rewards, 1),
+    "rewards": rewards,
     "continuation": torch.stack(continuations, 1),
     "values": torch.stack(values, 1),
     "critic_features": torch.stack(features, 1),
-    "mask": torch.stack(masks, 1),
+    "mask": torch.ones_like(rewards, dtype=torch.bool),
     "survival": survival,
     "states": torch.stack(states, 1),
     "actions": actions,

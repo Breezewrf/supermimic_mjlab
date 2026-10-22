@@ -10,11 +10,11 @@ import torch
 
 from ..config.rl_cfg import OnlineConfig
 from ..data.replay_buffer import ReplayBuffer
+from ..mdp.resets import RESET_NOISE
 from ..models.policy import MotionActor, MotionCritic
 from ..models.world_model import WorldModel
-from ..mdp.resets import RESET_NOISE
-from .imagination import critic_loss, frozen_parameters, gae_targets, imagine
 from .diagnostics import replay_diagnostics, sampler_diagnostics
+from .imagination import critic_loss, frozen_parameters, gae_targets, imagine
 from .world_model_training import rollout, world_model_loss
 
 
@@ -210,7 +210,12 @@ class OnlineTrainer:
   def update_policy(self) -> dict:
     self.phase = "actor"
     cfg = self.config
-    starts = self.replay.sample_starts(cfg.policy_batch_size, 10)
+    starts = self.replay.sample_starts(
+      cfg.policy_batch_size,
+      10,
+      horizon=cfg.horizon,
+      clip_lengths=self.env.library.lengths,
+    )
     self.actor_optimizer.zero_grad(set_to_none=True)
     self.critic_optimizer.zero_grad(set_to_none=True)
     with frozen_parameters(self.world, self.critic):

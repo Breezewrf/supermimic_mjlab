@@ -129,7 +129,7 @@ class ReplayBuffer:
     starts, envs = self._candidates()
     choices = torch.stack((starts, envs), -1)[valid(starts, envs)]
     if not len(choices):
-      raise ValueError("No replay starts satisfy the requested window/history")
+      raise ValueError("No replay starts satisfy the requested window/history/horizon")
     indices = torch.randint(
       len(choices), (remaining,), device=self.device, generator=self.generator
     )
@@ -197,14 +197,35 @@ class ReplayBuffer:
     return result | {"mask": mask}
 
   def sample_starts(
-    self, batch_size: int, history_length: int = 10
+    self,
+    batch_size: int,
+    history_length: int = 10,
+    *,
+    horizon: int | None = None,
+    clip_lengths: Tensor | None = None,
   ) -> dict[str, Tensor]:
+    """Sample histories, optionally requiring H remaining reference transitions.
+
+    This checks reference availability, not future transitions in replay: an
+    imagined trajectory may continue past a real collection timeout.
+    """
     if batch_size < 1 or history_length < 1 or history_length > self.capacity:
       raise ValueError("Invalid batch size or history length")
-    indices = self._sample_indices(
-      batch_size,
-      lambda starts, envs: self._history_indices(starts, envs, history_length)[1],
-    )
+    if (horizon is None) != (clip_lengths is None):
+      raise ValueError("Imagination horizon and clip lengths must be provided together")
+    if horizon is not None and horizon < 1:
+      raise ValueError("Imagination horizon must be positive")
+
+    def valid(starts, envs):
+      eligible = self._history_indices(starts, envs, history_length)[1]
+      if horizon is not None:
+        slots = starts % self.capacity
+        motion = self.data["motion_id"][slots, envs]
+        frame = self.data["frame_id"][slots, envs]
+        eligible = eligible & (frame + horizon < clip_lengths[motion])
+      return eligible
+
+    indices = self._sample_indices(batch_size, valid)
     starts, envs = indices.unbind(-1)
     history_slots, _ = self._history_indices(starts, envs, history_length)
     slots = starts % self.capacity

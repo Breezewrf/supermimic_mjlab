@@ -90,6 +90,41 @@ class ResetScoreTests(unittest.TestCase):
 
 
 class ReplaySamplingTests(unittest.TestCase):
+  def test_imagination_starts_require_full_reference_horizon_across_clips(self):
+    replay = ReplayBuffer(2, 16, seed=9)
+    lengths = torch.tensor([65, 97])
+    horizon = 32
+    # One-step episodes: reference availability, not recorded future steps,
+    # decides eligibility. Fill past capacity to exercise ring-buffer indices.
+    for step in range(24):
+      row = transition(step, episode=step, episode_step=0, done="time_out", num_envs=2)
+      row["motion_id"] = torch.tensor([0, 1])
+      row["frame_id"] = torch.tensor([30, 62]) + step % 6
+      replay.append(row)
+    with patch.object(replay, "_candidates", side_effect=AssertionError("full scan")):
+      starts = replay.sample_starts(512, horizon=horizon, clip_lengths=lengths)
+    remaining = lengths[starts["motion_id"]] - 1 - starts["frame_id"]
+    self.assertTrue((remaining >= horizon).all())
+    self.assertTrue((remaining == horizon).any())
+    self.assertEqual(set(starts["motion_id"].tolist()), {0, 1})
+    self.assertTrue(starts["time_out"].all())
+    torch.testing.assert_close(
+      starts["history"][:, :, 0], starts["state"][:, :1].expand(-1, 10)
+    )
+
+  def test_imagination_sampling_rejects_empty_eligible_set_and_invalid_options(self):
+    replay = ReplayBuffer(1, 16)
+    replay.append(transition(0))
+    with self.assertRaisesRegex(ValueError, "No replay starts"):
+      replay.sample_starts(2, horizon=4, clip_lengths=torch.tensor([4]))
+    for options in (
+      {"horizon": 4},
+      {"clip_lengths": torch.tensor([65])},
+      {"horizon": 0, "clip_lengths": torch.tensor([65])},
+    ):
+      with self.subTest(options=options), self.assertRaises(ValueError):
+        replay.sample_starts(2, **options)
+
   def test_dense_sampling_does_not_enumerate_buffer_and_remains_uniform(self):
     replay = ReplayBuffer(4, 64, seed=9)
     for step in range(64):

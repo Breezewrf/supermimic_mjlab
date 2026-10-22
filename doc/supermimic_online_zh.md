@@ -110,8 +110,14 @@ Actor 本体观测沿用第一阶段定义：关节角、关节速度、机体�
 模型和 Critic 的权重，保留它们对状态和动作的梯度；冻结不等于 no_grad 或 detach。
 预测物理失败概率进入连续生存权重。真实采集仍在 10 秒时限处 reset，Replay
 窗口和观测历史不会跨 reset；该采集时限不终止想象。即使起点处于真实 episode
-第 499 步，也可继续完成 32 步想象并保留末端价值 bootstrap。参考动作本身结束时
-仍截断后续奖励和 bootstrap；正常到达 32 步想象长度时保留价值 bootstrap。
+第 499 步，也可继续完成 32 步想象并保留末端价值 bootstrap。
+对齐参考实现，策略起点只从满足 `frame_id + horizon <= clip_length - 1` 的
+Replay 状态中采样，保证有完整 horizon 的参考后继帧；无需 Replay 中存有这些
+未来转移。每条轨迹都想象完整 horizon，末端保留 Critic 价值 bootstrap，包括
+恰好到达动作最后一帧的情况。后续目标特征不足 10 帧时重复末帧，只有预测物理
+失败概率影响生存权重，不因动作结束将 continuation 清零。真实采集仍在动作
+末尾 reset，并隔断 Replay 窗口和历史。若 Replay 没有符合条件的起点，明确报错，
+需补充有效采集数据或调整 horizon。
 
 Actor 使用 Adam `β=(0.9, 0.95)`，梯度先按全局范数 1 裁剪，再按元素 0.1 裁剪。
 世界模型与 Critic 使用 Adam，仅按全局范数 1 裁剪。Critic 的 GAE targets 基于
@@ -237,8 +243,9 @@ python -m unittest discover -s tests -v
 
 无 GPU 时可将 `SUPERMIMIC_TEST_DEVICE` 改为 `cpu`。新增测试覆盖参考坐标和
 四元数符号不变性、32 步状态梯度、历史动作反馈、末端 bootstrap 梯度、传感器
-噪声时序、动作结束边界、跨采集超时的想象与 GAE bootstrap、世界模型及 Critic
-损失的时间求和与 padding 排除、优化器隔离、新策略数据采集、Replay 恢复以及
+噪声时序、完整参考起点筛选、末帧 bootstrap、跨采集超时的想象与 GAE bootstrap、
+世界模型及 Critic 损失的时间求和与 padding 排除、优化器隔离、新策略数据采集、
+Replay 恢复以及
 训练 checkpoint 的独立推理。
 
 100 轮短训练用于验收在线闭环和数值稳定性。完整动作跟踪能力仍需以更充分训练后
