@@ -7,9 +7,11 @@ from mjlab.envs import ManagerBasedRlEnv
 from torch import Tensor
 
 from .config.task_cfg import TRACKED_BODIES, FoundationConfig
+from .config.robot_cfg import FOOT_COLLISION_EXPR
 from .data.motion_library import MotionLibrary
 from .env_cfg import make_env_cfg
 from .mdp.reset_sampler import ResetSampler
+from .mdp.resets import reference_reset_state
 from .mdp.rewards import tracking_reward
 from .mdp.state import ObservationHistory, add_sensor_noise, observe
 from .mdp.terminations import failure_terms
@@ -36,7 +38,7 @@ class SuperMimicEnv(ManagerBasedRlEnv):
     self.body_ids = torch.tensor(
       [self.robot.body_names.index(b) for b in TRACKED_BODIES], device=device
     )
-    foot_ids, _ = self.robot.find_geoms(r"^(left|right)_foot[1-7]_collision$")
+    foot_ids, _ = self.robot.find_geoms(FOOT_COLLISION_EXPR)
     if not foot_ids:
       raise ValueError("G1 foot collision geometry not found")
     self.foot_geom_id = int(self.robot.indexing.geom_ids[foot_ids[0]])
@@ -164,12 +166,19 @@ class SuperMimicEnv(ManagerBasedRlEnv):
     self.previous_action[env_ids] = 0
     reference = self.library.get_frame(motion, frame)
     root = self.library.root_state(motion, frame)
-    root[:, :3] += self.scene.env_origins[env_ids]
-    self.robot.write_joint_state_to_sim(
-      reference["joint_pos"], reference["joint_vel"], env_ids=env_ids
+    root, joint_pos, joint_vel = reference_reset_state(
+      root,
+      reference["joint_pos"],
+      reference["joint_vel"],
+      self.robot.data.joint_pos_limits[env_ids],
+      perturb=self.foundation_config.reset_noise,
+      generator=self.generator,
     )
+    root[:, :3] += self.scene.env_origins[env_ids]
+    self.robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
     self.robot.write_root_state_to_sim(root, env_ids=env_ids)
     self.robot.clear_state(env_ids)
+    self.robot.set_joint_position_target(joint_pos, env_ids=env_ids)
     model = self.sim.model
     self.context[env_ids, 0] = model.geom_friction[env_ids, self.foot_geom_id, 0]
     self.context[env_ids, 1:30] = self.robot.data.encoder_bias[env_ids]

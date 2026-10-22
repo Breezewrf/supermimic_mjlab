@@ -13,10 +13,10 @@ from ..mdp.state import quat_apply, quat_mul, quat_normalize, rotvec_to_quat
 def robot_metadata() -> dict:
   import mujoco
   import numpy as np
-  from mjlab.asset_zoo.robots import get_g1_robot_cfg
   from mjlab.entity import Entity
+  from ..config.robot_cfg import get_supermimic_robot_cfg
 
-  cfg = get_g1_robot_cfg()
+  cfg = get_supermimic_robot_cfg()
   robot = Entity(cfg)
   model = robot.spec.compile()
   if (
@@ -79,6 +79,7 @@ def robot_metadata() -> dict:
     "actuator_forcelimited",
     "actuator_forcerange",
     "geom_type",
+    "geom_dataid",
     "geom_bodyid",
     "geom_pos",
     "geom_quat",
@@ -86,6 +87,14 @@ def robot_metadata() -> dict:
     "geom_friction",
     "geom_contype",
     "geom_conaffinity",
+    "geom_condim",
+    "geom_priority",
+    "mesh_vertadr",
+    "mesh_vertnum",
+    "mesh_vert",
+    "mesh_faceadr",
+    "mesh_facenum",
+    "mesh_face",
   ):
     digest.update(name.encode())
     digest.update(getattr(model, name).tobytes())

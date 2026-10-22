@@ -44,10 +44,11 @@ class KinematicsTests(unittest.TestCase):
     cls.metadata = robot_metadata()
 
   def test_against_mujoco_with_nonzero_joint_anchor(self):
-    from mjlab.asset_zoo.robots import get_g1_robot_cfg
     from mjlab.entity import Entity
 
-    robot = Entity(get_g1_robot_cfg())
+    from src.tasks.supermimic.config.robot_cfg import get_supermimic_robot_cfg
+
+    robot = Entity(get_supermimic_robot_cfg())
     model = robot.spec.compile()
     metadata = copy.deepcopy(self.metadata)
     model.jnt_pos[1] = [0.03, -0.02, 0.01]

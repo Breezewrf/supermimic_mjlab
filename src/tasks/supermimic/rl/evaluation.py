@@ -20,8 +20,8 @@ def evaluate(
   if env.num_envs != 1:
     raise ValueError("Fixed-clip evaluation requires exactly one environment")
   cfg = env.foundation_config
-  if cfg.randomization or cfg.sensor_noise:
-    raise ValueError("Evaluation must disable randomization and sensor noise")
+  if cfg.randomization or cfg.sensor_noise or cfg.reset_noise:
+    raise ValueError("Evaluation must disable randomization, reset and sensor noise")
   if max_steps_per_clip is not None and max_steps_per_clip < 1:
     raise ValueError("Evaluation step limit must be positive")
   rows = []
@@ -79,5 +79,5 @@ def evaluate(
     "motions": rows,
     "successes": sum(row["success"] for row in rows),
     "normalized_return": sum(row["normalized_return"] for row in rows) / len(rows),
-    "protocol": "first frame; full clip unless explicitly limited; no noise or domain randomization",
+    "protocol": "first frame; full clip unless explicitly limited; no reset/sensor noise or domain randomization; self collisions disabled",
   }

@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import os
+import sys
 import tempfile
 from pathlib import Path
 
@@ -19,6 +20,7 @@ import mujoco
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 CSV_JOINT_NAMES = (
   "left_hip_pitch_joint",
   "left_hip_roll_joint",
@@ -127,15 +129,16 @@ def resample_motion(
 
 
 def load_robot(model_xml: Path | None = None):
-  """Use the same mjlab G1 factory as the training task by default."""
+  """Use the same vendored RoboJuDo-Plus G1 as the training task by default."""
   if model_xml is None:
-    from mjlab.asset_zoo.robots import get_g1_robot_cfg
     from mjlab.entity import Entity
 
-    robot = Entity(get_g1_robot_cfg())
+    from src.tasks.supermimic.config.robot_cfg import G1_XML, get_supermimic_robot_cfg
+
+    robot = Entity(get_supermimic_robot_cfg())
     model = robot.spec.compile()
     joint_names, body_names = tuple(robot.joint_names), tuple(robot.body_names)
-    source = "mjlab.asset_zoo.robots.get_g1_robot_cfg"
+    source = str(G1_XML.resolve())
   else:
     model = mujoco.MjModel.from_xml_path(str(model_xml))
     joint_names = tuple(
@@ -272,7 +275,7 @@ def main() -> None:
   parser.add_argument("--output-fps", type=positive_fps, default=50.0)
   parser.add_argument("--quaternion-order", choices=("xyzw", "wxyz"), default="xyzw")
   parser.add_argument(
-    "--model-xml", type=Path, help="Override mjlab G1 with a standalone G1 XML"
+    "--model-xml", type=Path, help="Override the vendored G1 with a standalone G1 XML"
   )
   parser.add_argument(
     "--overwrite", action="store_true", help="Replace existing NPZ files"

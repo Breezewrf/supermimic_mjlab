@@ -1,7 +1,7 @@
 """Minimal mjlab scene for collection; task signals are shared tensor functions."""
 
 import mujoco
-from mjlab.asset_zoo.robots import G1_ACTION_SCALE, get_g1_robot_cfg
+from mjlab.asset_zoo.robots import G1_ACTION_SCALE
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp import dr
 from mjlab.envs.mdp.actions import JointPositionActionCfg
@@ -13,6 +13,7 @@ from mjlab.terrains import TerrainEntityCfg
 from mjlab.viewer import ViewerConfig
 
 from .config.task_cfg import FoundationConfig
+from .config.robot_cfg import FOOT_COLLISION_EXPR, get_supermimic_robot_cfg
 
 
 class FoundationMujocoCfg(MujocoCfg):
@@ -24,7 +25,7 @@ class FoundationMujocoCfg(MujocoCfg):
 
 
 def make_env_cfg(config: FoundationConfig) -> ManagerBasedRlEnvCfg:
-  foot = SceneEntityCfg("robot", geom_names=r"^(left|right)_foot[1-7]_collision$")
+  foot = SceneEntityCfg("robot", geom_names=FOOT_COLLISION_EXPR)
   torso = SceneEntityCfg("robot", body_names=("torso_link",))
   # Constant ranges also expand model fields in debug/evaluation mode, ensuring
   # the context always comes from the actual applied model parameters.
@@ -37,7 +38,7 @@ def make_env_cfg(config: FoundationConfig) -> ManagerBasedRlEnvCfg:
     seed=config.seed,
     scene=SceneCfg(
       terrain=TerrainEntityCfg(terrain_type="plane"),
-      entities={"robot": get_g1_robot_cfg()},
+      entities={"robot": get_supermimic_robot_cfg()},
       num_envs=config.num_envs,
     ),
     actions={
@@ -51,7 +52,7 @@ def make_env_cfg(config: FoundationConfig) -> ManagerBasedRlEnvCfg:
     events={
       "foot_friction": EventTermCfg(
         func=dr.geom_friction,
-        mode="reset",
+        mode="startup",
         params={
           "asset_cfg": foot,
           "ranges": mu,
@@ -64,12 +65,12 @@ def make_env_cfg(config: FoundationConfig) -> ManagerBasedRlEnvCfg:
       ),
       "torso_com": EventTermCfg(
         func=dr.body_com_offset,
-        mode="reset",
+        mode="startup",
         params={"asset_cfg": torso, "ranges": com, "operation": "add"},
       ),
     },
     sim=SimulationCfg(
-      # Falling, dancing and self-contact need more space than standing G1.
+      # Falling and dancing need full-body ground contacts and adequate capacity.
       nconmax=128,
       njmax=1024,
       mujoco=FoundationMujocoCfg(timestep=0.005, iterations=10, ls_iterations=20),

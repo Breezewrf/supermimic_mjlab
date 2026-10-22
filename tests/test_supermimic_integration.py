@@ -116,9 +116,96 @@ class EnvironmentIntegrationTests(unittest.TestCase):
     history_other = env.history.data[1].clone()
     env.reset(env_ids=[0], options={"motion_id": 0, "frame_id": 30})
     torch.testing.assert_close(env.context[1], context[1])
+    torch.testing.assert_close(env.context[:, 0], context[:, 0], rtol=0, atol=0)
+    torch.testing.assert_close(env.context[:, 30:], context[:, 30:], rtol=0, atol=0)
     torch.testing.assert_close(env.read_state()[1], state_other)
     torch.testing.assert_close(env.history.data[1], history_other)
-    self.assertFalse(torch.equal(env.context[0], context[0]))
+    self.assertFalse(torch.equal(env.context[0, 1:30], context[0, 1:30]))
+
+  def test_static_domain_parameters_survive_full_and_automatic_resets(self):
+    env = self.env
+    friction = env.sim.model.geom_friction.clone()
+    com = env.sim.model.body_ipos.clone()
+    static = env.context[:, [0, 30, 31, 32]].clone()
+    bias = env.context[:, 1:30].clone()
+    env.reset(options={"motion_id": 0, "frame_id": 10})
+    self.assertFalse(torch.equal(env.context[:, 1:30], bias))
+    env.foundation_config = replace(env.foundation_config, episode_length_s=0.02)
+    env.step(self.zero)
+    torch.testing.assert_close(env.context[:, [0, 30, 31, 32]], static, rtol=0, atol=0)
+    torch.testing.assert_close(
+      env.sim.model.geom_friction.clone(), friction, rtol=0, atol=0
+    )
+    torch.testing.assert_close(env.sim.model.body_ipos.clone(), com, rtol=0, atol=0)
+
+  def test_startup_domain_samples_are_reproducible_for_a_new_environment(self):
+    from src.tasks.supermimic.env import SuperMimicEnv
+
+    other = SuperMimicEnv(
+      FoundationConfig.training(num_envs=2, clips=("walk1_subject1",)), device=DEVICE
+    )
+    try:
+      torch.testing.assert_close(
+        other.context[:, [0, 30, 31, 32]],
+        self.env.context[:, [0, 30, 31, 32]],
+        rtol=0,
+        atol=0,
+      )
+    finally:
+      other.close()
+
+  def test_training_reset_perturbs_state_but_preserves_joint_velocities(self):
+    env = self.env
+    state = env.read_state()
+    reference = env.library.get_frame(env.motion_id, env.frame_id)
+    root = env.library.root_state(env.motion_id, env.frame_id)
+    self.assertTrue(env.foundation_config.reset_noise)
+    self.assertGreater(float((state[:, :3] - root[:, :3]).abs().max()), 0.0)
+    self.assertTrue(
+      (
+        (state[:, :3] - root[:, :3]).abs()
+        <= state.new_tensor([0.05, 0.05, 0.01]) + 2e-6
+      ).all()
+    )
+    self.assertTrue(
+      (
+        (state[:, 36:39] - root[:, 7:10]).abs()
+        <= state.new_tensor([0.5, 0.5, 0.2]) + 2e-6
+      ).all()
+    )
+    self.assertTrue(
+      (
+        (state[:, 39:42] - root[:, 10:13]).abs()
+        <= state.new_tensor([0.52, 0.52, 0.78]) + 2e-6
+      ).all()
+    )
+    torch.testing.assert_close(
+      state[:, 42:], reference["joint_vel"], atol=2e-5, rtol=2e-5
+    )
+
+  def test_evaluation_reset_is_exact_and_context_is_deterministic(self):
+    from src.tasks.supermimic.env import SuperMimicEnv
+
+    env = SuperMimicEnv(
+      FoundationConfig(num_envs=1, clips=("walk1_subject1",)), device=DEVICE
+    )
+    try:
+      for frame in (0, 30):
+        env.reset(options={"motion_id": 0, "frame_id": frame})
+        state = env.read_state()
+        root = env.library.root_state(env.motion_id, env.frame_id)
+        reference = env.library.get_frame(env.motion_id, env.frame_id)
+        torch.testing.assert_close(state[:, :7], root[:, :7])
+        torch.testing.assert_close(state[:, 36:42], root[:, 7:13])
+        torch.testing.assert_close(state[:, 7:36], reference["joint_pos"])
+        torch.testing.assert_close(state[:, 42:], reference["joint_vel"])
+        torch.testing.assert_close(env.context[:, 0], torch.ones(1, device=DEVICE))
+        torch.testing.assert_close(
+          env.context[:, 1:], torch.zeros(1, 32, device=DEVICE)
+        )
+        torch.testing.assert_close(env.current_observation, env.clean_observation)
+    finally:
+      env.close()
 
   def test_reference_kinematics_matches_npz(self):
     env = self.env

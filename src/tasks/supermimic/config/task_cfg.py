@@ -42,6 +42,7 @@ class FoundationConfig:
   sensor_noise: bool = False
   sampling: str = "uniform"
   action_clip: float | None = None
+  reset_noise: bool = False
 
   def __post_init__(self):
     if self.num_envs < 1 or self.history_length < 1 or self.future_length < 1:
@@ -54,5 +55,13 @@ class FoundationConfig:
   @classmethod
   def training(cls, **kwargs):
     return cls(
-      **({"randomization": True, "sensor_noise": True, "sampling": "return"} | kwargs)
+      **(
+        {
+          "randomization": True,
+          "sensor_noise": True,
+          "sampling": "return",
+          "reset_noise": True,
+        }
+        | kwargs
+      )
     )

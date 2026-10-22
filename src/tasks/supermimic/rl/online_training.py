@@ -12,6 +12,7 @@ from ..config.rl_cfg import OnlineConfig
 from ..data.replay_buffer import ReplayBuffer
 from ..models.policy import MotionActor, MotionCritic
 from ..models.world_model import WorldModel
+from ..mdp.resets import RESET_NOISE
 from .imagination import critic_loss, frozen_parameters, gae_targets, imagine
 from .world_model_training import rollout, world_model_loss
 
@@ -37,6 +38,14 @@ def restore_rng(state: dict) -> None:
 
 def simulation_parameters(env) -> dict:
   return {
+    "physics_protocol_version": 2,
+    "self_collisions": False,
+    "training_reset_noise": dict(RESET_NOISE),
+    "randomization_schedule": {
+      "foot_friction": "startup",
+      "torso_com": "startup",
+      "encoder_bias": "reset",
+    },
     "nconmax": env.cfg.sim.nconmax,
     "njmax": env.cfg.sim.njmax,
     "physics_dt": env.physics_dt,
