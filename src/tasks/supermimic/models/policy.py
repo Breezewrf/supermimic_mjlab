@@ -5,7 +5,13 @@ from itertools import pairwise
 import torch
 from torch import Tensor, nn
 
-from ..mdp.state import quat_apply, quat_conjugate, quat_mul, quat_normalize, yaw_quat
+from ..mdp.state import (
+  quat_apply,
+  quat_conjugate,
+  quat_mul,
+  quat_normalize,
+  yaw_quat,
+)
 
 REFERENCE_DIM = 268
 GOAL_DIM = 10 * REFERENCE_DIM
@@ -57,23 +63,32 @@ def reference_features(reference: dict[str, Tensor], default_q: Tensor) -> Tenso
 
 class MotionActor(nn.Module):
   def __init__(
-    self, default_q: Tensor, hidden_dims: tuple[int, ...] = (2048, 1024, 512, 256)
+    self,
+    default_q: Tensor,
+    hidden_dims: tuple[int, ...] = (2048, 1024, 512, 256),
+    relative_orientation: bool = False,
   ):
     super().__init__()
     self.hidden_dims = tuple(hidden_dims)
+    self.relative_orientation = relative_orientation
+    self.observation_dim = 99 if relative_orientation else 93
     self.register_buffer("default_q", default_q.detach().clone().float())
     self.register_buffer(
       "observation_scale",
-      torch.tensor([0.3] * 29 + [5.0] * 29 + [3.14] * 3 + [1.0] * 32),
+      torch.tensor(
+        [0.3] * 29 + [5.0] * 29 + [3.14] * 3 + [1.0] * (self.observation_dim - 61)
+      ),
     )
     self.encoder = mlp(GOAL_DIM, self.hidden_dims, 32)
-    self.decoder = mlp(32 + 10 * 93, self.hidden_dims, 29)
+    self.decoder = mlp(32 + 10 * self.observation_dim, self.hidden_dims, 29)
     nn.init.normal_(self.decoder[-1].weight, std=0.001)
     nn.init.zeros_(self.decoder[-1].bias)
 
   def forward_features(self, history: Tensor, goal: Tensor) -> Tensor:
-    if history.shape[-2:] != (10, 93):
-      raise ValueError("Actor needs ten 93-dimensional observations")
+    if history.shape[-2:] != (10, self.observation_dim):
+      raise ValueError(
+        f"Actor needs ten {self.observation_dim}-dimensional observations"
+      )
     latent = self.encoder(goal).tanh()
     return self.decoder(
       torch.cat((latent, (history / self.observation_scale).flatten(-2)), -1)

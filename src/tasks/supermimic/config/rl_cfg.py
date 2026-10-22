@@ -26,6 +26,8 @@ class OnlineConfig:
   actor_dims: tuple[int, ...] = (2048, 1024, 512, 256)
   critic_dims: tuple[int, ...] = (256, 128)
   clips: tuple[str, ...] = ()
+  termination_mode: str = "learned"
+  relative_orientation: bool = False
 
   def __post_init__(self):
     counts = (
@@ -51,6 +53,8 @@ class OnlineConfig:
       or self.episode_length_s <= 0
     ):
       raise ValueError("Invalid optimizer, noise or return settings")
+    if self.termination_mode not in ("learned", "analytic"):
+      raise ValueError("termination_mode must be learned or analytic")
     for widths in (self.world_dims, self.actor_dims, self.critic_dims):
       if not widths or min(widths) < 1:
         raise ValueError("Network hidden widths must be positive")

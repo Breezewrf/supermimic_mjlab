@@ -513,6 +513,9 @@ class OnlineCliTests(unittest.TestCase):
         "1",
         "--critic-minibatches",
         "1",
+        "--relative-orientation",
+        "--termination-mode",
+        "analytic",
         "--clips",
         "fixture_walk",
         "--evaluation-limit",
@@ -562,6 +565,8 @@ class OnlineCliTests(unittest.TestCase):
       checkpoint = torch.load(output / "last.pt", map_location="cpu", weights_only=True)
       self.assertEqual(checkpoint["iteration"], 2)
       self.assertEqual(checkpoint["world_updates"], 2)
+      self.assertTrue(checkpoint["config"]["relative_orientation"])
+      self.assertEqual(checkpoint["config"]["termination_mode"], "analytic")
       evaluation = Path(folder) / "evaluation.json"
       result = subprocess.run(
         prefix

@@ -54,19 +54,19 @@ class SuperMimicEnv(ManagerBasedRlEnv):
     self.episode_id = torch.full_like(self.motion_id, -1)
     self.previous_action = torch.zeros(self.num_envs, 29, device=device)
     self.context = torch.zeros(self.num_envs, 33, device=device)
-    self.history = ObservationHistory(self.num_envs, config.history_length, device)
+    self.history = ObservationHistory(
+      self.num_envs, config.history_length, device, config.observation_dim
+    )
     self.clean_history = ObservationHistory(
-      self.num_envs, config.history_length, device
+      self.num_envs, config.history_length, device, config.observation_dim
     )
-    self.current_observation = torch.zeros(self.num_envs, 93, device=device)
+    self.current_observation = torch.zeros(
+      self.num_envs, config.observation_dim, device=device
+    )
     self.clean_observation = torch.zeros_like(self.current_observation)
-    self._episode_rewards = (
-      torch.zeros(
-        math.ceil(config.episode_length_s / self.step_dt), self.num_envs, device=device
-      )
-      if config.sampling == "return"
-      else None
-    )
+    self.episode_start_frame = torch.zeros_like(self.frame_id)
+    self.episode_reward_sum = torch.zeros(self.num_envs, device=device)
+    self.episode_discounted_return = torch.zeros_like(self.episode_reward_sum)
     self.reset()
 
   def read_state(self) -> Tensor:
@@ -105,9 +105,20 @@ class SuperMimicEnv(ManagerBasedRlEnv):
       "body_ang_vel_w": data.body_link_ang_vel_w[:, self.body_ids],
     }
 
-  def _observations(self, state: Tensor) -> tuple[Tensor, Tensor]:
+  def _observations(
+    self, state: Tensor, reference: dict | None = None
+  ) -> tuple[Tensor, Tensor]:
+    reference_quat = None
+    if self.foundation_config.relative_orientation:
+      if reference is None:
+        reference = self.library.get_frame(self.motion_id, self.frame_id)
+      reference_quat = reference["body_quat_w"][..., 0, :]
     clean = observe(
-      state, self.previous_action, self.robot.data.default_joint_pos, self.context
+      state,
+      self.previous_action,
+      self.robot.data.default_joint_pos,
+      self.context,
+      reference_quat,
     )
     noisy = (
       add_sensor_noise(clean, self.generator)
@@ -162,6 +173,9 @@ class SuperMimicEnv(ManagerBasedRlEnv):
       motion, frame = self.sampler.sample(len(env_ids))
     super()._reset_idx(env_ids)
     self.motion_id[env_ids], self.frame_id[env_ids] = motion, frame
+    self.episode_start_frame[env_ids] = frame
+    self.episode_reward_sum[env_ids] = 0
+    self.episode_discounted_return[env_ids] = 0
     self.episode_id[env_ids] += 1
     self.previous_action[env_ids] = 0
     reference = self.library.get_frame(motion, frame)
@@ -258,7 +272,7 @@ class SuperMimicEnv(ManagerBasedRlEnv):
     motion_end = next_frame == self.library.lengths[self.motion_id] - 1
     done = terminated | time_out | motion_end
     self.previous_action.copy_(action)
-    clean, noisy = self._observations(next_state)
+    clean, noisy = self._observations(next_state, reference)
     transition.update(
       {
         "next_state": next_state.clone(),
@@ -274,24 +288,31 @@ class SuperMimicEnv(ManagerBasedRlEnv):
     self.current_observation.copy_(noisy)
     self.history.append(noisy)
     self.clean_history.append(clean)
-    if self._episode_rewards is not None:
-      ids = torch.arange(self.num_envs, device=self.device)
-      self._episode_rewards[transition["episode_step"], ids] = reward
-      for env_id in done.nonzero().flatten().tolist():
-        count = int(self.episode_length_buf[env_id])
-        frames = torch.arange(
-          int(self.frame_id[env_id]) - count + 1,
-          int(self.frame_id[env_id]) + 1,
-          device=self.device,
-        )
-        self.sampler.update_episode(
-          int(self.motion_id[env_id]), frames, self._episode_rewards[:count, env_id]
-        )
+    self.episode_reward_sum += reward
+    self.episode_discounted_return += (
+      self.sampler.gamma ** transition["episode_step"] * reward
+    )
+    reset_ids = done.nonzero(as_tuple=False).flatten()
+    episode_stats = {
+      "steps": self.episode_length_buf[reset_ids].clone(),
+      "return": self.episode_reward_sum[reset_ids].clone(),
+      "terminated": terminated[reset_ids].clone(),
+      "time_out": time_out[reset_ids].clone(),
+      "motion_end": motion_end[reset_ids].clone(),
+    }
+    if self.foundation_config.sampling == "return":
+      self.sampler.update_episodes(
+        self.motion_id[reset_ids],
+        self.episode_start_frame[reset_ids],
+        self.episode_discounted_return[reset_ids],
+        self.episode_reward_sum[reset_ids],
+        self.episode_length_buf[reset_ids],
+        terminated[reset_ids],
+      )
     self.frame_id.copy_(next_frame)
     self.reset_buf = done.clone()
     self.reset_terminated = terminated.clone()
     self.reset_time_outs = (time_out | motion_end).clone()
-    reset_ids = done.nonzero(as_tuple=False).flatten()
     if reset_ids.numel():
       self.reset(env_ids=reset_ids)
     self.reward_buf = reward
@@ -300,5 +321,6 @@ class SuperMimicEnv(ManagerBasedRlEnv):
     self.extras = {
       "transition": transition,
       "metrics": {k: v.clone() for k, v in (metrics | failure).items()},
+      "episodes": episode_stats,
     }
     return self.obs_buf, reward, terminated, time_out | motion_end, self.extras

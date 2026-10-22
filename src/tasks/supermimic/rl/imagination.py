@@ -60,7 +60,11 @@ def imagine(
   if horizon < 1:
     raise ValueError("Imagination horizon must be positive")
   state, history = starts["state"].detach(), starts["history"].detach()
-  context, motion, frame = starts["context"], starts["motion_id"], starts["frame_id"]
+  context, motion, frame = (
+    starts["context"],
+    starts["motion_id"],
+    starts["frame_id"],
+  )
   # Include the final state's full future window for the terminal bootstrap.
   future = library.get_future(motion, frame, horizon + 10)
   # A simulator collection timeout is a truncation, not a physical failure.
@@ -69,7 +73,7 @@ def imagine(
   if (budget <= 0).any():
     raise ValueError("An imagined start must have a successor")
   survival = state.new_ones(len(state))
-  objective = state.new_zeros(len(state))
+  reward_objective = state.new_zeros(len(state))
   rewards, continuations, values, features, masks = [], [], [], [], []
   actions, states = [], [state]
   for t in range(horizon):
@@ -92,7 +96,7 @@ def imagine(
     )
     reward = prediction["reward"] * active
     continuation = (1 - prediction["termination_probability"]) * ((t + 1) < budget)
-    objective = objective + gamma**t * survival * reward
+    reward_objective = reward_objective + gamma**t * survival * reward
     survival = survival * continuation
     observation = prediction["clean_observation"]
     if sensor_noise:
@@ -109,10 +113,13 @@ def imagine(
     key: value[:, horizon : horizon + 10] for key, value in future.items()
   }
   terminal_value = critic(state, terminal_reference, context)
-  objective = objective + gamma**horizon * survival * terminal_value
+  bootstrap_objective = gamma**horizon * survival * terminal_value
+  objective = reward_objective + bootstrap_objective
   values.append(terminal_value.detach())
   return {
     "objective": objective.mean(),
+    "reward_objective": reward_objective.mean(),
+    "bootstrap_objective": bootstrap_objective.mean(),
     "rewards": torch.stack(rewards, 1),
     "continuation": torch.stack(continuations, 1),
     "values": torch.stack(values, 1),

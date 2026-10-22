@@ -29,6 +29,7 @@ class MetricWindow:
     self.reward_sum = self.collection_seconds = 0.0
     self.last = {}
     self.peak_memory = None
+    self.collection_totals = {}
 
   def add(self, record: dict):
     self.count += 1
@@ -45,6 +46,18 @@ class MetricWindow:
       self.endings += record["episodes_ended"]
       self.reward_sum += record["real_reward_per_step"] * count
       self.collection_seconds += record["collection_seconds"]
+      for key, value in record.items():
+        if key.startswith("real_") and key != "real_reward_per_step":
+          self.collection_totals[key] = (
+            self.collection_totals.get(key, 0.0) + value * count
+          )
+        elif key in (
+          "episode_steps_sum",
+          "episode_returns_sum",
+          "normal_timeouts",
+          "normal_motion_ends",
+        ):
+          self.collection_totals[key] = self.collection_totals.get(key, 0.0) + value
 
   def summary(self) -> dict:
     result = {key: value / self.count for key, value in self.totals.items()}
@@ -65,6 +78,30 @@ class MetricWindow:
     result["window_collection_seconds"] = self.collection_seconds
     result["window_physical_failures"] = self.failures
     result["window_episodes_ended"] = self.endings
+    for key in self.last:
+      if key.startswith("real_") and key != "real_reward_per_step":
+        result[key] = (
+          self.collection_totals.get(key, 0) / self.transitions
+          if self.transitions
+          else None
+        )
+      elif key in (
+        "episode_steps_sum",
+        "episode_returns_sum",
+        "normal_timeouts",
+        "normal_motion_ends",
+      ):
+        result[key] = self.collection_totals.get(key, 0)
+    result["mean_episode_steps"] = (
+      self.collection_totals.get("episode_steps_sum", 0) / self.endings
+      if self.endings and "episode_steps_sum" in self.collection_totals
+      else None
+    )
+    result["mean_episode_return"] = (
+      self.collection_totals.get("episode_returns_sum", 0) / self.endings
+      if self.endings and "episode_returns_sum" in self.collection_totals
+      else None
+    )
     if self.peak_memory is not None:
       result["peak_gpu_memory_gib"] = self.peak_memory
     return result
@@ -276,6 +313,9 @@ class WandbReporter:
     }
     if "peak_gpu_memory_gib" in record:
       metrics["memory/torch_peak_allocated_gib"] = record["peak_gpu_memory_gib"]
+    for key in ("actor_reward_objective", "actor_bootstrap_objective"):
+      if key in record:
+        metrics["policy/" + key] = record[key]
     if record["collected_this_iteration"]:
       count = record["collected_transitions"]
       metrics.update(
@@ -289,8 +329,24 @@ class WandbReporter:
           "collection/transitions_per_second": count / record["collection_seconds"],
         }
       )
+      for key, value in record.items():
+        if key.startswith("real_") or key in (
+          "normal_timeouts",
+          "normal_motion_ends",
+          "episode_steps_sum",
+          "episode_returns_sum",
+        ):
+          metrics["collection/" + key] = value
+      if record["episodes_ended"] and "episode_steps_sum" in record:
+        metrics["collection/mean_episode_steps"] = (
+          record["episode_steps_sum"] / record["episodes_ended"]
+        )
+        metrics["collection/mean_episode_return"] = (
+          record["episode_returns_sum"] / record["episodes_ended"]
+        )
     self.run.log(metrics)
     self._persist(record["iteration"])
+
 
   def window(self, record: dict):
     if record["real_reward_per_step"] is None:
@@ -340,7 +396,10 @@ class WandbReporter:
       "evaluation/limited": any(row["evaluation_limited"] for row in rows),
       "evaluation/motions": table,
       "evaluation/per_motion_return": self.sdk.plot.bar(
-        table, "motion", "normalized_return", title="Normalized return by motion"
+        table,
+        "motion",
+        "normalized_return",
+        title="Normalized return by motion",
       ),
       "evaluation/per_motion_completion": self.sdk.plot.bar(
         table, "motion", "completion", title="Completion by motion"

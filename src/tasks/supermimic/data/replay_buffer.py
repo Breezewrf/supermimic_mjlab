@@ -26,7 +26,11 @@ REQUIRED_FIELDS = {
 
 class ReplayBuffer:
   def __init__(
-    self, num_envs: int, capacity: int = 1000, device: str = "cpu", seed: int = 0
+    self,
+    num_envs: int,
+    capacity: int = 1000,
+    device: str = "cpu",
+    seed: int = 0,
   ):
     if num_envs < 1 or capacity < 1:
       raise ValueError("Replay environment count and capacity must be positive")
@@ -86,18 +90,50 @@ class ReplayBuffer:
   def _valid_windows(
     self, starts: Tensor, envs: Tensor, length: int, require_full: bool
   ) -> Tensor:
-    episode = self.data["episode_id"][starts % self.capacity, envs]
-    valid, active = (
-      torch.ones_like(starts, dtype=torch.bool),
-      torch.ones_like(starts, dtype=torch.bool),
+    times = starts[:, None] + torch.arange(length, device=self.device)
+    slots, env = times % self.capacity, envs[:, None]
+    exists = (times < self.steps) & (
+      self.data["episode_id"][slots, env]
+      == self.data["episode_id"][starts % self.capacity, envs, None]
     )
-    for offset in range(length):
-      time = starts + offset
-      slot = time % self.capacity
-      exists = (time < self.steps) & (self.data["episode_id"][slot, envs] == episode)
-      valid &= (active & exists) if require_full else (~active | exists)
-      active &= ~self._done(slot, envs)
-    return valid
+    done = self._done(slots, env)
+    active = (
+      torch.cat((torch.ones_like(done[:, :1]), ~done[:, :-1]), 1)
+      .long()
+      .cumprod(1)
+      .bool()
+    )
+    return (exists & active).all(1) if require_full else (~active | exists).all(1)
+
+  def _sample_indices(self, batch_size: int, valid) -> Tensor:
+    """Uniform rejection sampling; enumerate only for exceptionally sparse data."""
+    if not self.steps:
+      raise ValueError("Replay buffer is empty")
+    retained = min(self.steps, self.capacity)
+    selected, remaining = [], batch_size
+    for _ in range(16):
+      flat = torch.randint(
+        retained * self.num_envs,
+        (max(64, 2 * remaining),),
+        device=self.device,
+        generator=self.generator,
+      )
+      starts = flat // self.num_envs + self.steps - retained
+      envs = flat % self.num_envs
+      accepted = torch.stack((starts, envs), -1)[valid(starts, envs)][:remaining]
+      selected.append(accepted)
+      remaining -= len(accepted)
+      if not remaining:
+        return torch.cat(selected)
+    # Preserve correct behavior for tiny/sparse buffers and genuinely empty sets.
+    starts, envs = self._candidates()
+    choices = torch.stack((starts, envs), -1)[valid(starts, envs)]
+    if not len(choices):
+      raise ValueError("No replay starts satisfy the requested window/history")
+    indices = torch.randint(
+      len(choices), (remaining,), device=self.device, generator=self.generator
+    )
+    return torch.cat((*selected, choices[indices]))
 
   def window_indices(self, length: int = 8, require_full: bool = False) -> Tensor:
     """Return retained logical (step, env) starts, stable for an immutable snapshot."""
@@ -107,16 +143,16 @@ class ReplayBuffer:
     valid = self._valid_windows(starts, envs, length, require_full)
     return torch.stack((starts[valid], envs[valid]), dim=-1)
 
-  def sample_windows(self, batch_size: int, length: int = 8) -> dict[str, Tensor]:
-    if batch_size < 1:
+  def sample_windows(
+    self, batch_size: int, length: int = 8, *, require_full: bool = False
+  ) -> dict[str, Tensor]:
+    if batch_size < 1 or not 1 <= length <= self.capacity:
       raise ValueError("Invalid batch size")
-    indices = self.window_indices(length)
-    if len(indices) == 0:
-      raise ValueError("No complete replay windows available; collect more steps")
-    selected = torch.randint(
-      len(indices), (batch_size,), device=self.device, generator=self.generator
+    indices = self._sample_indices(
+      batch_size,
+      lambda starts, envs: self._valid_windows(starts, envs, length, require_full),
     )
-    return self.gather_windows(indices[selected], length)
+    return self.gather_windows(indices, length)
 
   def gather_windows(self, indices: Tensor, length: int = 8) -> dict[str, Tensor]:
     if (
@@ -165,7 +201,21 @@ class ReplayBuffer:
   ) -> dict[str, Tensor]:
     if batch_size < 1 or history_length < 1 or history_length > self.capacity:
       raise ValueError("Invalid batch size or history length")
-    starts, envs = self._candidates()
+    indices = self._sample_indices(
+      batch_size,
+      lambda starts, envs: self._history_indices(starts, envs, history_length)[1],
+    )
+    starts, envs = indices.unbind(-1)
+    history_slots, _ = self._history_indices(starts, envs, history_length)
+    slots = starts % self.capacity
+    result = {name: value[slots, envs].clone() for name, value in self.data.items()}
+    for key in ("observation", "clean_observation"):
+      result["history" if key == "observation" else "clean_history"] = self.data[key][
+        history_slots, envs[:, None]
+      ].clone()
+    return result
+
+  def _history_indices(self, starts: Tensor, envs: Tensor, history_length: int):
     slots = starts % self.capacity
     episode = self.data["episode_id"][slots, envs]
     episode_start = starts - self.data["episode_step"][slots, envs]
@@ -178,29 +228,7 @@ class ReplayBuffer:
       (times >= max(0, self.steps - self.capacity))
       & (self.data["episode_id"][history_slots, envs[:, None]] == episode[:, None])
     ).all(-1)
-    choices = torch.nonzero(valid, as_tuple=False).flatten()
-    if choices.numel() == 0:
-      raise ValueError("No replay starts with a complete observation history")
-    choice = choices[
-      torch.randint(
-        len(choices),
-        (batch_size,),
-        device=self.device,
-        generator=self.generator,
-      )
-    ]
-    current_slots, current_envs = slots[choice], envs[choice]
-    result = {
-      name: value[current_slots, current_envs].clone()
-      for name, value in self.data.items()
-    }
-    result["history"] = self.data["observation"][
-      history_slots[choice], current_envs[:, None]
-    ].clone()
-    result["clean_history"] = self.data["clean_observation"][
-      history_slots[choice], current_envs[:, None]
-    ].clone()
-    return result
+    return history_slots, valid
 
   def state_dict(self) -> dict:
     # Save only initialized slots. Contents of uninitialized storage never reach disk.

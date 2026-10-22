@@ -9,7 +9,10 @@ from pathlib import Path
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.tasks.supermimic.config.task_cfg import DEFAULT_MANIFEST, FoundationConfig
+from src.tasks.supermimic.config.task_cfg import (
+  DEFAULT_MANIFEST,
+  FoundationConfig,
+)
 from src.tasks.supermimic.data.world_model_data import file_sha256
 from src.tasks.supermimic.models.policy import MotionActor
 from src.tasks.supermimic.rl.evaluation import evaluate, zero_policy
@@ -58,7 +61,9 @@ def main():
     if not args.clips:
       args.clips = saved["clips"]
     policy = MotionActor(
-      saved["robot_metadata"]["default_q"], tuple(saved["config"]["actor_dims"])
+      saved["robot_metadata"]["default_q"],
+      tuple(saved["config"]["actor_dims"]),
+      saved["config"].get("relative_orientation", False),
     )
     policy.load_state_dict(saved["actor"])
     policy = policy.to(args.device).eval()
@@ -68,6 +73,9 @@ def main():
     num_envs=1,
     seed=args.seed,
     episode_length_s=1e9,
+    relative_orientation=bool(
+      args.checkpoint and saved["config"].get("relative_orientation", False)
+    ),
   )
   env = SuperMimicEnv(config, device=args.device)
   try:

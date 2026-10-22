@@ -77,8 +77,17 @@ class OnlineTrainer:
       raise ValueError("Environment count differs from online configuration")
     self.env, self.metadata, self.config = env, metadata, config
     self.device = str(env.device)
-    self.world = WorldModel(metadata, config.world_dims).to(self.device)
-    self.actor = MotionActor(metadata["default_q"], config.actor_dims).to(self.device)
+    if env.foundation_config.relative_orientation != config.relative_orientation:
+      raise ValueError("Environment and policy observation settings differ")
+    self.world = WorldModel(
+      metadata,
+      config.world_dims,
+      config.termination_mode,
+      config.relative_orientation,
+    ).to(self.device)
+    self.actor = MotionActor(
+      metadata["default_q"], config.actor_dims, config.relative_orientation
+    ).to(self.device)
     self.critic = MotionCritic(metadata["default_q"], config.critic_dims).to(
       self.device
     )
@@ -110,7 +119,10 @@ class OnlineTrainer:
   def collect(self, steps: int) -> dict:
     self.phase = "collection"
     started = time.perf_counter()
-    rewards, failures, endings = 0.0, 0, 0
+    rewards = torch.zeros((), device=self.device)
+    failures, endings = rewards.long(), rewards.long()
+    terms, episode_steps, episode_returns = {}, rewards.clone(), rewards.clone()
+    timeouts, motion_ends = rewards.long(), rewards.long()
     for _ in range(steps):
       inputs = self.env.policy_input()
       action = self.actor(inputs["history"], inputs["future_reference"])
@@ -123,16 +135,32 @@ class OnlineTrainer:
         transition["episode_id"], self.actor_updates
       )
       self.replay.append(transition)
-      rewards += float(reward.mean())
-      failures += int(terminated.sum())
-      endings += int((terminated | truncated).sum())
+      rewards += reward.mean()
+      failures += terminated.sum()
+      endings += (terminated | truncated).sum()
+      episodes = extras["episodes"]
+      episode_steps += episodes["steps"].sum()
+      episode_returns += episodes["return"].sum()
+      # End reasons are mutually exclusive here: physical failure has priority.
+      motion_ends += (episodes["motion_end"] & ~episodes["terminated"]).sum()
+      timeouts += (
+        episodes["time_out"] & ~episodes["motion_end"] & ~episodes["terminated"]
+      ).sum()
+      for key, value in extras["metrics"].items():
+        if value.dtype != torch.bool:
+          terms[key] = terms.get(key, 0.0) + value.mean() / steps
       self.environment_steps += self.config.num_envs
     self.last_collection = {
-      "real_reward_per_step": rewards / steps,
-      "physical_failures": failures,
-      "episodes_ended": endings,
+      "real_reward_per_step": float(rewards / steps),
+      "physical_failures": int(failures),
+      "episodes_ended": int(endings),
       "collected_transitions": steps * self.config.num_envs,
       "collection_seconds": time.perf_counter() - started,
+      "episode_steps_sum": float(episode_steps),
+      "episode_returns_sum": float(episode_returns),
+      "normal_timeouts": int(timeouts),
+      "normal_motion_ends": int(motion_ends),
+      **{"real_" + key: float(value) for key, value in terms.items()},
     }
     return self.last_collection
 
@@ -152,12 +180,18 @@ class OnlineTrainer:
 
   def update_world(self) -> dict:
     self.phase = "world_model"
-    totals = {}
+    totals, counts = {}, {}
     self.world.train()
-    for _ in range(self.config.wm_batches):
+    for index in range(self.config.wm_batches):
       batch = self.replay.sample_windows(self.config.wm_batch_size, 8)
       self.world_optimizer.zero_grad(set_to_none=True)
-      prediction = rollout(self.world, batch, self.env.library)
+      # Full analytic heads are needed only for diagnostics, once per update.
+      prediction = rollout(
+        self.world,
+        batch,
+        self.env.library,
+        diagnostics=index == self.config.wm_batches - 1,
+      )
       loss, parts = world_model_loss(prediction, batch, analytic_losses=False)
       norm = checked_step(loss, self.world, self.world_optimizer)
       self.world_updates += 1
@@ -166,9 +200,10 @@ class OnlineTrainer:
         "gradient_norm": norm,
         **{key: float(value.detach()) for key, value in parts.items()},
       }.items():
-        totals[name] = totals.get(name, 0.0) + value / self.config.wm_batches
+        totals[name] = totals.get(name, 0.0) + value
+        counts[name] = counts.get(name, 0) + 1
     self.world_optimizer.zero_grad(set_to_none=True)
-    return {"wm_" + key: value for key, value in totals.items()}
+    return {"wm_" + key: value / counts[key] for key, value in totals.items()}
 
   def update_policy(self) -> dict:
     self.phase = "actor"
@@ -188,8 +223,13 @@ class OnlineTrainer:
         generator=self.imagination_rng,
       )
       objective = float(trajectory["objective"].detach())
+      reward_objective = float(trajectory["reward_objective"].detach())
+      bootstrap_objective = float(trajectory["bootstrap_objective"].detach())
       actor_norm = checked_step(
-        -trajectory["objective"], self.actor, self.actor_optimizer, element_clip=0.1
+        -trajectory["objective"],
+        self.actor,
+        self.actor_optimizer,
+        element_clip=0.1,
       )
     self.actor_updates += 1
     # Targets and critic data come from this one rollout, before any critic fit.
@@ -226,6 +266,8 @@ class OnlineTrainer:
     self.critic_optimizer.zero_grad(set_to_none=True)
     return {
       "actor_objective": objective,
+      "actor_reward_objective": reward_objective,
+      "actor_bootstrap_objective": bootstrap_objective,
       "actor_gradient_norm": actor_norm,
       "imagined_reward": reward,
       "survival_at_horizon": survival,
@@ -291,6 +333,7 @@ class OnlineTrainer:
         torch.cuda.max_memory_allocated(self.device) / 2**30
       )
     return record
+
 
   def state_dict(self) -> dict:
     return {

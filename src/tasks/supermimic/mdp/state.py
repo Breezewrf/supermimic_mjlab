@@ -73,15 +73,28 @@ def rotation_error_squared(a: Tensor, b: Tensor) -> Tensor:
 
 
 def observe(
-  state: Tensor, previous_action: Tensor, default_q: Tensor, context: Tensor
+  state: Tensor,
+  previous_action: Tensor,
+  default_q: Tensor,
+  context: Tensor,
+  reference_quat: Tensor | None = None,
 ) -> Tensor:
   gravity = state.new_tensor([0, 0, -1])
+  relative = []
+  if reference_quat is not None:
+    rotation = quat_normalize(quat_mul(quat_conjugate(state[..., 3:7]), reference_quat))
+    relative = [
+      quat_apply(rotation, state.new_tensor([1, 0, 0])),
+      quat_apply(rotation, state.new_tensor([0, 1, 0])),
+    ]
   return torch.cat(
     (
       state[..., 7:36] - default_q + context[..., 1:30],
       state[..., 42:71],
       quat_inverse_apply(state[..., 3:7], state[..., 39:42]),
       quat_inverse_apply(state[..., 3:7], gravity),
+      *relative,
+      # Keep previous actions last in both the 93- and 99-dimensional layouts.
       previous_action,
     ),
     dim=-1,
@@ -92,7 +105,12 @@ def add_sensor_noise(
   observation: Tensor, generator: torch.Generator | None = None
 ) -> Tensor:
   amplitude = observation.new_tensor(
-    [0.01] * 29 + [0.5] * 29 + [0.2] * 3 + [0.05] * 3 + [0.0] * 29
+    [0.01] * 29
+    + [0.5] * 29
+    + [0.2] * 3
+    + [0.05] * 3
+    + [0.05] * (observation.shape[-1] - 93)
+    + [0.0] * 29
   )
   noise = torch.rand(
     observation.shape,
@@ -104,8 +122,10 @@ def add_sensor_noise(
 
 
 class ObservationHistory:
-  def __init__(self, num_envs: int, length: int, device: str):
-    self.data = torch.zeros(num_envs, length, 93, device=device)
+  def __init__(
+    self, num_envs: int, length: int, device: str, observation_dim: int = 93
+  ):
+    self.data = torch.zeros(num_envs, length, observation_dim, device=device)
 
   def reset(self, env_ids: Tensor, initial: Tensor) -> None:
     self.data[env_ids] = initial[:, None, :]

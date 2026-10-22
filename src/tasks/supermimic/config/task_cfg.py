@@ -42,7 +42,12 @@ class FoundationConfig:
   sensor_noise: bool = False
   sampling: str = "uniform"
   action_clip: float | None = None
+  relative_orientation: bool = False
   reset_noise: bool = False
+
+  @property
+  def observation_dim(self) -> int:
+    return OBS_DIM + 6 * self.relative_orientation
 
   def __post_init__(self):
     if self.num_envs < 1 or self.history_length < 1 or self.future_length < 1:

@@ -13,7 +13,10 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.tasks.supermimic.config.rl_cfg import OnlineConfig
-from src.tasks.supermimic.config.task_cfg import DEFAULT_MANIFEST, FoundationConfig
+from src.tasks.supermimic.config.task_cfg import (
+  DEFAULT_MANIFEST,
+  FoundationConfig,
+)
 from src.tasks.supermimic.data.world_model_data import file_sha256
 from src.tasks.supermimic.models.kinematics import robot_metadata
 from src.tasks.supermimic.rl.evaluation import evaluate
@@ -54,6 +57,7 @@ def evaluate_actor(actor, manifest, config, device, limit=None):
         num_envs=1,
         seed=config.seed,
         episode_length_s=1e9,
+        relative_orientation=config.relative_orientation,
       ),
       device=device,
     )
@@ -100,6 +104,12 @@ def main():
     "--wandb-name", help="W&B run name; default: output directory name"
   )
   parser.add_argument("--wandb-mode", choices=("online", "offline"), default="online")
+  parser.add_argument("--termination-mode", choices=("learned", "analytic"))
+  parser.add_argument(
+    "--relative-orientation",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+  )
   parser.add_argument(
     "--evaluation-limit",
     type=int,
@@ -107,7 +117,9 @@ def main():
   )
   parser.add_argument("--cpu-threads", type=int, default=4)
   parser.add_argument(
-    "--detect-anomaly", action="store_true", help="Diagnose backward failures; slower"
+    "--detect-anomaly",
+    action="store_true",
+    help="Diagnose backward failures; slower",
   )
   for name in (
     "num_envs",
@@ -155,6 +167,10 @@ def main():
   ):
     parser.error("--resume requires an online SuperMimic checkpoint")
   if saved:
+    if saved.get("sampler", {}).get("schema_version") != 2:
+      parser.error(
+        "Legacy reset scores are incompatible with this fix; start a new run. Old actors remain usable for evaluation."
+      )
     if args.evaluation_limit is None:
       args.evaluation_limit = saved["evaluation_limit"]
     elif args.evaluation_limit != saved["evaluation_limit"]:
@@ -204,6 +220,7 @@ def main():
           clips=config.clips,
           seed=config.seed,
           episode_length_s=config.episode_length_s,
+          relative_orientation=config.relative_orientation,
         ),
         device=args.device,
       )
@@ -263,7 +280,11 @@ def main():
       console.message(f"Evaluating policy at iteration {trainer.iteration:,}...")
       with simulator_output(sim_log, args.verbose_sim):
         report = evaluate_actor(
-          trainer.actor, args.manifest, config, args.device, args.evaluation_limit
+          trainer.actor,
+          args.manifest,
+          config,
+          args.device,
+          args.evaluation_limit,
         )
       report["iteration"] = trainer.iteration
       report["training_environment_steps"] = trainer.environment_steps

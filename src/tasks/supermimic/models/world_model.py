@@ -17,7 +17,7 @@ from ..mdp.state import (
   quat_to_rotvec,
   rotvec_to_quat,
 )
-from ..mdp.terminations import failure_terms
+from ..mdp.terminations import failure_terms, soft_termination
 from .kinematics import G1Kinematics
 
 GROUPS = (3, 3, 29, 3, 3, 29)
@@ -108,11 +108,21 @@ def normalized_state_error(prediction: Tensor, target: Tensor) -> Tensor:
 
 
 class WorldModel(nn.Module):
-  def __init__(self, metadata: dict, hidden_dims: tuple[int, ...] = (2048, 2048, 2048)):
+  def __init__(
+    self,
+    metadata: dict,
+    hidden_dims: tuple[int, ...] = (2048, 2048, 2048),
+    termination_mode: str = "learned",
+    relative_orientation: bool = False,
+  ):
     super().__init__()
     if not hidden_dims or any(width < 1 for width in hidden_dims):
       raise ValueError("Hidden widths must be positive")
     self.hidden_dims = tuple(hidden_dims)
+    if termination_mode not in ("learned", "analytic"):
+      raise ValueError("termination_mode must be learned or analytic")
+    self.termination_mode = termination_mode
+    self.relative_orientation = relative_orientation
     self.kinematics = G1Kinematics(metadata)
     widths = (130, *hidden_dims, 70)
     layers = []
@@ -150,6 +160,22 @@ class WorldModel(nn.Module):
     ) / self.input_std
     return integrate(state, self.dynamics(features) * self.correction_scale)
 
+  def termination(
+    self, next_state: Tensor, reference_next: dict[str, Tensor]
+  ) -> dict[str, Tensor]:
+    if self.termination_mode == "analytic":
+      probability = soft_termination(next_state, reference_next)
+      return {"termination_probability": probability}
+    errors = failure_terms(next_state, reference_next)
+    features = torch.stack(
+      (errors["height_error"] / 0.25, errors["tilt_error"] / 0.8), dim=-1
+    )
+    logits = self.termination_head(features).squeeze(-1)
+    return {
+      "termination_logit": logits,
+      "termination_probability": logits.sigmoid(),
+    }
+
   def task_heads(
     self,
     next_state: Tensor,
@@ -167,20 +193,18 @@ class WorldModel(nn.Module):
       previous_action,
       self.kinematics.joint_limits,
     )
-    errors = failure_terms(next_state, reference_next)
-    features = torch.stack(
-      (errors["height_error"] / 0.25, errors["tilt_error"] / 0.8), dim=-1
-    )
-    logits = self.termination_head(features).squeeze(-1)
     return {
       "next_state": next_state,
       "bodies": bodies,
       "reward": reward,
       "clean_observation": observe(
-        next_state, action, self.kinematics.default_q, context
+        next_state,
+        action,
+        self.kinematics.default_q,
+        context,
+        reference_next["body_quat_w"][..., 0, :] if self.relative_orientation else None,
       ),
-      "termination_logit": logits,
-      "termination_probability": logits.sigmoid(),
+      **self.termination(next_state, reference_next),
     }
 
   def predict(

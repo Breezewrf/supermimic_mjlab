@@ -13,21 +13,16 @@ from ..models.world_model import (
 
 
 def rollout(
-  model, batch: dict[str, Tensor], library, baseline_prior: float | None = None
+  model,
+  batch: dict[str, Tensor],
+  library,
+  baseline_prior: float | None = None,
+  *,
+  diagnostics: bool = True,
 ) -> dict[str, Tensor]:
   reference = library.get_frame(batch["motion_id"], batch["frame_id"] + 1)
   state = batch["state"][:, 0]
-  outputs = {
-    key: []
-    for key in (
-      "next_state",
-      "reward",
-      "clean_observation",
-      "termination_logit",
-      "termination_probability",
-      "body_pos_w",
-    )
-  }
+  outputs = {}
   for step in range(batch["mask"].shape[1]):
     action, context = batch["action"][:, step], batch["context"][:, step]
     next_state = (
@@ -36,22 +31,29 @@ def rollout(
     # Frozen valid poses are used after termination; padded zero quaternions are
     # never fed into the dynamics or kinematics networks.
     state = torch.where(batch["mask"][:, step, None], next_state, state)
-    predicted = model.task_heads(
-      state,
-      action,
-      context,
-      {key: value[:, step] for key, value in reference.items()},
-      batch["previous_action"][:, step],
-    )
-    for key, values in outputs.items():
-      value = predicted["bodies"][key] if key == "body_pos_w" else predicted[key]
+    reference_next = {key: value[:, step] for key, value in reference.items()}
+    if diagnostics:
+      predicted = model.task_heads(
+        state,
+        action,
+        context,
+        reference_next,
+        batch["previous_action"][:, step],
+      )
+      predicted["body_pos_w"] = predicted.pop("bodies")["body_pos_w"]
+    else:
+      predicted = {
+        "next_state": state,
+        **model.termination(state, reference_next),
+      }
+    for key, value in predicted.items():
       if baseline_prior is not None and key in (
         "termination_logit",
         "termination_probability",
       ):
         probability = value.new_full(value.shape, baseline_prior).clamp(1e-6, 1 - 1e-6)
         value = probability.logit() if key == "termination_logit" else probability
-      values.append(value)
+      outputs.setdefault(key, []).append(value)
   return {key: torch.stack(values, dim=1) for key, values in outputs.items()}
 
 
@@ -70,6 +72,21 @@ def world_model_loss(
     ).sum()
     / batch_size
   )
+  termination = state.new_zeros(())
+  if "termination_logit" in prediction:
+    termination = (
+      F.binary_cross_entropy_with_logits(
+        prediction["termination_logit"][mask],
+        batch["terminated"][mask].float(),
+        reduction="sum",
+      )
+      / batch_size
+    )
+  parts = {"state": state, "termination": termination}
+  if "clean_observation" not in prediction:
+    if analytic_losses:
+      raise ValueError("Full heads are required for analytic_losses=True")
+    return state + termination, parts
   observation_error = (
     prediction["clean_observation"][mask][:, :64]
     - batch["next_clean_observation"][mask][:, :64]
@@ -85,14 +102,6 @@ def world_model_loss(
   reward = (
     (prediction["reward"][mask] - batch["reward"][mask]) / 0.1
   ).square().sum() / batch_size
-  termination = (
-    F.binary_cross_entropy_with_logits(
-      prediction["termination_logit"][mask],
-      batch["terminated"][mask].float(),
-      reduction="sum",
-    )
-    / batch_size
-  )
   parts = {
     "state": state,
     "observation": observation,

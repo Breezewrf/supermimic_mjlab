@@ -1,4 +1,6 @@
-"""One-second-bin reset sampling with online discounted return estimates."""
+"""One-second-bin sampling, scored by length-normalized episode-start returns."""
+
+import math
 
 import torch
 from torch import Tensor
@@ -49,23 +51,65 @@ class ResetSampler:
     frame = self.bin_start[bins] + (fraction * self.bin_width[bins]).long()
     return self.bin_motion[bins], frame
 
-  def update_episode(self, motion_id: int, frames: Tensor, rewards: Tensor) -> None:
+  def update_episode(
+    self,
+    motion_id: int,
+    frames: Tensor,
+    rewards: Tensor,
+    *,
+    terminated: bool = True,
+  ) -> None:
+    """Convenience wrapper; collection uses the vectorized update_episodes path."""
     if frames.numel() == 0:
       return
     if len(frames) != len(rewards) or not torch.isfinite(rewards).all():
       raise ValueError("Invalid episode rewards")
     if ((frames < 0) | (frames >= self.lengths[motion_id] - 1)).any():
       raise ValueError("Episode frame out of range")
-    returns = torch.empty_like(rewards)
-    value = rewards.new_zeros(())
-    for index in range(len(rewards) - 1, -1, -1):
-      value = rewards[index] + self.gamma * value
-      returns[index] = value
-    bins = self.bin_offsets[motion_id] + frames // 50
-    unique, inverse = bins.unique(return_inverse=True)
-    sums = torch.zeros(len(unique), device=self.device).scatter_add_(
-      0, inverse, returns
+    discount = self.gamma ** torch.arange(len(rewards), device=self.device)
+    self.update_episodes(
+      torch.tensor([motion_id], device=self.device),
+      frames[:1],
+      (rewards * discount).sum().reshape(1),
+      rewards.sum().reshape(1),
+      torch.tensor([len(rewards)], device=self.device),
+      torch.tensor([terminated], device=self.device),
     )
+
+  @torch.no_grad()
+  def update_episodes(
+    self,
+    motion: Tensor,
+    start_frame: Tensor,
+    discounted_return: Tensor,
+    reward_sum: Tensor,
+    steps: Tensor,
+    terminated: Tensor,
+  ) -> None:
+    """Aggregate finished episodes before applying one EMA update per start bin.
+
+    Normal cutoffs extrapolate the episode's mean reward over the remaining clip.
+    Failures get no tail. Both are normalized by the *possible* remaining length,
+    never by actual survival time, so early failures cannot earn a full score.
+    These values drive reset sampling only; they are not critic targets.
+    """
+    if not motion.numel():
+      return
+    remaining = self.lengths[motion] - 1 - start_frame
+    if ((steps <= 0) | (steps > remaining) | (start_frame < 0)).any():
+      raise ValueError("Invalid episode start or length")
+    # expm1 avoids cancellation for short tails and clips.
+    log_gamma = math.log(self.gamma)
+    tail_mass = -torch.expm1((remaining - steps).float() * log_gamma)
+    total_mass = -torch.expm1(remaining.float() * log_gamma)
+    tail = self.gamma**steps * (reward_sum / steps) * tail_mass / (1 - self.gamma)
+    value = discounted_return + torch.where(terminated, 0.0, tail)
+    scores = value / total_mass
+    if not torch.isfinite(scores).all():
+      raise ValueError("Nonfinite episode return")
+    bins = self.bin_offsets[motion] + start_frame // 50
+    unique, inverse = bins.unique(return_inverse=True)
+    sums = torch.zeros(len(unique), device=self.device).scatter_add_(0, inverse, scores)
     counts = torch.bincount(inverse, minlength=len(unique))
     self.returns[unique] = torch.lerp(self.returns[unique], sums / counts, self.ema)
     current = torch.softmax(-25 * self.returns / self.max_return, dim=0)
@@ -74,6 +118,7 @@ class ResetSampler:
 
   def state_dict(self) -> dict:
     return {
+      "schema_version": 2,
       "returns": self.returns.clone(),
       "historical": self.historical.clone(),
       "history_updates": self.history_updates,
@@ -81,6 +126,8 @@ class ResetSampler:
     }
 
   def load_state_dict(self, state: dict) -> None:
+    if state.get("schema_version") != 2:
+      raise ValueError("Legacy reset scores are incompatible; start a new training run")
     for key in ("returns", "historical"):
       if state[key].shape != self.returns.shape:
         raise ValueError("Sampler checkpoint does not match library")
