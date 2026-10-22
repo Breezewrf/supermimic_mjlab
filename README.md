@@ -12,6 +12,13 @@ of motion, at a control rate of 50 Hz. Online training, checkpoint resume, and
 fixed-start simulator evaluation are implemented. Tracking quality must be assessed
 with complete motion evaluations.
 
+The robot uses the vendored [RoboJuDo-Plus G1 assets](src/assets/robots/g1/README.md),
+loading `g1_29dof_rev_1_0.xml` with collision meshes, shoulder cylinders, and four
+5 mm radius spheres per foot. Training retains the mjlab PD control setup and
+disables self-collisions while allowing full-body ground contacts. Motion conversion
+uses the same robot. Checkpoints from the previous mjlab asset have a different
+model fingerprint and require a new training run.
+
 ## Environment
 
 From the repository root, create the environment and install the project with uv:
@@ -124,6 +131,12 @@ python scripts/train_supermimic.py \
 Domain randomization, observation noise, and return-based reset sampling are enabled
 by default. All motions are used unless `--clips` is specified; for debugging, use
 `--clips walk1_subject1 run1_subject2`.
+
+Robot self-collisions are disabled while full-body ground contacts remain enabled.
+Training resets perturb the reference pose, root velocities and joint positions.
+Foot friction and torso CoM are sampled once at startup; encoder bias is resampled
+on each episode reset. Evaluation disables reset noise and domain randomization.
+See the [environment configuration](doc/supermimic_foundation_zh.md) for ranges.
 
 ### Paper single-GPU training scale
 

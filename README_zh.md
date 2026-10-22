@@ -9,6 +9,11 @@
 当前使用 G1 重定向的 LAFAN 数据集，共 40 段动作、约 2.45 小时，控制频率为 50 Hz。
 已实现在线训练、断点恢复和固定起点真实仿真评估；策略跟踪效果需通过完整动作评估确认。
 
+机器人使用本地复制的 [RoboJuDo-Plus G1 资源](src/assets/robots/g1/README.md)，
+加载 `g1_29dof_rev_1_0.xml`，碰撞体包含网格、肩部圆柱体及每脚 4 个半径 5 mm 的球体。
+训练沿用 mjlab 的 PD 控制配置，关闭自碰撞，保留全身触地；动作转换也使用同一模型。
+原 mjlab 模型的 checkpoint 与新模型指纹不匹配，需要重新开始训练。
+
 ## 运行环境
 
 在仓库根目录，使用 uv 自动创建环境并安装项目：
@@ -114,6 +119,9 @@ python scripts/train_supermimic.py \
 ```
 
 默认启用域随机化、观测噪声和按回报采样的重置。
+训练初态加入参考实现范围的位姿、速度和关节位置扰动；关闭自碰撞，保留全身与
+地面接触。摩擦与 torso CoM 在环境启动时采样并跨 episode 固定，编码器偏差逐
+episode 重采样；评估关闭这些扰动。范围与生命周期见[环境说明](doc/supermimic_foundation_zh.md)。
 不指定 `--clips` 时使用全部动作；调试时可指定 `--clips walk1_subject1 run1_subject2`。
 
 ### 论文单 GPU 训练规模
