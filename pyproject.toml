@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "supermimic_mjlab"
+description = "SuperMimic whole-body motion tracking with mjlab and MuJoCo Warp"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+# Keep the version and dependency pins in setup.py as the single source of truth.
+dynamic = ["version", "dependencies"]
+
+[project.optional-dependencies]
+logging = ["rich", "wandb"]
+
+[tool.setuptools.packages.find]
+include = ["src", "src.*"]

@@ -7,13 +7,13 @@
 
 ## 运行
 
-在仓库根目录使用项目 Python，安装步骤见[安装说明](setup_zh.md)。
+先按[安装说明](setup_zh.md)使用 uv 安装并激活环境，以下命令均在仓库根目录运行。
 世界模型训练入口会把实际运行版本写入配置和 checkpoint。
 
 先用两条动作完成短采集，默认关闭随机化：
 
 ```bash
-.venv/bin/python scripts/offline/collect_supermimic.py \
+python scripts/offline/collect_supermimic.py \
   --device cuda:0 --num-envs 4 --steps 128 \
   --clips walk1_subject1 run1_subject2 \
   --output outputs/supermimic/debug
@@ -27,7 +27,7 @@
 开启论文随机化、传感器噪声和回报采样：
 
 ```bash
-.venv/bin/python scripts/offline/collect_supermimic.py \
+python scripts/offline/collect_supermimic.py \
   --device cuda:0 --num-envs 4 --steps 1024 --training \
   --output outputs/supermimic/randomized
 ```
@@ -38,7 +38,7 @@
 运动学回放校验会逐帧写入参考状态，并检查真实模型的 link 位置与 NPZ 是否一致：
 
 ```bash
-.venv/bin/python scripts/offline/collect_supermimic.py \
+python scripts/offline/collect_supermimic.py \
   --mode replay --device cuda:0 --steps 50 \
   --output outputs/supermimic/replay_check
 ```
@@ -48,7 +48,7 @@
 固定起点评估，默认使用零动作控制器：
 
 ```bash
-.venv/bin/python scripts/evaluate_supermimic.py \
+python scripts/evaluate_supermimic.py \
   --device cuda:0 --clips walk1_subject1 run1_subject2 \
   --output outputs/supermimic/evaluation.json
 ```
@@ -162,19 +162,19 @@ starts = buffer.sample_starts(32, history_length=10)
 数据和数值测试：
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -p 'test_supermimic_foundation.py' -v
+python -m unittest discover -s tests -p 'test_supermimic_foundation.py' -v
 ```
 
 CUDA 集成测试（没有 CUDA 时明确跳过）：
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -p 'test_supermimic_integration.py' -v
+python -m unittest discover -s tests -p 'test_supermimic_integration.py' -v
 ```
 
 也可以用 CPU 执行同一套真实 MJWarp 仿真测试：
 
 ```bash
-SUPERMIMIC_TEST_DEVICE=cpu .venv/bin/python -m unittest discover -s tests -v
+SUPERMIMIC_TEST_DEVICE=cpu python -m unittest discover -s tests -v
 ```
 
 测试涵盖全部 40 条动作、名字映射、未来窗口、观测噪声和梯度、回放覆盖与 padding、

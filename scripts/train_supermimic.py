@@ -2,6 +2,7 @@
 
 import argparse
 import importlib.metadata
+import importlib.util
 import json
 import sys
 import traceback
@@ -20,6 +21,12 @@ from src.tasks.supermimic.rl.online_training import (
   OnlineTrainer,
   restore_rng,
   rng_state,
+)
+from src.tasks.supermimic.rl.training_logger import (
+  ConsoleReporter,
+  MetricWindow,
+  WandbReporter,
+  simulator_output,
 )
 
 
@@ -73,6 +80,26 @@ def main():
   parser.add_argument("--eval-interval", type=int, default=100)
   parser.add_argument("--checkpoint-interval", type=int, default=100)
   parser.add_argument("--log-interval", type=int, default=10)
+  parser.add_argument("--log-format", choices=("table", "json"), default="table")
+  parser.add_argument(
+    "--verbose-sim",
+    action="store_true",
+    help="Show simulator initialization and kernel output in the terminal",
+  )
+  parser.add_argument(
+    "--wandb",
+    action="store_true",
+    help="Track metrics and evaluation charts with Weights & Biases",
+  )
+  parser.add_argument(
+    "--wandb-project",
+    help="W&B project; default: supermimic, or the saved project on resume",
+  )
+  parser.add_argument("--wandb-entity", help="W&B user or team")
+  parser.add_argument(
+    "--wandb-name", help="W&B run name; default: output directory name"
+  )
+  parser.add_argument("--wandb-mode", choices=("online", "offline"), default="online")
   parser.add_argument(
     "--evaluation-limit",
     type=int,
@@ -101,6 +128,10 @@ def main():
     parser.add_argument("--" + name.replace("_", "-"), type=int, nargs="+")
   parser.add_argument("--clips", nargs="+")
   args = parser.parse_args()
+  if args.wandb and importlib.util.find_spec("wandb") is None:
+    parser.error(
+      "W&B is optional. Install logging support with: uv sync --extra logging"
+    )
   if min(
     args.iterations,
     args.eval_interval,
@@ -156,44 +187,65 @@ def main():
       parser.error("Resume into the checkpoint's existing output directory")
   elif output.exists():
     parser.error("Output exists; choose a new directory or use --resume")
-  from src.tasks.supermimic.env import SuperMimicEnv
-
-  env = SuperMimicEnv(
-    FoundationConfig.training(
-      manifest=args.manifest,
-      num_envs=config.num_envs,
-      clips=config.clips,
-      seed=config.seed,
-      episode_length_s=config.episode_length_s,
-    ),
-    device=args.device,
-  )
-  trainer = None
+  output.mkdir(parents=True, exist_ok=bool(saved))
+  console = ConsoleReporter(args.iterations, args.log_format)
+  console.message(f"Initializing simulation; details: {output / 'simulator.log'}")
+  sim_log = (output / "simulator.log").open("a", buffering=1)
+  env = trainer = tracking = None
+  completed = False
   try:
-    trainer = OnlineTrainer(env, robot_metadata(), config)
-    if saved:
-      trainer.load_state_dict(saved)
-    else:
-      trainer.bootstrap()
-    output.mkdir(parents=True, exist_ok=bool(saved))
+    with simulator_output(sim_log, args.verbose_sim):
+      from src.tasks.supermimic.env import SuperMimicEnv
+
+      env = SuperMimicEnv(
+        FoundationConfig.training(
+          manifest=args.manifest,
+          num_envs=config.num_envs,
+          clips=config.clips,
+          seed=config.seed,
+          episode_length_s=config.episode_length_s,
+        ),
+        device=args.device,
+      )
+      trainer = OnlineTrainer(env, robot_metadata(), config)
+      if saved:
+        trainer.load_state_dict(saved)
+      else:
+        trainer.bootstrap()
     runtime = {
       name: importlib.metadata.version(name)
       for name in ("torch", "mujoco", "mujoco-warp", "warp-lang")
     }
-    write_json(
-      output / "config.json",
-      {
-        "config": asdict(config),
-        "device": args.device,
-        "manifest": str(args.manifest.resolve()),
-        "manifest_sha256": manifest_hash,
-        "runtime": runtime,
-        "robot_signature": trainer.metadata["signature"],
-        "simulation": trainer.simulation_parameters,
-        "evaluation_limit": args.evaluation_limit,
-        "resume": str(args.resume) if args.resume else None,
-      },
+    run_config = {
+      "config": asdict(config),
+      "device": args.device,
+      "manifest": str(args.manifest.resolve()),
+      "manifest_sha256": manifest_hash,
+      "runtime": runtime,
+      "robot_signature": trainer.metadata["signature"],
+      "simulation": trainer.simulation_parameters,
+      "evaluation_limit": args.evaluation_limit,
+      "resume": str(args.resume) if args.resume else None,
+    }
+    write_json(output / "config.json", run_config)
+    console.start(
+      asdict(config), args.device, len(env.library), output, trainer.iteration
     )
+    if args.wandb:
+      state = rng_state()
+      try:
+        tracking = WandbReporter(
+          output,
+          run_config,
+          trainer.iteration,
+          project=args.wandb_project,
+          entity=args.wandb_entity,
+          name=args.wandb_name,
+          mode=args.wandb_mode,
+          console=console,
+        )
+      finally:
+        restore_rng(state)
     best_return = saved["best_return"] if saved else -float("inf")
 
     def checkpoint():
@@ -203,13 +255,16 @@ def main():
         "runtime": runtime,
         "best_return": best_return,
         "evaluation_limit": args.evaluation_limit,
+        "wandb_run": dict(tracking.state) if tracking else None,
       }
 
     def validate():
       nonlocal best_return
-      report = evaluate_actor(
-        trainer.actor, args.manifest, config, args.device, args.evaluation_limit
-      )
+      console.message(f"Evaluating policy at iteration {trainer.iteration:,}...")
+      with simulator_output(sim_log, args.verbose_sim):
+        report = evaluate_actor(
+          trainer.actor, args.manifest, config, args.device, args.evaluation_limit
+        )
       report["iteration"] = trainer.iteration
       report["training_environment_steps"] = trainer.environment_steps
       report["evaluation_limit"] = args.evaluation_limit
@@ -218,17 +273,9 @@ def main():
       if report["normalized_return"] > best_return:
         best_return = report["normalized_return"]
         save_checkpoint(output / "best.pt", checkpoint())
-      print(
-        json.dumps(
-          {
-            "iteration": trainer.iteration,
-            "evaluation_return": report["normalized_return"],
-            "successes": report["successes"],
-            "motions": len(report["motions"]),
-          }
-        ),
-        flush=True,
-      )
+      console.evaluation(report)
+      if tracking:
+        tracking.evaluation(report)
 
     log_path = output / "metrics.jsonl"
     if saved and log_path.exists():
@@ -247,16 +294,25 @@ def main():
       save_checkpoint(output / "last.pt", checkpoint())
     if args.device.startswith("cuda"):
       torch.cuda.reset_peak_memory_stats(args.device)
+    window = MetricWindow()
     with log_path.open("a") as log:
       while trainer.iteration < args.iterations:
-        record = trainer.train_iteration()
+        with simulator_output(sim_log, args.verbose_sim):
+          record = trainer.train_iteration()
         log.write(json.dumps(record, allow_nan=False) + "\n")
         log.flush()
+        window.add(record)
+        if tracking:
+          tracking.training(record)
         if (
           trainer.iteration % args.log_interval == 0
           or trainer.iteration == args.iterations
         ):
-          print(json.dumps(record, allow_nan=False), flush=True)
+          summary = window.summary()
+          console.training(record if args.log_format == "json" else summary)
+          if tracking:
+            tracking.window(summary)
+          window = MetricWindow()
         if (
           trainer.iteration % args.eval_interval == 0
           or trainer.iteration == args.iterations
@@ -270,6 +326,10 @@ def main():
           save_checkpoint(output / "last.pt", snapshot)
           if trainer.iteration % args.checkpoint_interval == 0:
             save_checkpoint(output / f"iteration_{trainer.iteration:06d}.pt", snapshot)
+          console.message(
+            f"Checkpoint saved at iteration {trainer.iteration:,}: {output / 'last.pt'}"
+          )
+    completed = True
   except Exception as error:
     if output.exists():
       write_json(
@@ -283,7 +343,15 @@ def main():
       )
     raise
   finally:
-    env.close()
+    try:
+      if tracking:
+        tracking.close(exit_code=0 if completed else 1)
+    finally:
+      try:
+        if env is not None:
+          env.close()
+      finally:
+        sim_log.close()
 
 
 if __name__ == "__main__":

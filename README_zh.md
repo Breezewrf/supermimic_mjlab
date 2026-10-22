@@ -11,13 +11,23 @@
 
 ## 运行环境
 
-以下命令均在仓库根目录使用已配置的 `.venv/bin/python`，Python 版本为 3.11。
-核心依赖为支持 CUDA 的 PyTorch、mjlab、MuJoCo、MuJoCo Warp 和 Warp，依赖声明见
-[setup.py](setup.py)。环境创建步骤见[安装说明](doc/setup_zh.md)。
+在仓库根目录，使用 uv 自动创建环境并安装项目：
+
+```bash
+uv sync
+source .venv/bin/activate
+```
+
+`uv sync` 按 `.python-version` 使用 Python 3.11，并以 editable 模式安装项目；
+`uv.lock` 记录解析后的依赖版本。每次打开新终端后先激活环境，
+下文统一使用该环境中的 `python` 和 `wandb`。
+核心依赖包括支持 CUDA 的 PyTorch、mjlab、MuJoCo、MuJoCo Warp 和 Warp，
+版本声明保留在 [setup.py](setup.py)，由 [pyproject.toml](pyproject.toml) 引用；
+完整步骤见[安装说明](doc/setup_zh.md)。
 检查当前 Python 是否能使用 GPU：
 
 ```bash
-.venv/bin/python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
 ```
 
 ## 代码结构
@@ -45,6 +55,7 @@ src/tasks/supermimic/
 ├── rl/
 │   ├── imagination.py        # BPTT、软生存权重、GAE 与 Critic 损失
 │   ├── online_training.py    # 采集、世界模型拟合、Actor–Critic 更新
+│   ├── training_logger.py    # 终端表格和 W&B 日志
 │   ├── world_model_training.py # 独立世界模型训练与验证
 │   └── evaluation.py         # 固定起点完整动作评估
 ├── env.py                    # SuperMimicEnv：真实仿真接口
@@ -81,7 +92,7 @@ from src.tasks.supermimic.rl.online_training import OnlineTrainer
 尚未转换时运行：
 
 ```bash
-.venv/bin/python scripts/data/convert_lafan_to_npz.py \
+python scripts/data/convert_lafan_to_npz.py \
   --input-dir src/assets/motions/LAFAN1_Retargeting_Dataset \
   --output-dir src/assets/motions/g1/lafan1_npz \
   --input-fps 30 --output-fps 50
@@ -97,7 +108,7 @@ from src.tasks.supermimic.rl.online_training import OnlineTrainer
 使用默认网络、64 个环境、每轮 10×256 条世界模型窗口和 64 条想象轨迹：
 
 ```bash
-.venv/bin/python scripts/train_supermimic.py \
+python scripts/train_supermimic.py \
   --device cuda:0 --iterations 1000 \
   --output outputs/supermimic/online_training
 ```
@@ -113,7 +124,7 @@ from src.tasks.supermimic.rl.online_training import OnlineTrainer
 从头联合训练世界模型、Actor 和 Critic，无需先运行独立世界模型预训练。
 
 ```bash
-.venv/bin/python scripts/train_supermimic.py \
+python scripts/train_supermimic.py \
   --device cuda:0 \
   --num-envs 4096 --capacity 1000 \
   --collect-steps 5 --updates-per-collect 2 \
@@ -144,7 +155,7 @@ from src.tasks.supermimic.rl.online_training import OnlineTrainer
 恢复时从 checkpoint 读取原有网络与 batch 参数；`--iterations` 是包含已完成轮数的总轮数：
 
 ```bash
-.venv/bin/python scripts/train_supermimic.py \
+python scripts/train_supermimic.py \
   --device cuda:0 --resume outputs/supermimic/online_training/last.pt \
   --iterations 5000
 ```
@@ -155,17 +166,69 @@ from src.tasks.supermimic.rl.online_training import OnlineTrainer
 | --- | --- |
 | `config.json` | 训练配置、实际运行版本和数据/机器人签名 |
 | `metrics.jsonl` | 采集、世界模型、Actor、Critic 与耗时指标 |
+| `simulator.log` | 仿真器初始化和 kernel 输出 |
+| `wandb_run.json`、`wandb/` | 可选 W&B run 标识与本地日志 |
 | `last.pt` | 最新网络、优化器、Replay、采样器和 RNG 状态 |
 | `best.pt` | 固定起点真实仿真评估回报最高的 checkpoint |
 | `iteration_*.pt` | 定期保存的训练断点 |
 | `evaluation*.json` | 各动作回报、成功数与失败原因 |
+
+## 训练日志与 W&B
+
+终端默认使用紧凑表格，不再打印完整字典。表格按两次输出之间的区间统计：`Fail%`
+为每条真实采集转移对应的物理失败事件频率，`Steps/s` 包含采集和优化时间，`GPU`
+为 PyTorch 分配器记录的显存峰值（GiB）。初始化表格、kernel 信息和重复 seed 输出
+写入 `simulator.log`，异常回溯仍在 stderr 显示。
+
+可用 `--log-interval 50` 降低输出频率，`--verbose-sim` 显示仿真器详细输出，
+`--log-format json` 恢复原终端 JSON 格式。`metrics.jsonl` 始终逐轮保存原始指标。
+安装了 `rich` 时使用格式化表格，否则使用普通文本。
+
+启用可选的 W&B 和 Rich 依赖，再登录一次：
+
+```bash
+uv sync --extra logging
+wandb login
+```
+
+为新训练启用 W&B：
+
+```bash
+python scripts/train_supermimic.py \
+  --device cuda:0 --iterations 1000 \
+  --wandb --wandb-project supermimic --wandb-name g1-lafan \
+  --output outputs/supermimic/online_wandb
+```
+
+论文规模命令也可直接追加相同的 W&B 参数。团队项目可指定
+`--wandb-entity YOUR_TEAM`。终端会显示 run 链接，W&B 按 `world_model/`、`policy/`、
+`critic/`、`collection/`、`gradients/`、`performance/`、`evaluation/` 分组绘图，
+横轴为训练轮数。评估包括归一化回报、成功率、完成比例、跟踪误差，以及逐动作柱状图
+和表格。采集指标只在实际采集的轮次记录，不重复计算沿用值。模型断点和 Replay
+保存在本地输出目录。SDK 接口见 [W&B Run 文档](https://docs.wandb.ai/ref/python/experiments/run/)。
+
+无网络服务器可先离线记录，之后同步：
+
+```bash
+python scripts/train_supermimic.py \
+  --device cuda:0 --iterations 1000 \
+  --wandb --wandb-mode offline \
+  --output outputs/supermimic/online_offline
+
+wandb sync outputs/supermimic/online_offline/wandb/offline-run-*
+```
+
+续训时再次传入 `--wandb`。`wandb_run.json` 保存 run 标识和最后记录的轮数；在线
+续训且未回退到更早断点时沿用同一 run。离线续训或断点回退会创建新的 run 分段，
+通过 `parent_run_id` 关联，保留原有曲线。日志参数可以在续训时调整，模型和训练规模
+参数仍须与断点一致。已经启动的训练进程需要从已保存断点重启后才会使用新的日志代码。
 
 ## 策略评估
 
 加载在线 checkpoint，从每段动作首帧进行真实物理仿真，关闭域随机化和观测噪声：
 
 ```bash
-.venv/bin/python scripts/evaluate_supermimic.py \
+python scripts/evaluate_supermimic.py \
   --device cuda:0 --checkpoint outputs/supermimic/online_training/best.pt \
   --output outputs/supermimic/online_policy_evaluation.json
 ```
@@ -178,7 +241,7 @@ from src.tasks.supermimic.rl.online_training import OnlineTrainer
 
 ```bash
 SUPERMIMIC_TEST_DEVICE=cuda:0 \
-  .venv/bin/python -m unittest discover -s tests -v
+python -m unittest discover -s tests -v
 ```
 
 测试覆盖数据转换、动作库、Replay 边界、真实仿真、可微运动学、BPTT、损失归约、

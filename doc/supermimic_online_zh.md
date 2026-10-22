@@ -7,10 +7,11 @@ Actor 和 Critic。默认从头初始化三个网络，不加载独立预训练�
 
 ## 运行
 
-在仓库根目录运行，以下命令使用缩小 batch 配置：
+先按[安装说明](setup_zh.md)使用 uv 安装并激活环境。以下命令在仓库根目录运行，
+使用缩小 batch 配置：
 
 ```bash
-.venv/bin/python scripts/train_supermimic.py \
+python scripts/train_supermimic.py \
   --device cuda:0 --iterations 1000 \
   --output outputs/supermimic/online_training
 ```
@@ -40,7 +41,7 @@ Actor 和 Critic。默认从头初始化三个网络，不加载独立预训练�
 快速检查可用较小的网络和单段动作：
 
 ```bash
-.venv/bin/python scripts/train_supermimic.py \
+python scripts/train_supermimic.py \
   --device cuda:0 --iterations 5 --num-envs 4 --warmup-steps 16 \
   --world-dims 64 64 --actor-dims 64 64 --critic-dims 64 32 \
   --wm-batches 1 --wm-batch-size 16 --policy-batch-size 4 \
@@ -114,7 +115,7 @@ manifest、动作名称和机器人模型签名。
 拒绝。`--iterations` 是包含已经完成轮数的总轮数：
 
 ```bash
-.venv/bin/python scripts/train_supermimic.py \
+python scripts/train_supermimic.py \
   --device cuda:0 --resume outputs/supermimic/online_training/last.pt \
   --iterations 5000 --output outputs/supermimic/online_training
 ```
@@ -127,7 +128,7 @@ manifest、动作名称和机器人模型签名。
 直接加载在线 checkpoint 进行真实仿真评估：
 
 ```bash
-.venv/bin/python scripts/evaluate_supermimic.py \
+python scripts/evaluate_supermimic.py \
   --device cuda:0 --checkpoint outputs/supermimic/online_training/best.pt \
   --output outputs/supermimic/online_policy_evaluation.json
 ```
@@ -147,11 +148,21 @@ MuJoCo Warp 和驱动的其他分配。
 的 CUDA/CPU stream 错误，可加 `--detect-anomaly`，并在命令环境设置
 `TORCH_SHOW_CPP_STACKTRACES=1` 定位。重跑未复现不等于确认已修复。
 
+## 终端与 W&B 日志
+
+终端默认以表格显示区间平均指标，仿真器详细输出写入 `simulator.log`。
+每轮原始 JSON 仍写入 `metrics.jsonl`。用 `--log-format json` 或 `--verbose-sim`
+可切换输出方式。
+
+追加 `--wandb --wandb-project supermimic --wandb-name RUN_NAME` 启用 W&B；
+服务器离线时再加 `--wandb-mode offline`。安装、登录、分组曲线、逐动作评估图表和
+续训行为见 [README](../README_zh.md#训练日志与-wb)。
+
 ## 验证
 
 ```bash
 SUPERMIMIC_TEST_DEVICE=cuda:0 \
-  .venv/bin/python -m unittest discover -s tests -v
+python -m unittest discover -s tests -v
 ```
 
 无 GPU 时可将 `SUPERMIMIC_TEST_DEVICE` 改为 `cpu`。新增测试覆盖参考坐标和

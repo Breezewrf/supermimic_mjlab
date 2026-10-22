@@ -8,10 +8,12 @@
 
 ## 直接运行
 
+先按[安装说明](setup_zh.md)使用 uv 安装并激活环境。
+
 先在仓库根目录采集数据；输出目录必须尚不存在：
 
 ```bash
-.venv/bin/python scripts/offline/collect_supermimic.py \
+python scripts/offline/collect_supermimic.py \
   --device cuda:0 --num-envs 32 --steps 1000 --capacity 1000 \
   --training --output outputs/supermimic/world_model_data
 ```
@@ -21,7 +23,7 @@
 采集完成后，用生成的快照训练世界模型：
 
 ```bash
-.venv/bin/python scripts/offline/train_world_model.py \
+python scripts/offline/train_world_model.py \
   --replay outputs/supermimic/world_model_data/replay.pt \
   --device cuda:0 --steps 5000 --batch-size 256 \
   --output outputs/supermimic/world_model_cuda
@@ -30,12 +32,12 @@
 也可以只采集少量动作进行快速检查：
 
 ```bash
-.venv/bin/python scripts/offline/collect_supermimic.py \
+python scripts/offline/collect_supermimic.py \
   --device cuda:0 --num-envs 4 --steps 128 \
   --clips walk1_subject1 run1_subject2 \
   --output outputs/supermimic/world_model_smoke_data
 
-.venv/bin/python scripts/offline/train_world_model.py \
+python scripts/offline/train_world_model.py \
   --replay outputs/supermimic/world_model_smoke_data/replay.pt \
   --smoke --device cuda:0 --hidden-dims 64 64 64 \
   --steps 20 --batch-size 16 --validation-windows 16 \
@@ -141,7 +143,7 @@ checkpoint 包含模型、优化器、归一化、机器人运动学元数据、
 独立评估会恢复原来的验证窗口，并写入一个新目录：
 
 ```bash
-.venv/bin/python scripts/offline/train_world_model.py --mode evaluate \
+python scripts/offline/train_world_model.py --mode evaluate \
   --replay outputs/supermimic/world_model_data/replay.pt \
   --checkpoint outputs/supermimic/world_model_cuda/best.pt \
   --device cuda:0 --output outputs/supermimic/world_model_cuda_eval
@@ -151,7 +153,7 @@ checkpoint 包含模型、优化器、归一化、机器人运动学元数据、
 总更新次数；默认 batch size 为 256：
 
 ```bash
-.venv/bin/python scripts/offline/train_world_model.py \
+python scripts/offline/train_world_model.py \
   --replay outputs/supermimic/world_model_data/replay.pt \
   --resume outputs/supermimic/world_model_cuda/last.pt \
   --device cuda:0 --steps 10000 --batch-size 256 \
@@ -179,7 +181,7 @@ model = model.to("cuda:0").eval()
 ## 验证
 
 ```bash
-SUPERMIMIC_TEST_DEVICE=cpu .venv/bin/python -m unittest discover -s tests -v
+SUPERMIMIC_TEST_DEVICE=cpu python -m unittest discover -s tests -v
 ```
 
 GPU 环境可使用 `SUPERMIMIC_TEST_DEVICE=cuda:0`。世界模型的数据划分、训练和续训

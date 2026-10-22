@@ -1,6 +1,7 @@
 """Feature, BPTT, boundary, optimizer-isolation and real online-loop tests."""
 
 import copy
+import importlib.util
 import json
 import os
 import subprocess
@@ -518,11 +519,19 @@ class OnlineCliTests(unittest.TestCase):
         "2",
         "--output",
         str(output),
+        "--log-interval",
+        "1",
       ]
+      has_wandb = importlib.util.find_spec("wandb") is not None
+      if has_wandb:
+        common += ["--wandb", "--wandb-mode", "offline"]
       env = os.environ | {
         "MPLCONFIGDIR": str(Path(folder) / "matplotlib"),
         "XDG_CACHE_HOME": str(Path(folder) / "cache"),
+        "WANDB_CONFIG_DIR": str(Path(folder) / "wandb-config"),
+        "WANDB_CACHE_DIR": str(Path(folder) / "wandb-cache"),
       }
+      previous_id = None
       for iteration in (1, 2):
         command = common + ["--iterations", str(iteration)]
         if iteration == 2:
@@ -537,6 +546,19 @@ class OnlineCliTests(unittest.TestCase):
           check=False,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("WM loss", result.stdout)
+        self.assertNotIn('"actor_objective":', result.stdout)
+        if has_wandb:
+          tracking = json.loads((output / "wandb_run.json").read_text())
+          self.assertEqual(tracking["last_iteration"], iteration)
+          self.assertEqual(tracking["mode"], "offline")
+          self.assertNotEqual(tracking["id"], previous_id)
+          previous_id = tracking["id"]
+      self.assertIn("Base Environment", (output / "simulator.log").read_text())
+      if has_wandb:
+        self.assertEqual(
+          len(list((output / "wandb").glob("offline-run-*/run-*.wandb"))), 2
+        )
       checkpoint = torch.load(output / "last.pt", map_location="cpu", weights_only=True)
       self.assertEqual(checkpoint["iteration"], 2)
       self.assertEqual(checkpoint["world_updates"], 2)

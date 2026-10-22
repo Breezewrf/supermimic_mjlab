@@ -2,22 +2,34 @@
 
 [English](setup_en.md) | [项目说明](../README_zh.md)
 
-使用 Python 3.11，在仓库根目录执行以下命令。GPU 训练需要 NVIDIA GPU、兼容的
-驱动和支持 CUDA 的 PyTorch。
+在仓库根目录执行以下命令，推荐使用 `uv sync` 自动创建环境并安装项目。
+GPU 训练需要 NVIDIA GPU、兼容的驱动和支持 CUDA 的 PyTorch。
 
-## 创建环境
+## 使用 uv 快速启动
 
 ```bash
-python3.11 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -e .
+uv sync
+source .venv/bin/activate
 ```
 
-依赖版本由 [setup.py](../setup.py) 定义；安装使用其中已有的版本锁定，不另设一组
-依赖版本。若已有配置好的环境，可只注册项目而不改动依赖：
+`uv sync` 读取 [pyproject.toml](../pyproject.toml)，按 `.python-version` 选择
+Python 3.11，并以 editable 模式安装项目。`uv.lock` 锁定解析后的依赖；
+需要严格使用已提交的锁文件时执行 `uv sync --locked`。无需单独创建环境或执行 editable 安装。
+
+需要 W&B 和 Rich 日志功能时执行：
 
 ```bash
-.venv/bin/python -m pip install --no-deps -e .
+uv sync --extra logging
+```
+
+每次打开新终端后，先执行 `source .venv/bin/activate`。后续命令统一使用
+该环境中的 `python` 和 `wandb`。
+
+项目版本和直接依赖锁定保留在 [setup.py](../setup.py)，由 pyproject.toml 的动态
+元数据直接读取，避免重复声明。同步安装使用 uv.lock 中解析后的依赖集合。若已有配置好的环境，可只注册项目而不改动依赖：
+
+```bash
+uv pip install --no-deps -e .
 ```
 
 发行包名为 `supermimic_mjlab`，Python 导入路径为 `src.tasks.supermimic`。
@@ -26,7 +38,7 @@ python3.11 -m venv .venv
 ## 验证环境
 
 ```bash
-.venv/bin/python - <<'PYTHON'
+python - <<'PYTHON'
 from importlib.metadata import version
 import torch
 

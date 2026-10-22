@@ -1,6 +1,6 @@
 # LAFAN G1 CSV 转 NPZ
 
-在安装了项目依赖（NumPy、MuJoCo、mjlab）的 Python 环境中，从仓库根目录运行：
+先按[安装说明](setup_zh.md)使用 uv 安装并激活环境，再从仓库根目录运行：
 
 ```bash
 python scripts/data/convert_lafan_to_npz.py

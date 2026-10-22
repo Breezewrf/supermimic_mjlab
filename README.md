@@ -14,14 +14,23 @@ with complete motion evaluations.
 
 ## Environment
 
-Run the commands below from the repository root using the configured Python 3.11
-environment at `.venv/bin/python`. Core dependencies include CUDA-enabled PyTorch,
-mjlab, MuJoCo, MuJoCo Warp, and Warp; dependency declarations are in [setup.py](setup.py).
-See the [installation guide](doc/setup_en.md) to create an environment.
+From the repository root, create the environment and install the project with uv:
+
+```bash
+uv sync
+source .venv/bin/activate
+```
+
+`uv sync` uses Python 3.11 from `.python-version` and installs the project in editable
+mode. `uv.lock` records resolved dependency versions. Activate the environment in
+each new terminal. All commands below use `python` and
+`wandb` from the activated environment. Core dependencies include CUDA-enabled
+PyTorch, mjlab, MuJoCo, MuJoCo Warp, and Warp; version declarations remain in
+[setup.py](setup.py), referenced by [pyproject.toml](pyproject.toml). See the [installation guide](doc/setup_en.md) for details.
 Check GPU availability in the selected Python environment:
 
 ```bash
-.venv/bin/python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
 ```
 
 ## Code structure
@@ -50,6 +59,7 @@ src/tasks/supermimic/
 ├── rl/
 │   ├── imagination.py        # BPTT, soft survival, GAE, Critic loss
 │   ├── online_training.py    # Collection, model fitting, Actor-Critic updates
+│   ├── training_logger.py    # Terminal tables and W&B tracking
 │   ├── world_model_training.py # Standalone model training and validation
 │   └── evaluation.py         # Fixed-start, full-clip simulator evaluation
 ├── env.py                    # SuperMimicEnv simulator interface
@@ -88,7 +98,7 @@ Raw CSV files are stored in `src/assets/motions/LAFAN1_Retargeting_Dataset/`.
 If they have not been converted, run:
 
 ```bash
-.venv/bin/python scripts/data/convert_lafan_to_npz.py \
+python scripts/data/convert_lafan_to_npz.py \
   --input-dir src/assets/motions/LAFAN1_Retargeting_Dataset \
   --output-dir src/assets/motions/g1/lafan1_npz \
   --input-fps 30 --output-fps 50
@@ -106,7 +116,7 @@ Use the default networks with 64 environments, 10 batches of 256 world-model win
 and 64 imagined trajectories per update:
 
 ```bash
-.venv/bin/python scripts/train_supermimic.py \
+python scripts/train_supermimic.py \
   --device cuda:0 --iterations 1000 \
   --output outputs/supermimic/online_training
 ```
@@ -124,7 +134,7 @@ and Critic jointly from scratch on all 40 LAFAN clips. No standalone world-model
 pretraining is required.
 
 ```bash
-.venv/bin/python scripts/train_supermimic.py \
+python scripts/train_supermimic.py \
   --device cuda:0 \
   --num-envs 4096 --capacity 1000 \
   --collect-steps 5 --updates-per-collect 2 \
@@ -160,7 +170,7 @@ Network and batch settings are restored from the checkpoint. `--iterations` spec
 the total number of iterations, including those already completed:
 
 ```bash
-.venv/bin/python scripts/train_supermimic.py \
+python scripts/train_supermimic.py \
   --device cuda:0 --resume outputs/supermimic/online_training/last.pt \
   --iterations 5000
 ```
@@ -171,10 +181,68 @@ New runs require a new output directory. Main outputs:
 | --- | --- |
 | `config.json` | Training settings, runtime versions, data and robot signatures |
 | `metrics.jsonl` | Collection, model, Actor, Critic, and timing metrics |
+| `simulator.log` | Simulator initialization and kernel output |
+| `wandb_run.json`, `wandb/` | Optional W&B run identity and local tracking data |
 | `last.pt` | Latest networks, optimizers, replay, sampler, and RNG states |
 | `best.pt` | Checkpoint with the highest fixed-start simulator evaluation return |
 | `iteration_*.pt` | Periodic training checkpoints |
 | `evaluation*.json` | Per-motion returns, success counts, and failure reasons |
+
+## Training logs and W&B
+
+The terminal shows a compact table instead of raw dictionaries. Values are averaged
+between reports; `Fail%` counts physical failure events per collected transition,
+`Steps/s` includes collection and optimization time, and `GPU` is the PyTorch peak
+allocation in GiB. Simulator initialization tables, kernel messages, and repeated
+seed messages are saved to `simulator.log`. Exceptions remain visible on stderr.
+
+Use `--log-interval 50` to print less often, `--verbose-sim` to show simulator
+messages, or `--log-format json` for the previous terminal JSON format.
+`metrics.jsonl` still stores every raw iteration, independently of terminal output.
+Rich formatting is used when `rich` is installed; plain text is available otherwise.
+
+Enable the optional W&B and Rich dependencies, then sign in once:
+
+```bash
+uv sync --extra logging
+wandb login
+```
+
+Enable it for a new run:
+
+```bash
+python scripts/train_supermimic.py \
+  --device cuda:0 --iterations 1000 \
+  --wandb --wandb-project supermimic --wandb-name g1-lafan \
+  --output outputs/supermimic/online_wandb
+```
+
+The same W&B flags can be appended to the paper-scale command. Optionally specify
+`--wandb-entity YOUR_TEAM`. The terminal prints the run URL. W&B groups metrics under
+`world_model/`, `policy/`, `critic/`, `collection/`, `gradients/`, `performance/`, and
+`evaluation/`, with iteration as the horizontal axis. Evaluation includes normalized
+return, success rate, completion, tracking errors, and per-motion bar charts and tables.
+Collection metrics are sent only on collection iterations, so carried-forward values
+are not counted twice. Model checkpoints and replay buffers stay in the output directory.
+See the [W&B Run reference](https://docs.wandb.ai/ref/python/experiments/run/) for the SDK interfaces.
+
+For a server without network access, record locally and sync later:
+
+```bash
+python scripts/train_supermimic.py \
+  --device cuda:0 --iterations 1000 \
+  --wandb --wandb-mode offline \
+  --output outputs/supermimic/online_offline
+
+wandb sync outputs/supermimic/online_offline/wandb/offline-run-*
+```
+
+When resuming training, pass `--wandb` again. `wandb_run.json` stores the run identity
+and last logged iteration. Online runs continue with the saved ID when no checkpoint
+rollback occurred. Offline resumes and rollbacks start a new run segment linked through
+`parent_run_id`, keeping earlier curves intact. Logging flags can change on resume;
+model and workload settings must still match the checkpoint. An already running process
+uses its original logging code until it is restarted from a saved checkpoint.
 
 ## Policy evaluation
 
@@ -182,7 +250,7 @@ Load an online checkpoint and simulate each motion from its first frame, with do
 randomization and observation noise disabled:
 
 ```bash
-.venv/bin/python scripts/evaluate_supermimic.py \
+python scripts/evaluate_supermimic.py \
   --device cuda:0 --checkpoint outputs/supermimic/online_training/best.pt \
   --output outputs/supermimic/online_policy_evaluation.json
 ```
@@ -197,7 +265,7 @@ evaluation report to determine whether training has improved tracking.
 
 ```bash
 SUPERMIMIC_TEST_DEVICE=cuda:0 \
-  .venv/bin/python -m unittest discover -s tests -v
+python -m unittest discover -s tests -v
 ```
 
 Tests cover conversion, motion loading, replay boundaries, simulation, differentiable

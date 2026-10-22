@@ -2,24 +2,39 @@
 
 [简体中文](setup_zh.md) | [Project README](../README.md)
 
-Use Python 3.11 and run these commands from the repository root. GPU training
+Run the commands below from the repository root. The recommended quick start
+uses `uv sync` to create the environment and install the project. GPU training
 requires an NVIDIA GPU, a compatible driver, and a CUDA-enabled PyTorch build.
 
-## Create an environment
+## Quick start with uv
 
 ```bash
-python3.11 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -e .
+uv sync
+source .venv/bin/activate
 ```
 
-Dependency versions are defined in [setup.py](../setup.py). Installation uses those
-existing version pins; this guide does not prescribe a separate set of versions.
+`uv sync` reads [pyproject.toml](../pyproject.toml), selects Python 3.11 via
+`.python-version`, and installs the local project in editable mode. `uv.lock` locks
+the resolved dependencies; use `uv sync --locked` to require the committed lockfile.
+There is no separate environment-creation or editable-install step.
+
+For W&B and Rich logging support:
+
+```bash
+uv sync --extra logging
+```
+
+Activate the environment with `source .venv/bin/activate` in each new terminal.
+All subsequent commands use `python` and `wandb` from that environment.
+
+The project version and direct dependency pins remain in [setup.py](../setup.py).
+The dynamic metadata in pyproject.toml reads them directly, avoiding duplicate
+version declarations. Synchronization uses uv.lock for the resolved dependency set.
 If dependencies are already installed in a prepared environment, register the local
 package without changing them:
 
 ```bash
-.venv/bin/python -m pip install --no-deps -e .
+uv pip install --no-deps -e .
 ```
 
 The package distribution is named `supermimic_mjlab`; Python imports use
@@ -29,7 +44,7 @@ mjlab package. No local Unitree SDK2 deployment simulator is required.
 ## Verify the environment
 
 ```bash
-.venv/bin/python - <<'PYTHON'
+python - <<'PYTHON'
 from importlib.metadata import version
 import torch
 
