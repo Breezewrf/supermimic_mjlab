@@ -7,16 +7,15 @@ Actor 和 Critic。默认从头初始化三个网络，不加载独立预训练�
 
 ## 运行
 
-在仓库根目录运行，使用当前 16 GiB GPU 的缩小 batch 配置：
+在仓库根目录运行，以下命令使用缩小 batch 配置：
 
 ```bash
-taskset -c 0-7,10-31 .venv/bin/python scripts/train_supermimic.py \
+.venv/bin/python scripts/train_supermimic.py \
   --device cuda:0 --iterations 1000 \
   --output outputs/supermimic/online_training
 ```
 
 不指定 `--clips` 时使用 manifest 中全部 40 段 LAFAN 动作。输出目录必须不存在。
-训练和推理命令按约定使用 `taskset -c 0-7,10-31`；普通检查无需指定 affinity。
 
 默认配置：
 
@@ -41,7 +40,7 @@ taskset -c 0-7,10-31 .venv/bin/python scripts/train_supermimic.py \
 快速检查可用较小的网络和单段动作：
 
 ```bash
-taskset -c 0-7,10-31 .venv/bin/python scripts/train_supermimic.py \
+.venv/bin/python scripts/train_supermimic.py \
   --device cuda:0 --iterations 5 --num-envs 4 --warmup-steps 16 \
   --world-dims 64 64 --actor-dims 64 64 --critic-dims 64 32 \
   --wm-batches 1 --wm-batch-size 16 --policy-batch-size 4 \
@@ -115,7 +114,7 @@ manifest、动作名称和机器人模型签名。
 拒绝。`--iterations` 是包含已经完成轮数的总轮数：
 
 ```bash
-taskset -c 0-7,10-31 .venv/bin/python scripts/train_supermimic.py \
+.venv/bin/python scripts/train_supermimic.py \
   --device cuda:0 --resume outputs/supermimic/online_training/last.pt \
   --iterations 5000 --output outputs/supermimic/online_training
 ```
@@ -128,7 +127,7 @@ taskset -c 0-7,10-31 .venv/bin/python scripts/train_supermimic.py \
 直接加载在线 checkpoint 进行真实仿真评估：
 
 ```bash
-taskset -c 0-7,10-31 .venv/bin/python scripts/evaluate_supermimic.py \
+.venv/bin/python scripts/evaluate_supermimic.py \
   --device cuda:0 --checkpoint outputs/supermimic/online_training/best.pt \
   --output outputs/supermimic/online_policy_evaluation.json
 ```
@@ -151,7 +150,6 @@ MuJoCo Warp 和驱动的其他分配。
 ## 验证
 
 ```bash
-taskset -c 0-7,10-31 env MPLCONFIGDIR=/tmp/supermimic-mpl XDG_CACHE_HOME=/tmp/supermimic-cache \
 SUPERMIMIC_TEST_DEVICE=cuda:0 \
   .venv/bin/python -m unittest discover -s tests -v
 ```
@@ -165,39 +163,4 @@ SUPERMIMIC_TEST_DEVICE=cuda:0 \
 100 轮短训练用于验收在线闭环和数值稳定性。完整动作跟踪能力仍需以更充分训练后
 的真实仿真结果判断，不能用想象回报上升代替真实策略性能。
 
-## 历史 GPU 验收结果
-
-以下 100 轮结果来自修正采集超时和损失时间归约之前的实现，保留用于记录当时的
-训练闭环与恢复验证；不代表修正后目标的重新训练结果。
-
-有效结果位于 `outputs/supermimic/online_gpu_validated/`。使用默认网络、64 个环境、
-8 步世界模型拟合和 32 步 BPTT，从头启动并完成 100 轮；执行会话中断后，实际从
-第 20 轮断点恢复，验证了 GPU 优化器、Replay、采样器与 RNG 的恢复路径。
-
-- 真实采集共 18,048 条转移，世界模型更新 1000 次、Actor 更新 100 次、Critic
-  更新 2000 次，逐轮指标均为有限值。
-- 完整 GPU 回归测试 46 项全部通过；包含碰撞容量保护、新策略采集、32 步梯度、
-  末端价值梯度、恢复和独立推理。
-- 平均每轮约 2.58 秒，PyTorch 分配器显存峰值约 1.43 GiB。
-- 有效训练和续训日志未出现碰撞缓冲区溢出或 CUDA/CPU stream 错误。
-- 第 100 轮 checkpoint 的独立 GPU 推理已对全部 40 段动作运行未限长评估，平均
-  归一化回报与训练内评估之差小于 `1e-7`。
-
-`verification.json` 汇总验收结果；目录内保留 `training_initial.log`、
-`training_resume.log`、`tests.log`、`inference.log` 和独立推理报告
-`inference_evaluation.json`，供复查。
-
-未限制长度的全部 40 段动作真实评估：
-
-| 更新轮数 | 平均归一化回报 | 完整动作成功数 |
-| --- | --- | --- |
-| 0 | 0.00179334 | 0/40 |
-| 50 | 0.00163616 | 0/40 |
-| 100 | 0.00168088 | 0/40 |
-
-这次短训尚未改善真实跟踪回报，也尚未学会完整动作，当前 `best.pt` 因此仍是
-初始化策略候选。验收证明训练闭环与恢复链路可以运行，不代表已复现论文的策略性能。
-后续延长训练时应继续检查真实回报、失败率和模型误差，不能仅根据想象回报判断。
-
-早期 `outputs/supermimic/online_gpu_check/` 曾出现碰撞容量溢出，已用
-`verification_status.json` 标记无效，不作为本次验收结果。
+历史短训结果单独保存在[实现验证记录](experiments/implementation_validation_zh.md)，不作为当前策略性能的验证结果。

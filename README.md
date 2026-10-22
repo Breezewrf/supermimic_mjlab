@@ -17,19 +17,17 @@ with complete motion evaluations.
 Run the commands below from the repository root using the configured Python 3.11
 environment at `.venv/bin/python`. Core dependencies include CUDA-enabled PyTorch,
 mjlab, MuJoCo, MuJoCo Warp, and Warp; dependency declarations are in [setup.py](setup.py).
+See the [installation guide](doc/setup_en.md) to create an environment.
 Check GPU availability in the selected Python environment:
 
 ```bash
 .venv/bin/python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
 ```
 
-Training and inference commands use `taskset -c 0-7,10-31`. The commands below place
-Matplotlib and other caches under `/tmp`.
-
 ## Code structure
 
-Task components follow the `config/`, `mdp/`, and `rl/` organization used by the other
-tasks, with separate packages for data and models:
+Task components are organized by responsibility, with separate packages for
+configuration, data, task functions, models, and training:
 
 ```text
 src/tasks/supermimic/
@@ -96,20 +94,19 @@ If they have not been converted, run:
   --input-fps 30 --output-fps 50
 ```
 
-This writes one NPZ per clip and a `manifest.json`. The current workspace already
-contains these converted files and can proceed directly to training. See the
+This writes one NPZ per clip and a `manifest.json`. Proceed to training after
+conversion; if these files already exist, this step can be skipped. See the
 [LAFAN conversion guide (Chinese)](doc/lafan_conversion_zh.md) for fields and coordinate conventions.
 
 ## Online training
 
-### Reduced workload for the current hardware
+### Reduced training workload
 
 Use the default networks with 64 environments, 10 batches of 256 world-model windows,
 and 64 imagined trajectories per update:
 
 ```bash
-taskset -c 0-7,10-31 env MPLCONFIGDIR=/tmp/supermimic-mpl XDG_CACHE_HOME=/tmp/supermimic-cache \
-  .venv/bin/python scripts/train_supermimic.py \
+.venv/bin/python scripts/train_supermimic.py \
   --device cuda:0 --iterations 1000 \
   --output outputs/supermimic/online_training
 ```
@@ -127,8 +124,7 @@ and Critic jointly from scratch on all 40 LAFAN clips. No standalone world-model
 pretraining is required.
 
 ```bash
-taskset -c 0-7,10-31 env MPLCONFIGDIR=/tmp/supermimic-mpl XDG_CACHE_HOME=/tmp/supermimic-cache \
-  .venv/bin/python scripts/train_supermimic.py \
+.venv/bin/python scripts/train_supermimic.py \
   --device cuda:0 \
   --num-envs 4096 --capacity 1000 \
   --collect-steps 5 --updates-per-collect 2 \
@@ -155,8 +151,8 @@ Matching training scale does not establish exact reproduction of every implement
 detail. Real collection uses a 10-second episode limit; imagination proceeds
 independently of that limit and retains value bootstrapping. World-model and Critic
 losses sum over valid time steps and average over windows or trajectories. The full
-workload has not been validated on the current 16 GiB GPU; memory use includes replay
-storage and the 32-step backward graph.
+workload requires substantially more memory than the reduced configuration, including
+replay storage and the 32-step backward graph.
 
 ### Resume training
 
@@ -164,8 +160,7 @@ Network and batch settings are restored from the checkpoint. `--iterations` spec
 the total number of iterations, including those already completed:
 
 ```bash
-taskset -c 0-7,10-31 env MPLCONFIGDIR=/tmp/supermimic-mpl XDG_CACHE_HOME=/tmp/supermimic-cache \
-  .venv/bin/python scripts/train_supermimic.py \
+.venv/bin/python scripts/train_supermimic.py \
   --device cuda:0 --resume outputs/supermimic/online_training/last.pt \
   --iterations 5000
 ```
@@ -187,8 +182,7 @@ Load an online checkpoint and simulate each motion from its first frame, with do
 randomization and observation noise disabled:
 
 ```bash
-taskset -c 0-7,10-31 env MPLCONFIGDIR=/tmp/supermimic-mpl XDG_CACHE_HOME=/tmp/supermimic-cache \
-  .venv/bin/python scripts/evaluate_supermimic.py \
+.venv/bin/python scripts/evaluate_supermimic.py \
   --device cuda:0 --checkpoint outputs/supermimic/online_training/best.pt \
   --output outputs/supermimic/online_policy_evaluation.json
 ```
@@ -202,8 +196,7 @@ evaluation report to determine whether training has improved tracking.
 ## Tests
 
 ```bash
-taskset -c 0-7,10-31 env MPLCONFIGDIR=/tmp/supermimic-mpl XDG_CACHE_HOME=/tmp/supermimic-cache \
-  SUPERMIMIC_TEST_DEVICE=cuda:0 \
+SUPERMIMIC_TEST_DEVICE=cuda:0 \
   .venv/bin/python -m unittest discover -s tests -v
 ```
 

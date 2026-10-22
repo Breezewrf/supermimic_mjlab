@@ -14,7 +14,6 @@ import torch
 
 from src.tasks.supermimic.config.rl_cfg import OnlineConfig
 from src.tasks.supermimic.config.task_cfg import (
-  DEFAULT_MANIFEST,
   TRACKED_BODIES,
   FoundationConfig,
 )
@@ -35,6 +34,7 @@ from src.tasks.supermimic.rl.imagination import (
 )
 from src.tasks.supermimic.rl.online_training import OnlineTrainer
 from src.tasks.supermimic.rl.world_model_training import world_model_loss
+from tests.supermimic_fixtures import make_motions
 
 ROOT = Path(__file__).resolve().parents[1]
 DEVICE = os.environ.get(
@@ -68,11 +68,14 @@ class ImaginationTests(unittest.TestCase):
   def setUpClass(cls):
     torch.set_num_threads(4)
     cls.metadata = robot_metadata()
+    folder = tempfile.TemporaryDirectory()
+    cls.addClassCleanup(folder.cleanup)
+    manifest, _ = make_motions(Path(folder.name), cls.metadata)
     cls.library = MotionLibrary(
-      DEFAULT_MANIFEST,
+      manifest,
       tuple(cls.metadata["joint_names"]),
       TRACKED_BODIES,
-      clips=("walk1_subject1",),
+      clips=("fixture_walk",),
     )
 
   def models(self):
@@ -377,8 +380,12 @@ class OnlineIntegrationTests(unittest.TestCase):
 
     torch.set_num_threads(4)
     cls.metadata = robot_metadata()
+    folder = tempfile.TemporaryDirectory()
+    cls.addClassCleanup(folder.cleanup)
+    manifest, _ = make_motions(Path(folder.name), cls.metadata)
     cls.env = SuperMimicEnv(
-      FoundationConfig.training(num_envs=2, clips=("walk1_subject1",)), device=DEVICE
+      FoundationConfig.training(manifest=manifest, num_envs=2, clips=("fixture_walk",)),
+      device=DEVICE,
     )
     cls.config = OnlineConfig(
       num_envs=2,
@@ -394,7 +401,7 @@ class OnlineIntegrationTests(unittest.TestCase):
       world_dims=(16,),
       actor_dims=(16,),
       critic_dims=(16,),
-      clips=("walk1_subject1",),
+      clips=("fixture_walk",),
     )
 
   @classmethod
@@ -471,9 +478,12 @@ class OnlineCliTests(unittest.TestCase):
   def test_cpu_train_resume_and_checkpoint_inference(self):
     with tempfile.TemporaryDirectory() as folder:
       output = Path(folder) / "training"
-      prefix = ["taskset", "-c", "0-7,10-31", sys.executable]
+      manifest, _ = make_motions(Path(folder) / "motions", robot_metadata())
+      prefix = [sys.executable]
       common = prefix + [
         "scripts/train_supermimic.py",
+        "--manifest",
+        str(manifest),
         "--device",
         "cpu",
         "--num-envs",
@@ -503,15 +513,15 @@ class OnlineCliTests(unittest.TestCase):
         "--critic-minibatches",
         "1",
         "--clips",
-        "walk1_subject1",
+        "fixture_walk",
         "--evaluation-limit",
         "2",
         "--output",
         str(output),
       ]
       env = os.environ | {
-        "MPLCONFIGDIR": "/tmp/supermimic-mpl",
-        "XDG_CACHE_HOME": "/tmp/supermimic-cache",
+        "MPLCONFIGDIR": str(Path(folder) / "matplotlib"),
+        "XDG_CACHE_HOME": str(Path(folder) / "cache"),
       }
       for iteration in (1, 2):
         command = common + ["--iterations", str(iteration)]
@@ -535,6 +545,8 @@ class OnlineCliTests(unittest.TestCase):
         prefix
         + [
           "scripts/evaluate_supermimic.py",
+          "--manifest",
+          str(manifest),
           "--device",
           "cpu",
           "--checkpoint",
@@ -554,7 +566,7 @@ class OnlineCliTests(unittest.TestCase):
       self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
       report = json.loads(evaluation.read_text())
       self.assertEqual(len(report["motions"]), 1)
-      self.assertEqual(report["motions"][0]["motion"], "walk1_subject1")
+      self.assertEqual(report["motions"][0]["motion"], "fixture_walk")
       self.assertTrue(report["motions"][0]["evaluation_limited"])
 
 

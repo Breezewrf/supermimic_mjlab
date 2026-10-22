@@ -7,9 +7,8 @@
 
 ## 运行
 
-在仓库根目录使用项目 Python。已验证的运行环境为 mjlab 1.2.0、MuJoCo 3.5.0、
-MuJoCo Warp 3.5.0、Warp 1.12.1。这里记录实际运行版本；`setup.py` 中的依赖设置
-保留用户当前配置。世界模型训练入口会把实际运行版本写入配置和 checkpoint。
+在仓库根目录使用项目 Python，安装步骤见[安装说明](setup_zh.md)。
+世界模型训练入口会把实际运行版本写入配置和 checkpoint。
 
 先用两条动作完成短采集，默认关闭随机化：
 
@@ -155,7 +154,7 @@ starts = buffer.sample_starts(32, history_length=10)
 每个已结束的 episode 反向计算折扣回报，按桶取平均，以 EMA 0.1 更新；历史分布使用
 历次 softmax 的运行平均。这些更新细节属于本项目的明确复现选择。
 
-直接导入 SuperMimic 的数据模块不会触发 PPO 或仿真器初始化。独立采集入口位于
+直接导入 SuperMimic 的数据模块不会触发仿真器初始化。独立采集入口位于
 `scripts/offline/collect_supermimic.py`；常用的在线训练与评估入口保留在 `scripts/` 根目录。
 
 ## 验证

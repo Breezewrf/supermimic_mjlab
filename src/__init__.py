@@ -1,4 +1,1 @@
-from pathlib import Path
-
-
-SRC_PATH: Path = Path(__file__).parent
+"""SuperMimic implementation built on mjlab and MuJoCo Warp."""

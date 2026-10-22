@@ -13,7 +13,6 @@ import mujoco
 import numpy as np
 import torch
 
-from src.tasks.supermimic.config.task_cfg import DEFAULT_MANIFEST
 from src.tasks.supermimic.data.motion_library import MotionLibrary
 from src.tasks.supermimic.data.replay_buffer import ReplayBuffer
 from src.tasks.supermimic.data.world_model_data import ReplayCorpus
@@ -26,9 +25,9 @@ from src.tasks.supermimic.models.world_model import (
   normalized_state_error,
 )
 from src.tasks.supermimic.rl.world_model_training import rollout, world_model_loss
+from tests.supermimic_fixtures import make_replay
 
 ROOT = Path(__file__).resolve().parents[1]
-SNAPSHOT = ROOT / "outputs/supermimic/cuda_smok/replay.pt"
 
 
 def poses(batch=3, dtype=torch.float32, device="cpu"):
@@ -177,22 +176,16 @@ class DynamicsTests(unittest.TestCase):
     torch.testing.assert_close(a.grad[:, 0], numeric, atol=1e-3, rtol=1e-2)
 
 
-@unittest.skipUnless(
-  SNAPSHOT.exists() and DEFAULT_MANIFEST.exists(), "Stage-one CUDA snapshot absent"
-)
 class ReplayTrainingTests(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
     cls.metadata = robot_metadata()
-    names = torch.load(SNAPSHOT, map_location="cpu", weights_only=True)["clips"]
-    all_names = [
-      Path(row["file"]).stem
-      for row in json.loads(DEFAULT_MANIFEST.read_text())["clips"]
-    ]
-    cls.names = [name for name in all_names if name in names]
+    folder = tempfile.TemporaryDirectory()
+    cls.addClassCleanup(folder.cleanup)
+    cls.manifest, cls.snapshot, cls.names = make_replay(Path(folder.name), cls.metadata)
 
   def test_group_split_and_multiple_file_deduplication(self):
-    corpus = ReplayCorpus([SNAPSHOT, SNAPSHOT], self.names)
+    corpus = ReplayCorpus([self.snapshot, self.snapshot], self.names)
     self.assertEqual(len(corpus.sources), 1)
     training = {
       (row["source"], row["environment"], row["episode"])
@@ -217,10 +210,10 @@ class ReplayTrainingTests(unittest.TestCase):
         )
       self.assertTrue(batch["mask"][:, 0].all())
     with self.assertRaises(ValueError):
-      ReplayCorpus([SNAPSHOT], self.names + ["absent_clip"])
+      ReplayCorpus([self.snapshot], self.names + ["absent_clip"])
 
   def test_normalization_train_only_autoregression_and_padding(self):
-    corpus = ReplayCorpus([SNAPSHOT], self.names)
+    corpus = ReplayCorpus([self.snapshot], self.names)
     model = WorldModel(self.metadata, (16,))
     transitions = corpus.training_transitions()
     model.fit_normalization(**transitions)
@@ -230,7 +223,7 @@ class ReplayTrainingTests(unittest.TestCase):
     torch.testing.assert_close(model.input_mean, expected_mean)
     torch.nn.init.normal_(model.dynamics[-1].weight, std=0.01)
     library = MotionLibrary(
-      DEFAULT_MANIFEST,
+      self.manifest,
       model.kinematics.joint_names,
       model.kinematics.body_names,
       clips=tuple(self.names),
@@ -250,10 +243,10 @@ class ReplayTrainingTests(unittest.TestCase):
     self.assertTrue(torch.isfinite(loss))
 
   def test_analytical_heads_match_collected_transition_labels(self):
-    corpus = ReplayCorpus([SNAPSHOT], self.names)
+    corpus = ReplayCorpus([self.snapshot], self.names)
     model = WorldModel(self.metadata, (16,))
     library = MotionLibrary(
-      DEFAULT_MANIFEST,
+      self.manifest,
       model.kinematics.joint_names,
       model.kinematics.body_names,
       clips=tuple(self.names),
@@ -279,7 +272,7 @@ class ReplayTrainingTests(unittest.TestCase):
     )
 
   def test_cross_backend_replay_rng_and_clip_name_remapping(self):
-    saved = torch.load(SNAPSHOT, map_location="cpu", weights_only=True)
+    saved = torch.load(self.snapshot, map_location="cpu", weights_only=True)
     saved["replay"]["generator_device_type"] = "cuda"
     saved["replay"]["generator_seed"] = 37
     first = ReplayBuffer.from_state_dict(saved["replay"])
@@ -288,7 +281,7 @@ class ReplayTrainingTests(unittest.TestCase):
       first.sample_windows(4)["state"], second.sample_windows(4)["state"]
     )
     self.assertEqual(first.generator.initial_seed(), 37)
-    original = ReplayCorpus([SNAPSHOT], self.names)
+    original = ReplayCorpus([self.snapshot], self.names)
     original_order = saved["clips"]
     saved["clips"] = list(reversed(original_order))
     saved["replay"]["data"]["motion_id"] = (
@@ -303,13 +296,13 @@ class ReplayTrainingTests(unittest.TestCase):
       torch.testing.assert_close(
         expected, remapped.buffers[0].data["motion_id"][:count]
       )
-      combined = ReplayCorpus([SNAPSHOT, path], self.names)
+      combined = ReplayCorpus([self.snapshot, path], self.names)
       self.assertEqual(len(combined.sources), 2)
       for buffer in combined.buffers:
         torch.testing.assert_close(buffer.data["motion_id"][:count], expected)
 
   def test_stable_window_indices_and_stale_index_rejection(self):
-    saved = torch.load(SNAPSHOT, map_location="cpu", weights_only=True)
+    saved = torch.load(self.snapshot, map_location="cpu", weights_only=True)
     replay = ReplayBuffer.from_state_dict(saved["replay"])
     indices = replay.window_indices(8, require_full=True)[:5]
     batch = replay.gather_windows(indices, 8)
@@ -324,8 +317,10 @@ class ReplayTrainingTests(unittest.TestCase):
       common = [
         sys.executable,
         str(ROOT / "scripts/offline/train_world_model.py"),
+        "--manifest",
+        str(self.manifest),
         "--replay",
-        str(SNAPSHOT),
+        str(self.snapshot),
         "--device",
         "cpu",
         "--smoke",
@@ -344,7 +339,10 @@ class ReplayTrainingTests(unittest.TestCase):
         "--checkpoint-interval",
         "2",
       ]
-      environment = os.environ | {"MPLCONFIGDIR": "/tmp/supermimic-mpl"}
+      environment = os.environ | {
+        "MPLCONFIGDIR": str(root / "matplotlib"),
+        "XDG_CACHE_HOME": str(root / "cache"),
+      }
       for output, count, resume in (
         ("whole", 4, False),
         ("resumed", 2, False),

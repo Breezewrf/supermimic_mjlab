@@ -1,76 +1,52 @@
-# 安装配置文档
+# 安装说明
 
-## 系统要求
+[English](setup_en.md) | [项目说明](../README_zh.md)
 
-- **操作系统**：推荐使用 Ubuntu 22.04
-- **显卡**：Nvidia 显卡  
-- **驱动版本**：建议使用 550 或更高版本  
+使用 Python 3.11，在仓库根目录执行以下命令。GPU 训练需要 NVIDIA GPU、兼容的
+驱动和支持 CUDA 的 PyTorch。
 
----
-
-## 1. 创建虚拟环境
-
-建议在虚拟环境中运行训练或部署程序，推荐使用 Conda 创建虚拟环境。如果您的系统中已经安装了 Conda，可以跳过步骤 1.1。
-
-### 1.1 下载并安装 MiniConda
-
-MiniConda 是 Conda 的轻量级发行版，适用于创建和管理虚拟环境。使用以下命令下载并安装：
+## 创建环境
 
 ```bash
-mkdir -p ~/miniconda3
-wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda3/miniconda.sh
-bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3
-rm ~/miniconda3/miniconda.sh
+python3.11 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -e .
 ```
 
-安装完成后，初始化 Conda：
+依赖版本由 [setup.py](../setup.py) 定义；安装使用其中已有的版本锁定，不另设一组
+依赖版本。若已有配置好的环境，可只注册项目而不改动依赖：
 
 ```bash
-~/miniconda3/bin/conda init --all
-source ~/.bashrc
+.venv/bin/python -m pip install --no-deps -e .
 ```
 
-### 1.2 创建新环境
+发行包名为 `supermimic_mjlab`，Python 导入路径为 `src.tasks.supermimic`。
+机器人定义和网格资源来自已安装的 mjlab，无需本地 Unitree SDK2 部署模拟器。
 
-使用以下命令创建虚拟环境：
+## 验证环境
 
 ```bash
-conda create -n unitree_rl_mjlab python=3.11
+.venv/bin/python - <<'PYTHON'
+from importlib.metadata import version
+import torch
+
+for package in ("torch", "mjlab", "mujoco", "mujoco-warp", "warp-lang", "scipy"):
+    print(package, version(package))
+print("CUDA available:", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print("GPU:", torch.cuda.get_device_name(0))
+PYTHON
 ```
 
-### 1.3 激活虚拟环境
+训练配置和 checkpoint 也会记录实际运行版本。GPU 训练前，应确认启动训练使用的
+同一个 Python 环境能够访问 CUDA。
 
-```bash
-conda activate unitree_rl_mjlab
-```
+## 准备动作与训练
 
----
+动作数据和训练产物不纳入版本控制。将 G1 重定向 LAFAN CSV 放在
+`src/assets/motions/LAFAN1_Retargeting_Dataset/`，按[数据转换说明](lafan_conversion_zh.md)
+生成 NPZ 动作文件和 manifest。
 
-## 2. 安装
-
-### 2.1 下载
-
-通过 Git 克隆仓库：
-
-```bash
-git clone https://github.com/unitreerobotics/unitree_rl_mjlab.git
-```
-
-### 2.2 安装依赖
-
-```bash
-sudo apt install -y libyaml-cpp-dev libboost-all-dev libeigen3-dev libspdlog-dev libfmt-dev
-```
-
-我们将其余所需依赖放入 setup.py 文件中，
-进入 unitree_rl_mjlab 项目根目录并安装：
-
-```bash
-cd unitree_rl_mjlab
-pip install -e .
-```
-
-## 总结
-
-按照上述步骤完成后，您已经准备好在虚拟环境中运行相关程序。若遇到问题，请参考各组件的官方文档或检查依赖安装是否正确。
-
+缩小规模、论文规模训练、断点恢复和评估命令见 [README](../README_zh.md#在线训练)，
+回归检查见[测试说明](../README_zh.md#测试)。测试在临时目录生成小型动作与 Replay；
+真实数据集检查还需要准备转换后的 LAFAN 数据集。

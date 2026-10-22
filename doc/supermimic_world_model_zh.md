@@ -8,41 +8,42 @@
 
 ## 直接运行
 
-已有全量采集快照 `outputs/supermimic/world_model_data/replay.pt`，包含全部 40 段动作、
-32,000 条转移和 825 个 episode，启用了域随机化、观测噪声和回报采样。
-可直接在 GPU 上训练：
+先在仓库根目录采集数据；输出目录必须尚不存在：
 
 ```bash
-taskset -c 0-7,10-31 .venv/bin/python scripts/offline/train_world_model.py \
+.venv/bin/python scripts/offline/collect_supermimic.py \
+  --device cuda:0 --num-envs 32 --steps 1000 --capacity 1000 \
+  --training --output outputs/supermimic/world_model_data
+```
+
+采集器使用默认关节设定值加标准差 0.1 的动作噪声。该数据适合检验动力学学习，
+动作分布仍局限于这个控制器；在线训练会继续增加当前策略产生的真实转移。
+采集完成后，用生成的快照训练世界模型：
+
+```bash
+.venv/bin/python scripts/offline/train_world_model.py \
   --replay outputs/supermimic/world_model_data/replay.pt \
   --device cuda:0 --steps 5000 --batch-size 256 \
   --output outputs/supermimic/world_model_cuda
 ```
 
-需要重新采集时，在仓库根目录运行，输出目录必须尚不存在：
+也可以只采集少量动作进行快速检查：
 
 ```bash
 .venv/bin/python scripts/offline/collect_supermimic.py \
-  --device cuda:0 --num-envs 32 --steps 1000 --capacity 1000 \
-  --training --output outputs/supermimic/world_model_data_new
-```
+  --device cuda:0 --num-envs 4 --steps 128 \
+  --clips walk1_subject1 run1_subject2 \
+  --output outputs/supermimic/world_model_smoke_data
 
-采集器使用默认关节设定值加标准差 0.1 的动作噪声。该数据适合检验动力学学习，
-动作分布仍局限于这个控制器；后续策略更新需要增加新策略产生的真实转移。
-
-原来的两段动作 CUDA 快照也可用于快速检查：
-
-```bash
-taskset -c 0-7,10-31 .venv/bin/python scripts/offline/train_world_model.py \
-  --replay outputs/supermimic/cuda_smok/replay.pt \
+.venv/bin/python scripts/offline/train_world_model.py \
+  --replay outputs/supermimic/world_model_smoke_data/replay.pt \
   --smoke --device cuda:0 --hidden-dims 64 64 64 \
   --steps 20 --batch-size 16 --validation-windows 16 \
   --eval-interval 10 --output outputs/supermimic/world_model_cuda_smoke
 ```
 
 `--smoke` 允许动作子集，但报告始终设置 `candidate_for_bptt=false`。
-调试 CPU 可使用 `--device cpu --cpu-threads 4`。按当前运行约定，训练和推理命令使用
-`taskset -c 0-7,10-31`，普通检查命令不加。
+调试 CPU 可使用 `--device cpu --cpu-threads 4`。
 
 ## 模型与损失
 
@@ -96,8 +97,7 @@ taskset -c 0-7,10-31 .venv/bin/python scripts/offline/train_world_model.py \
 不会同时进入训练和验证。多个快照可通过 `--replay a.pt b.pt` 合并，动作 ID 按名字
 映射到统一动作库；相同文件哈希的重复输入只加载一次。
 
-当前数据划分为 663 个训练 episode、162 个验证 episode，对应 25,866 和 6,134 条
-转移。断点续训固定数据文件内容、manifest、动作顺序、episode 划分和验证窗口。
+断点续训固定数据文件内容、manifest、动作顺序、episode 划分和验证窗口。
 源文件可以移动路径，但内容哈希必须保持一致。
 
 每个时域固定抽取最多 256 个验证起点，并优先包含所有有合格窗口的动作。1、8、32
@@ -116,11 +116,9 @@ taskset -c 0-7,10-31 .venv/bin/python scripts/offline/train_world_model.py \
 指标，不是论文的算法要求，也不应作为接入
 在线策略训练的硬性门槛。仍需结合逐动作位置误差和失败指标判断模型质量。
 
-当前 32 步验证缺少 `dance1_subject2`、`fallAndGetUp1_subject1`、`jumps1_subject2`、
-`run2_subject4`，因此质量标记为 false。可用不同 seed 追加采集并合并快照，再重新
-训练和划分，以补充离线评估。论文中的 32 步是模型想象 rollout，策略更新不依赖
-每段动作具有 32 步真实验证窗口。仅把 `--steps` 增大而仍保留 `--capacity 1000`，会覆盖前面的采集；需要
-保留更多数据时同步增大 capacity。
+若验证窗口未覆盖部分动作，可追加采集并合并快照。论文中的 32 步是想象 rollout，
+策略更新不依赖每段动作具有 32 步真实验证窗口。仅增大采集步数而保留原 capacity，
+会覆盖较早数据；需要保留更多数据时应同步增大 capacity。
 
 ## 输出、评估和续训
 
@@ -143,7 +141,7 @@ checkpoint 包含模型、优化器、归一化、机器人运动学元数据、
 独立评估会恢复原来的验证窗口，并写入一个新目录：
 
 ```bash
-taskset -c 0-7,10-31 .venv/bin/python scripts/offline/train_world_model.py --mode evaluate \
+.venv/bin/python scripts/offline/train_world_model.py --mode evaluate \
   --replay outputs/supermimic/world_model_data/replay.pt \
   --checkpoint outputs/supermimic/world_model_cuda/best.pt \
   --device cuda:0 --output outputs/supermimic/world_model_cuda_eval
@@ -153,7 +151,7 @@ taskset -c 0-7,10-31 .venv/bin/python scripts/offline/train_world_model.py --mod
 总更新次数；默认 batch size 为 256：
 
 ```bash
-taskset -c 0-7,10-31 .venv/bin/python scripts/offline/train_world_model.py \
+.venv/bin/python scripts/offline/train_world_model.py \
   --replay outputs/supermimic/world_model_data/replay.pt \
   --resume outputs/supermimic/world_model_cuda/last.pt \
   --device cuda:0 --steps 10000 --batch-size 256 \
@@ -178,41 +176,12 @@ model = model.to("cuda:0").eval()
 # 不使用 no_grad 时，可对动作反向传播。
 ```
 
-## 本次实际验证
-
-最初在 CPU 上执行全量采集、默认 2048×3 网络的 100 次更新、独立评估和真实
-MJWarp 测试，共 34 项中 33 项通过，1 项 CUDA 对照当时因设备不可见而跳过。
-
-随后在可访问 GPU 的执行环境中确认 RTX 4090 Laptop（16 GiB）可用。完整测试
-34 项全部通过，没有跳过，包括 CUDA MJWarp 集成测试和 CPU/CUDA 预测、梯度
-对照。默认 2048×3、batch 256 的 GPU 训练已从断点续训到第 100 次更新；使用
-`taskset -c 0-7,10-31` 的普通模式全新启动也成功完成 30 次更新。
-
-GPU 训练结果位于 `outputs/supermimic/world_model_gpu_check/`，全新启动复测结果
-位于 `outputs/supermimic/world_model_gpu_fresh_check/`。第一次 GPU 短训练曾出现
-CUDA/CPU stream 不匹配错误；异常定位重跑、普通模式续训和全新启动复测均通过，
-目前未复现，原因尚未确定，不能据此认定 CPU affinity 是修复原因。
-
-独立 GPU 评估位于 `outputs/supermimic/world_model_gpu_eval/validation.json`，加载
-第 40 次更新的最佳 checkpoint；1/8/32 步预测均有限，8 步归一化状态 MSE 为
-`0.03036`，对应常速度基线为 `0.12961`。
-
-短训练及评估保存在 `outputs/supermimic/world_model_formal_check/` 和
-`outputs/supermimic/world_model_formal_eval/`，前者的最佳 checkpoint 来自第 50 次更新。
-这些是实现验证产物，训练次数尚不足。尽管归一化状态 MSE 优于常速度基线，短训练的
-刚体位置误差和失败 BCE 仍有落后项，且 32 步离线验证覆盖不全，因此脚本的诊断标记
-为 false。现已接入论文的[在线训练闭环](supermimic_online_zh.md)，让数据分布随当前策略更新；这些离线
-结果不能据此推断必须先把独立世界模型训练达标，才能开始策略训练。
-
-复查命令：
+## 验证
 
 ```bash
-MPLCONFIGDIR=/tmp/supermimic-mpl XDG_CACHE_HOME=/tmp/supermimic-cache \
-SUPERMIMIC_TEST_DEVICE=cpu \
-  .venv/bin/python -m unittest discover -s tests -v
+SUPERMIMIC_TEST_DEVICE=cpu .venv/bin/python -m unittest discover -s tests -v
 ```
 
-GPU 终端中可去掉 `SUPERMIMIC_TEST_DEVICE=cpu`，同时运行 CUDA 环境集成测试及
-CPU/CUDA 世界模型对照。测试覆盖非零关节锚点、MuJoCo 位姿和速度、有限差分梯度、
-坐标等变性、动作梯度、无教师强制的多步反传、训练集归一化、跨设备回放加载、动作
-名映射、划分隔离、padding、独立评估、错误数据拒绝和断点续训一致性。
+GPU 环境可使用 `SUPERMIMIC_TEST_DEVICE=cuda:0`。世界模型的数据划分、训练和续训
+测试会在临时目录生成动作与 Replay，不依赖历史训练产物。
+历史结果单独保存在[实现验证记录](experiments/implementation_validation_zh.md)。

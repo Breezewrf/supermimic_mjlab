@@ -1,4 +1,4 @@
-"""Installation script for the 'unitree_rl_mjlab' python package."""
+"""Installation script for the 'supermimic_mjlab' python package."""
 
 from setuptools import find_packages, setup
 
@@ -12,7 +12,7 @@ INSTALL_REQUIRES = [
 
 # Installation operation
 setup(
-    name="unitree_rl_mjlab",
+    name="supermimic_mjlab",
     packages=find_packages(include=("src", "src.*")),
     version="0.0.1",
     install_requires=INSTALL_REQUIRES,

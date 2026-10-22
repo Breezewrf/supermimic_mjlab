@@ -13,17 +13,16 @@
 
 以下命令均在仓库根目录使用已配置的 `.venv/bin/python`，Python 版本为 3.11。
 核心依赖为支持 CUDA 的 PyTorch、mjlab、MuJoCo、MuJoCo Warp 和 Warp，依赖声明见
-[setup.py](setup.py)。检查当前 Python 是否能使用 GPU：
+[setup.py](setup.py)。环境创建步骤见[安装说明](doc/setup_zh.md)。
+检查当前 Python 是否能使用 GPU：
 
 ```bash
 .venv/bin/python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
 ```
 
-训练和推理命令使用 `taskset -c 0-7,10-31`。下文将 Matplotlib 和其他缓存写入 `/tmp`。
-
 ## 代码结构
 
-参考其他 task 的 `config/`、`mdp/`、`rl/` 分类，并将数据和模型分别放入独立子包：
+按职责划分配置、数据、任务函数、模型与训练代码：
 
 ```text
 src/tasks/supermimic/
@@ -88,18 +87,17 @@ from src.tasks.supermimic.rl.online_training import OnlineTrainer
   --input-fps 30 --output-fps 50
 ```
 
-输出为每段动作的 NPZ 和 `manifest.json`。当前已准备好这些文件，可直接训练。
+输出为每段动作的 NPZ 和 `manifest.json`。转换完成后即可训练；已有文件时可跳过转换。
 转换字段与坐标约定见 [LAFAN 数据转换说明](doc/lafan_conversion_zh.md)。
 
 ## 在线训练
 
-### 当前硬件使用的缩小规模
+### 缩小训练规模
 
 使用默认网络、64 个环境、每轮 10×256 条世界模型窗口和 64 条想象轨迹：
 
 ```bash
-taskset -c 0-7,10-31 env MPLCONFIGDIR=/tmp/supermimic-mpl XDG_CACHE_HOME=/tmp/supermimic-cache \
-  .venv/bin/python scripts/train_supermimic.py \
+.venv/bin/python scripts/train_supermimic.py \
   --device cuda:0 --iterations 1000 \
   --output outputs/supermimic/online_training
 ```
@@ -115,8 +113,7 @@ taskset -c 0-7,10-31 env MPLCONFIGDIR=/tmp/supermimic-mpl XDG_CACHE_HOME=/tmp/su
 从头联合训练世界模型、Actor 和 Critic，无需先运行独立世界模型预训练。
 
 ```bash
-taskset -c 0-7,10-31 env MPLCONFIGDIR=/tmp/supermimic-mpl XDG_CACHE_HOME=/tmp/supermimic-cache \
-  .venv/bin/python scripts/train_supermimic.py \
+.venv/bin/python scripts/train_supermimic.py \
   --device cuda:0 \
   --num-envs 4096 --capacity 1000 \
   --collect-steps 5 --updates-per-collect 2 \
@@ -140,15 +137,14 @@ taskset -c 0-7,10-31 env MPLCONFIGDIR=/tmp/supermimic-mpl XDG_CACHE_HOME=/tmp/su
 此命令对齐训练规模，不代表所有实现细节均已严格复现论文：当前仍保留 10 秒
 真实采集 episode 时限，但想象不受该时限限制，保留后续价值 bootstrap。
 世界模型和 Critic 损失均在有效时间步上求和、在窗口或轨迹批次上取平均。
-完整规模尚未在当前 16 GiB GPU 上验证，显存需求也包含 Replay 和 32 步反向传播计算图。
+完整规模的显存需求高于缩小配置，还需容纳 Replay 和 32 步反向传播计算图。
 
 ### 断点恢复
 
 恢复时从 checkpoint 读取原有网络与 batch 参数；`--iterations` 是包含已完成轮数的总轮数：
 
 ```bash
-taskset -c 0-7,10-31 env MPLCONFIGDIR=/tmp/supermimic-mpl XDG_CACHE_HOME=/tmp/supermimic-cache \
-  .venv/bin/python scripts/train_supermimic.py \
+.venv/bin/python scripts/train_supermimic.py \
   --device cuda:0 --resume outputs/supermimic/online_training/last.pt \
   --iterations 5000
 ```
@@ -169,8 +165,7 @@ taskset -c 0-7,10-31 env MPLCONFIGDIR=/tmp/supermimic-mpl XDG_CACHE_HOME=/tmp/su
 加载在线 checkpoint，从每段动作首帧进行真实物理仿真，关闭域随机化和观测噪声：
 
 ```bash
-taskset -c 0-7,10-31 env MPLCONFIGDIR=/tmp/supermimic-mpl XDG_CACHE_HOME=/tmp/supermimic-cache \
-  .venv/bin/python scripts/evaluate_supermimic.py \
+.venv/bin/python scripts/evaluate_supermimic.py \
   --device cuda:0 --checkpoint outputs/supermimic/online_training/best.pt \
   --output outputs/supermimic/online_policy_evaluation.json
 ```
@@ -182,8 +177,7 @@ taskset -c 0-7,10-31 env MPLCONFIGDIR=/tmp/supermimic-mpl XDG_CACHE_HOME=/tmp/su
 ## 测试
 
 ```bash
-taskset -c 0-7,10-31 env MPLCONFIGDIR=/tmp/supermimic-mpl XDG_CACHE_HOME=/tmp/supermimic-cache \
-  SUPERMIMIC_TEST_DEVICE=cuda:0 \
+SUPERMIMIC_TEST_DEVICE=cuda:0 \
   .venv/bin/python -m unittest discover -s tests -v
 ```
 
