@@ -1,0 +1,9 @@
+*.egg-info
+.idea
+outputs
+logs
+wandb
+MUJOCO_LOG.TXT
+src/assets/motions/
+simulate/build
+__pycache__/

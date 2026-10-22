@@ -1,0 +1,126 @@
+"""Motion-conditioned actor and privileged critic with shared feature conventions."""
+
+from itertools import pairwise
+
+import torch
+from torch import Tensor, nn
+
+from ..mdp.state import quat_apply, quat_conjugate, quat_mul, quat_normalize, yaw_quat
+
+REFERENCE_DIM = 268
+GOAL_DIM = 10 * REFERENCE_DIM
+CRITIC_DIM = 71 + GOAL_DIM + 33
+
+
+def mlp(input_dim: int, hidden: tuple[int, ...], output_dim: int) -> nn.Sequential:
+  layers = []
+  for left, right in pairwise((input_dim, *hidden)):
+    layers.extend((nn.Linear(left, right), nn.ELU()))
+  layers.append(nn.Linear(hidden[-1], output_dim))
+  return nn.Sequential(*layers)
+
+
+def reference_anchor(reference: dict[str, Tensor]) -> tuple[Tensor, Tensor]:
+  root = reference["body_pos_w"][..., 0, 0, :]
+  origin = torch.cat((root[..., :2], torch.zeros_like(root[..., 2:3])), -1)
+  inverse_yaw = quat_conjugate(yaw_quat(reference["body_quat_w"][..., 0, 0, :]))
+  return origin, inverse_yaw
+
+
+def reference_features(reference: dict[str, Tensor], default_q: Tensor) -> Tensor:
+  """Ten frames in the first reference pelvis' horizontal/yaw frame; 268/frame."""
+  origin, inverse_yaw = reference_anchor(reference)
+  rotation = inverse_yaw[..., None, None, :]
+  position = quat_apply(rotation, reference["body_pos_w"] - origin[..., None, None, :])
+  quaternion = quat_normalize(quat_mul(rotation, reference["body_quat_w"]))
+  # First two rotation-matrix columns avoid quaternion sign discontinuities.
+  orientation = torch.cat(
+    (
+      quat_apply(quaternion, quaternion.new_tensor([1, 0, 0])),
+      quat_apply(quaternion, quaternion.new_tensor([0, 1, 0])),
+    ),
+    -1,
+  )
+  parts = (
+    (reference["joint_pos"] - default_q) / 0.3,
+    reference["joint_vel"] / 5,
+    (position / 0.3).flatten(-2),
+    orientation.flatten(-2),
+    quat_apply(rotation, reference["body_lin_vel_w"]).flatten(-2),
+    (quat_apply(rotation, reference["body_ang_vel_w"]) / 3.14).flatten(-2),
+  )
+  result = torch.cat(parts, -1)
+  if result.shape[-2:] != (10, REFERENCE_DIM):
+    raise ValueError("Expected ten reference frames and fourteen tracked bodies")
+  return result.flatten(-2)
+
+
+class MotionActor(nn.Module):
+  def __init__(
+    self, default_q: Tensor, hidden_dims: tuple[int, ...] = (2048, 1024, 512, 256)
+  ):
+    super().__init__()
+    self.hidden_dims = tuple(hidden_dims)
+    self.register_buffer("default_q", default_q.detach().clone().float())
+    self.register_buffer(
+      "observation_scale",
+      torch.tensor([0.3] * 29 + [5.0] * 29 + [3.14] * 3 + [1.0] * 32),
+    )
+    self.encoder = mlp(GOAL_DIM, self.hidden_dims, 32)
+    self.decoder = mlp(32 + 10 * 93, self.hidden_dims, 29)
+    nn.init.normal_(self.decoder[-1].weight, std=0.001)
+    nn.init.zeros_(self.decoder[-1].bias)
+
+  def forward_features(self, history: Tensor, goal: Tensor) -> Tensor:
+    if history.shape[-2:] != (10, 93):
+      raise ValueError("Actor needs ten 93-dimensional observations")
+    latent = self.encoder(goal).tanh()
+    return self.decoder(
+      torch.cat((latent, (history / self.observation_scale).flatten(-2)), -1)
+    )
+
+  def forward(self, history: Tensor, future_reference: dict[str, Tensor]) -> Tensor:
+    return self.forward_features(
+      history, reference_features(future_reference, self.default_q)
+    )
+
+
+class MotionCritic(nn.Module):
+  def __init__(self, default_q: Tensor, hidden_dims: tuple[int, ...] = (256, 128)):
+    super().__init__()
+    self.hidden_dims = tuple(hidden_dims)
+    self.register_buffer("default_q", default_q.detach().clone().float())
+    self.register_buffer(
+      "context_scale", torch.tensor([1.0] + [0.01] * 29 + [0.025, 0.05, 0.05])
+    )
+    self.value = mlp(CRITIC_DIM, self.hidden_dims, 1)
+
+  def features(
+    self,
+    state: Tensor,
+    reference: dict[str, Tensor],
+    context: Tensor,
+    goal: Tensor | None = None,
+  ) -> Tensor:
+    origin, inverse_yaw = reference_anchor(reference)
+    quaternion = quat_normalize(quat_mul(inverse_yaw, state[..., 3:7]))
+    quaternion = torch.where(quaternion[..., :1] < 0, -quaternion, quaternion)
+    physical = torch.cat(
+      (
+        quat_apply(inverse_yaw, state[..., :3] - origin) / 0.3,
+        quaternion,
+        (state[..., 7:36] - self.default_q) / 0.3,
+        quat_apply(inverse_yaw, state[..., 36:39]),
+        quat_apply(inverse_yaw, state[..., 39:42]) / 3.14,
+        state[..., 42:71] / 5,
+      ),
+      -1,
+    )
+    if goal is None:
+      goal = reference_features(reference, self.default_q)
+    return torch.cat((physical, goal, context / self.context_scale), -1)
+
+  def forward(
+    self, state: Tensor, reference: dict[str, Tensor], context: Tensor
+  ) -> Tensor:
+    return self.value(self.features(state, reference, context)).squeeze(-1)

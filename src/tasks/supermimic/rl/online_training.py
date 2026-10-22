@@ -1,0 +1,360 @@
+"""Online collect / world-model fit / imagined actor-critic updates."""
+
+import math
+import random
+import time
+from dataclasses import asdict
+
+import numpy as np
+import torch
+
+from ..config.rl_cfg import OnlineConfig
+from ..data.replay_buffer import ReplayBuffer
+from ..models.policy import MotionActor, MotionCritic
+from ..models.world_model import WorldModel
+from .imagination import critic_loss, frozen_parameters, gae_targets, imagine
+from .world_model_training import rollout, world_model_loss
+
+
+def rng_state() -> dict:
+  numpy = np.random.get_state()
+  return {
+    "python": random.getstate(),
+    "numpy": (numpy[0], numpy[1].tolist(), *numpy[2:]),
+    "torch": torch.get_rng_state(),
+    "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+  }
+
+
+def restore_rng(state: dict) -> None:
+  random.setstate(state["python"])
+  numpy = state["numpy"]
+  np.random.set_state((numpy[0], np.asarray(numpy[1], dtype=np.uint32), *numpy[2:]))
+  torch.set_rng_state(state["torch"].cpu())
+  if state["cuda"] and torch.cuda.is_available():
+    torch.cuda.set_rng_state_all([value.cpu() for value in state["cuda"]])
+
+
+def simulation_parameters(env) -> dict:
+  return {
+    "nconmax": env.cfg.sim.nconmax,
+    "njmax": env.cfg.sim.njmax,
+    "physics_dt": env.physics_dt,
+    "control_dt": env.step_dt,
+    "solver_iterations": env.cfg.sim.mujoco.iterations,
+  }
+
+
+def checked_step(
+  loss, module, optimizer, *, element_clip: float | None = None
+) -> float:
+  if not torch.isfinite(loss):
+    raise FloatingPointError("Nonfinite training loss")
+  loss.backward()
+  norm = torch.nn.utils.clip_grad_norm_(
+    module.parameters(), 1.0, error_if_nonfinite=True
+  )
+  if element_clip is not None:
+    for parameter in module.parameters():
+      if parameter.grad is not None:
+        parameter.grad.clamp_(-element_clip, element_clip)
+  optimizer.step()
+  return float(norm)
+
+
+class OnlineTrainer:
+  def __init__(self, env, metadata: dict, config: OnlineConfig):
+    if env.num_envs != config.num_envs:
+      raise ValueError("Environment count differs from online configuration")
+    self.env, self.metadata, self.config = env, metadata, config
+    self.device = str(env.device)
+    self.world = WorldModel(metadata, config.world_dims).to(self.device)
+    self.actor = MotionActor(metadata["default_q"], config.actor_dims).to(self.device)
+    self.critic = MotionCritic(metadata["default_q"], config.critic_dims).to(
+      self.device
+    )
+    self.world_optimizer = torch.optim.Adam(
+      self.world.parameters(), lr=config.learning_rate
+    )
+    self.actor_optimizer = torch.optim.Adam(
+      self.actor.parameters(), lr=config.learning_rate, betas=(0.9, 0.95)
+    )
+    self.critic_optimizer = torch.optim.Adam(
+      self.critic.parameters(), lr=config.learning_rate
+    )
+    self.replay = ReplayBuffer(
+      config.num_envs, config.capacity, self.device, config.seed + 10
+    )
+    self.noise_rng = torch.Generator(device=self.device).manual_seed(config.seed + 11)
+    self.imagination_rng = torch.Generator(device=self.device).manual_seed(
+      config.seed + 12
+    )
+    self.critic_rng = torch.Generator(device=self.device).manual_seed(config.seed + 13)
+    self.iteration, self.environment_steps = 0, 0
+    self.world_updates, self.actor_updates, self.critic_updates = 0, 0, 0
+    self.initialized = False
+    self.last_collection = {}
+    self.phase = "initialization"
+    self.simulation_parameters = simulation_parameters(env)
+
+  @torch.no_grad()
+  def collect(self, steps: int) -> dict:
+    self.phase = "collection"
+    started = time.perf_counter()
+    rewards, failures, endings = 0.0, 0, 0
+    for _ in range(steps):
+      inputs = self.env.policy_input()
+      action = self.actor(inputs["history"], inputs["future_reference"])
+      noise = torch.randn(action.shape, device=self.device, generator=self.noise_rng)
+      _, reward, terminated, truncated, extras = self.env.step(
+        action + self.config.action_noise * noise
+      )
+      transition = dict(extras["transition"])
+      transition["policy_version"] = torch.full_like(
+        transition["episode_id"], self.actor_updates
+      )
+      self.replay.append(transition)
+      rewards += float(reward.mean())
+      failures += int(terminated.sum())
+      endings += int((terminated | truncated).sum())
+      self.environment_steps += self.config.num_envs
+    self.last_collection = {
+      "real_reward_per_step": rewards / steps,
+      "physical_failures": failures,
+      "episodes_ended": endings,
+      "collected_transitions": steps * self.config.num_envs,
+      "collection_seconds": time.perf_counter() - started,
+    }
+    return self.last_collection
+
+  def bootstrap(self):
+    if self.initialized:
+      raise ValueError("Trainer already initialized")
+    self.collect(self.config.warmup_steps)
+    if not len(self.replay.window_indices(8)):
+      raise ValueError("Warmup produced no eight-step windows")
+    count = min(self.replay.steps, self.replay.capacity)
+    transitions = {
+      name: self.replay.data[name][:count].flatten(0, 1)
+      for name in ("state", "action", "context", "next_state")
+    }
+    self.world.fit_normalization(**transitions)
+    self.initialized = True
+
+  def update_world(self) -> dict:
+    self.phase = "world_model"
+    totals = {}
+    self.world.train()
+    for _ in range(self.config.wm_batches):
+      batch = self.replay.sample_windows(self.config.wm_batch_size, 8)
+      self.world_optimizer.zero_grad(set_to_none=True)
+      prediction = rollout(self.world, batch, self.env.library)
+      loss, parts = world_model_loss(prediction, batch, analytic_losses=False)
+      norm = checked_step(loss, self.world, self.world_optimizer)
+      self.world_updates += 1
+      for name, value in {
+        "loss": float(loss.detach()),
+        "gradient_norm": norm,
+        **{key: float(value.detach()) for key, value in parts.items()},
+      }.items():
+        totals[name] = totals.get(name, 0.0) + value / self.config.wm_batches
+    self.world_optimizer.zero_grad(set_to_none=True)
+    return {"wm_" + key: value for key, value in totals.items()}
+
+  def update_policy(self) -> dict:
+    self.phase = "actor"
+    cfg = self.config
+    starts = self.replay.sample_starts(cfg.policy_batch_size, 10)
+    self.actor_optimizer.zero_grad(set_to_none=True)
+    self.critic_optimizer.zero_grad(set_to_none=True)
+    with frozen_parameters(self.world, self.critic):
+      trajectory = imagine(
+        self.actor,
+        self.world,
+        self.critic,
+        self.env.library,
+        starts,
+        horizon=cfg.horizon,
+        gamma=cfg.gamma,
+        generator=self.imagination_rng,
+      )
+      objective = float(trajectory["objective"].detach())
+      actor_norm = checked_step(
+        -trajectory["objective"], self.actor, self.actor_optimizer, element_clip=0.1
+      )
+    self.actor_updates += 1
+    # Targets and critic data come from this one rollout, before any critic fit.
+    targets = gae_targets(
+      trajectory["rewards"],
+      trajectory["continuation"],
+      trajectory["values"],
+      cfg.gamma,
+      cfg.gae_lambda,
+    )
+    mask = trajectory["mask"]
+    inputs = trajectory["critic_features"]
+    survival = float(trajectory["survival"].detach().mean())
+    reward = float(trajectory["rewards"].detach()[mask].mean())
+    # Release the 32-step actor graph before the twenty small critic updates.
+    del trajectory
+    self.phase = "critic"
+    losses, norms = [], []
+    for _ in range(cfg.critic_epochs):
+      # Shuffle complete trajectories so the time sum in Eq. (3) is preserved.
+      order = torch.randperm(
+        len(targets), device=self.device, generator=self.critic_rng
+      )
+      for indices in order.tensor_split(cfg.critic_minibatches):
+        self.critic_optimizer.zero_grad(set_to_none=True)
+        loss = critic_loss(
+          self.critic.value(inputs[indices]).squeeze(-1),
+          targets[indices],
+          mask[indices],
+        )
+        norms.append(checked_step(loss, self.critic, self.critic_optimizer))
+        losses.append(float(loss.detach()))
+        self.critic_updates += 1
+    self.critic_optimizer.zero_grad(set_to_none=True)
+    return {
+      "actor_objective": objective,
+      "actor_gradient_norm": actor_norm,
+      "imagined_reward": reward,
+      "survival_at_horizon": survival,
+      "critic_loss": sum(losses) / len(losses),
+      "critic_gradient_norm": max(norms),
+    }
+
+  def train_iteration(self) -> dict:
+    if not self.initialized:
+      raise ValueError("Call bootstrap or restore a checkpoint first")
+    start = time.perf_counter()
+    collected = self.iteration % self.config.updates_per_collect == 0
+    if collected:
+      self.collect(self.config.collect_steps)
+    # Paper schedule: cosine to 0.03x over 250k updates, then constant.
+    fraction = min(self.iteration / 250_000, 1.0)
+    lr = self.config.learning_rate * (
+      0.03 + 0.97 * (1 + math.cos(math.pi * fraction)) / 2
+    )
+    for optimizer in (
+      self.world_optimizer,
+      self.actor_optimizer,
+      self.critic_optimizer,
+    ):
+      for group in optimizer.param_groups:
+        group["lr"] = lr
+    world_start = time.perf_counter()
+    world_metrics = self.update_world()
+    world_seconds = time.perf_counter() - world_start
+    policy_start = time.perf_counter()
+    policy_metrics = self.update_policy()
+    policy_seconds = time.perf_counter() - policy_start
+    self.iteration += 1
+    elapsed = time.perf_counter() - start
+    record = {
+      "iteration": self.iteration,
+      "environment_steps": self.environment_steps,
+      "world_updates": self.world_updates,
+      "actor_updates": self.actor_updates,
+      "critic_updates": self.critic_updates,
+      "replay_transitions": len(self.replay),
+      "learning_rate": lr,
+      "seconds": elapsed,
+      "world_model_seconds": world_seconds,
+      "policy_and_critic_seconds": policy_seconds,
+      "collected_this_iteration": collected,
+      **self.last_collection,
+      **world_metrics,
+      **policy_metrics,
+    }
+    record["effective_transitions_per_second"] = (
+      self.last_collection["collected_transitions"] / elapsed if collected else 0.0
+    )
+    record["collection_transitions_per_second"] = (
+      self.last_collection["collected_transitions"]
+      / self.last_collection["collection_seconds"]
+      if collected
+      else 0.0
+    )
+    self.phase = "idle"
+    if self.device.startswith("cuda"):
+      record["peak_gpu_memory_gib"] = (
+        torch.cuda.max_memory_allocated(self.device) / 2**30
+      )
+    return record
+
+  def state_dict(self) -> dict:
+    return {
+      "schema_version": 1,
+      "kind": "supermimic_online",
+      "config": asdict(self.config),
+      "robot_metadata": self.metadata,
+      "simulation": self.simulation_parameters,
+      "clips": self.env.library.names,
+      "device_type": torch.device(self.device).type,
+      "world": self.world.state_dict(),
+      "actor": self.actor.state_dict(),
+      "critic": self.critic.state_dict(),
+      "world_optimizer": self.world_optimizer.state_dict(),
+      "actor_optimizer": self.actor_optimizer.state_dict(),
+      "critic_optimizer": self.critic_optimizer.state_dict(),
+      "replay": self.replay.state_dict(),
+      "sampler": self.env.sampler.state_dict(),
+      "iteration": self.iteration,
+      "environment_steps": self.environment_steps,
+      "world_updates": self.world_updates,
+      "actor_updates": self.actor_updates,
+      "critic_updates": self.critic_updates,
+      "last_collection": self.last_collection,
+      "initialized": self.initialized,
+      "rng": rng_state(),
+      "noise_rng": self.noise_rng.get_state().cpu(),
+      "imagination_rng": self.imagination_rng.get_state().cpu(),
+      "critic_rng": self.critic_rng.get_state().cpu(),
+      "env_rng": self.env.generator.get_state().cpu(),
+    }
+
+  def load_state_dict(self, saved: dict):
+    if saved.get("schema_version") != 1 or saved.get("kind") != "supermimic_online":
+      raise ValueError("Not an online SuperMimic checkpoint")
+    if (
+      saved["config"] != asdict(self.config) or saved["clips"] != self.env.library.names
+    ):
+      raise ValueError("Online checkpoint configuration or motion library mismatch")
+    if saved["robot_metadata"]["signature"] != self.metadata["signature"]:
+      raise ValueError("Online checkpoint robot signature mismatch")
+    if saved.get("simulation") != self.simulation_parameters:
+      raise ValueError("Online checkpoint simulation configuration mismatch")
+    if saved["device_type"] != torch.device(self.device).type:
+      raise ValueError(
+        "Training resume requires the same RNG backend; actor inference can change device"
+      )
+    for name in (
+      "world",
+      "actor",
+      "critic",
+      "world_optimizer",
+      "actor_optimizer",
+      "critic_optimizer",
+    ):
+      getattr(self, name).load_state_dict(saved[name])
+    self.replay = ReplayBuffer.from_state_dict(saved["replay"], self.device)
+    self.env.sampler.load_state_dict(saved["sampler"])
+    for name in (
+      "iteration",
+      "environment_steps",
+      "world_updates",
+      "actor_updates",
+      "critic_updates",
+      "last_collection",
+      "initialized",
+    ):
+      setattr(self, name, saved[name])
+    restore_rng(saved["rng"])
+    for name in ("noise_rng", "imagination_rng", "critic_rng"):
+      getattr(self, name).set_state(saved[name].cpu())
+    self.env.generator.set_state(saved["env_rng"].cpu())
+    # A resumed simulator starts fresh episodes; it is not a physics snapshot.
+    self.env.reset()
+    count = min(self.replay.steps, self.replay.capacity)
+    self.env.episode_id.copy_(self.replay.data["episode_id"][:count].max(0).values + 1)
