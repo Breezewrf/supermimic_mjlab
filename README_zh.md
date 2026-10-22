@@ -130,6 +130,9 @@ episode 重采样；评估关闭这些扰动。范围与生命周期见[环境�
 环境数量与训练轮数。默认读取已转换的
 `src/assets/motions/g1/lafan1_npz/manifest.json`，使用全部 40 段 LAFAN 动作，
 从头联合训练世界模型、Actor 和 Critic，无需先运行独立世界模型预训练。
+若需先预热世界模型，在下方命令中增加 `--warmup-steps 64 --wm-only-iters 500`：
+初始采集后前 500 轮只训练世界模型，第 501 轮开始联合训练。预热期间仍继续采集；
+预热轮数包含在 `--iterations` 中，断点续训会保留进度。该选项默认 `0`。
 
 ```bash
 python scripts/train_supermimic.py \

@@ -47,7 +47,44 @@ def record(iteration=1, collected=True):
   }
 
 
+def wm_only_record(iteration=1):
+  row = record(iteration)
+  row["training_phase"] = "wm_only"
+  row["policy_and_critic_seconds"] = 0.0
+  for key in (
+    "actor_objective",
+    "imagined_reward",
+    "survival_at_horizon",
+    "critic_loss",
+    "actor_gradient_norm",
+    "critic_gradient_norm",
+  ):
+    del row[key]
+  return row
+
+
 class MetricTests(unittest.TestCase):
+  def test_wm_only_and_mixed_windows_do_not_invent_or_dilute_policy_metrics(self):
+    window = MetricWindow()
+    window.add(wm_only_record())
+    warmup = window.summary()
+    self.assertNotIn("actor_objective", warmup)
+    self.assertEqual(warmup["training_phase"], "wm_only")
+    stream = io.StringIO()
+    console = ConsoleReporter(1000, stream=stream)
+    console.training(warmup)
+    self.assertIn("--", stream.getvalue())
+    self.assertIn("WM-only warmup", stream.getvalue())
+    joint = record(2, False) | {"training_phase": "joint"}
+    window.add(joint)
+    mixed = window.summary()
+    self.assertEqual(mixed["actor_objective"], joint["actor_objective"])
+    self.assertEqual(mixed["critic_loss"], joint["critic_loss"])
+    self.assertEqual(mixed["policy_and_critic_seconds"], 0.5)
+    self.assertEqual(mixed["training_phase"], "joint")
+    console.training(mixed)
+    self.assertIn("Joint training", stream.getvalue())
+
   def test_window_does_not_double_count_carried_collection_statistics(self):
     window = MetricWindow()
     window.add(record())
@@ -137,6 +174,18 @@ class WandbTests(unittest.TestCase):
     self.assertEqual(second["train/iteration"], 2)
     tracker.close(exit_code=1)
     tracker.run.finish.assert_called_once_with(exit_code=1)
+
+  def test_wm_only_round_logs_world_metrics_without_policy_metrics(self):
+    tracker = WandbReporter(self.output, {}, 0)
+    tracker.training(wm_only_record())
+    metrics = tracker.run.log.call_args.args[0]
+    self.assertEqual(metrics["world_model/loss"], 0.8)
+    self.assertEqual(metrics["train/training_phase"], "wm_only")
+    self.assertFalse(any(key.startswith(("policy/", "critic/")) for key in metrics))
+    self.assertNotIn("gradients/actor_preclip_norm", metrics)
+    self.assertNotIn("gradients/critic_preclip_max_norm", metrics)
+    tracker.training(record(2))
+    self.assertEqual(tracker.run.log.call_args.args[0]["policy/objective"], 0.9)
 
   def test_online_resume_and_rollback_branch(self):
     first = WandbReporter(self.output, {}, 0)

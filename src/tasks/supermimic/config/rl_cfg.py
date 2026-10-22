@@ -9,6 +9,7 @@ class OnlineConfig:
   num_envs: int = 64
   capacity: int = 1000
   warmup_steps: int = 32
+  wm_only_iters: int = 0
   collect_steps: int = 5
   updates_per_collect: int = 2
   wm_batches: int = 10
@@ -45,6 +46,8 @@ class OnlineConfig:
     )
     if min(counts) < 1 or self.capacity < 10 or self.warmup_steps < 8:
       raise ValueError("Positive counts, capacity >= 10 and warmup_steps >= 8 required")
+    if self.wm_only_iters < 0:
+      raise ValueError("wm_only_iters must be nonnegative")
     if self.critic_minibatches > self.policy_batch_size:
       raise ValueError("Critic minibatches must not exceed the rollout batch size")
     if (

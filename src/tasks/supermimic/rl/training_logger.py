@@ -25,6 +25,7 @@ class MetricWindow:
   def __init__(self):
     self.count = 0
     self.totals = {}
+    self.counts = {}
     self.transitions = self.failures = self.endings = 0
     self.reward_sum = self.collection_seconds = 0.0
     self.last = {}
@@ -39,6 +40,7 @@ class MetricWindow:
     for key, value in record.items():
       if isinstance(value, (int, float)) and not isinstance(value, bool):
         self.totals[key] = self.totals.get(key, 0.0) + value
+        self.counts[key] = self.counts.get(key, 0) + 1
     if record["collected_this_iteration"]:
       count = record["collected_transitions"]
       self.transitions += count
@@ -60,7 +62,9 @@ class MetricWindow:
           self.collection_totals[key] = self.collection_totals.get(key, 0.0) + value
 
   def summary(self) -> dict:
-    result = {key: value / self.count for key, value in self.totals.items()}
+    # A window may straddle WM-only and joint training: average policy metrics
+    # over updates that actually produced them, not over warmup rounds.
+    result = {key: value / self.counts[key] for key, value in self.totals.items()}
     for key in (
       "iteration",
       "environment_steps",
@@ -68,6 +72,8 @@ class MetricWindow:
       "learning_rate",
     ):
       result[key] = self.last[key]
+    if "training_phase" in self.last:
+      result["training_phase"] = self.last["training_phase"]
     result["real_reward_per_step"] = (
       self.reward_sum / self.transitions if self.transitions else None
     )
@@ -112,6 +118,7 @@ class ConsoleReporter:
     self.total, self.log_format = total, log_format
     self.stream = stream or sys.stdout
     self.lines = 0
+    self.training_phase = None
     try:
       from rich.console import Console
 
@@ -137,6 +144,11 @@ class ConsoleReporter:
       f"Policy: {config['policy_batch_size']:,} trajectories x {config['horizon']} steps\n"
       f"Output: {output}"
     )
+    if config.get("wm_only_iters", 0):
+      self.message(
+        f"WM-only warmup: {min(iteration, config['wm_only_iters']):,}/"
+        f"{config['wm_only_iters']:,} rounds completed; actor and critic updates follow"
+      )
     if self.log_format == "table":
       self.message(
         "Table: interval means | Fail%: failure events per transition | GPU: PyTorch peak GiB"
@@ -146,6 +158,13 @@ class ConsoleReporter:
     if self.log_format == "json":
       self.message_record(record)
       return
+    phase = record.get("training_phase", "joint")
+    if phase != self.training_phase:
+      if phase == "wm_only":
+        self.message("WM-only warmup: actor and critic updates are paused")
+      elif self.training_phase == "wm_only":
+        self.message("Joint training: actor and critic updates enabled")
+      self.training_phase = phase
 
     def value(key):
       return "--" if record.get(key) is None else f"{record[key]:.4f}"
@@ -298,19 +317,27 @@ class WandbReporter:
       "world_model/termination_loss": record["wm_termination"],
       "diagnostics/observation_error": record["wm_observation"],
       "diagnostics/reward_error": record["wm_reward"],
-      "policy/objective": record["actor_objective"],
-      "policy/imagined_reward": record["imagined_reward"],
-      "policy/survival_at_horizon": record["survival_at_horizon"],
-      "critic/loss": record["critic_loss"],
+      "train/training_phase": record.get("training_phase", "joint"),
       "gradients/world_model_preclip_norm": record["wm_gradient_norm"],
-      "gradients/actor_preclip_norm": record["actor_gradient_norm"],
-      "gradients/critic_preclip_max_norm": record["critic_gradient_norm"],
       "optim/learning_rate": record["learning_rate"],
       "replay/transitions": record["replay_transitions"],
       "performance/iteration_seconds": record["seconds"],
       "performance/world_model_seconds": record["world_model_seconds"],
       "performance/policy_critic_seconds": record["policy_and_critic_seconds"],
     }
+    for key, name in {
+      "actor_objective": "policy/objective",
+      "imagined_reward": "policy/imagined_reward",
+      "survival_at_horizon": "policy/survival_at_horizon",
+      "critic_loss": "critic/loss",
+      "actor_gradient_norm": "gradients/actor_preclip_norm",
+      "critic_gradient_norm": "gradients/critic_preclip_max_norm",
+      "world_updates": "train/world_updates",
+      "actor_updates": "train/actor_updates",
+      "critic_updates": "train/critic_updates",
+    }.items():
+      if key in record:
+        metrics[name] = record[key]
     if "peak_gpu_memory_gib" in record:
       metrics["memory/torch_peak_allocated_gib"] = record["peak_gpu_memory_gib"]
     for key in ("actor_reward_objective", "actor_bootstrap_objective"):

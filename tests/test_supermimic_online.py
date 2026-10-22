@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -62,6 +63,14 @@ def make_starts(library, default_q, count=2, *, frame_id=0):
     "frame_id": frame,
     "episode_step": frame.clone(),
   }
+
+
+class OnlineConfigTests(unittest.TestCase):
+  def test_wm_only_iters_accepts_zero_and_positive_but_rejects_negative(self):
+    self.assertEqual(OnlineConfig().wm_only_iters, 0)
+    self.assertEqual(OnlineConfig(wm_only_iters=500).wm_only_iters, 500)
+    with self.assertRaisesRegex(ValueError, "wm_only_iters"):
+      OnlineConfig(wm_only_iters=-1)
 
 
 class ImaginationTests(unittest.TestCase):
@@ -465,11 +474,59 @@ class OnlineIntegrationTests(unittest.TestCase):
   def tearDownClass(cls):
     cls.env.close()
 
-  def trainer(self):
+  def trainer(self, config=None):
     self.env.reset()
-    trainer = OnlineTrainer(self.env, self.metadata, self.config)
+    trainer = OnlineTrainer(self.env, self.metadata, config or self.config)
     trainer.bootstrap()
     return trainer
+
+  def test_wm_only_warmup_preserves_policy_and_resumes_at_phase_boundary(self):
+    config = replace(self.config, wm_only_iters=3)
+    trainer = self.trainer(config)
+    actor = copy.deepcopy(trainer.actor.state_dict())
+    critic = copy.deepcopy(trainer.critic.state_dict())
+    world = [p.detach().clone() for p in trainer.world.parameters()]
+    rows = [trainer.train_iteration() for _ in range(2)]
+    self.assertEqual([row["collected_this_iteration"] for row in rows], [True, False])
+    for row in rows:
+      self.assertEqual(row["training_phase"], "wm_only")
+      self.assertNotIn("actor_objective", row)
+      self.assertNotIn("critic_loss", row)
+      self.assertEqual(row["policy_and_critic_seconds"], 0)
+    self.assertTrue(
+      any(not torch.equal(a, b) for a, b in zip(world, trainer.world.parameters()))
+    )
+    self.assertFalse(trainer.actor_optimizer.state)
+    self.assertFalse(trainer.critic_optimizer.state)
+    saved = copy.deepcopy(trainer.state_dict())
+    resumed = OnlineTrainer(self.env, self.metadata, config)
+    resumed.load_state_dict(saved)
+    last_warmup = resumed.train_iteration()
+    self.assertEqual(last_warmup["iteration"], 3)
+    self.assertEqual(last_warmup["training_phase"], "wm_only")
+    self.assertTrue(last_warmup["collected_this_iteration"])
+    for module, before in ((resumed.actor, actor), (resumed.critic, critic)):
+      for name, value in module.state_dict().items():
+        torch.testing.assert_close(value, before[name], rtol=0, atol=0)
+    self.assertEqual(resumed.actor_updates, 0)
+    self.assertEqual(resumed.critic_updates, 0)
+    self.assertEqual(resumed.world_updates, 3 * config.wm_batches)
+    joint = resumed.train_iteration()
+    self.assertEqual(joint["iteration"], 4)
+    self.assertEqual(joint["training_phase"], "joint")
+    self.assertFalse(joint["collected_this_iteration"])
+    self.assertTrue(torch.isfinite(torch.tensor(joint["actor_objective"])))
+    self.assertEqual(resumed.world_updates, 4 * config.wm_batches)
+    self.assertEqual(resumed.actor_updates, 1)
+    self.assertEqual(
+      resumed.critic_updates, config.critic_epochs * config.critic_minibatches
+    )
+    self.assertTrue(
+      any(
+        not torch.equal(value, actor[name])
+        for name, value in resumed.actor.state_dict().items()
+      )
+    )
 
   def test_optimizer_isolation_and_fresh_policy_collection(self):
     trainer = self.trainer()
@@ -502,6 +559,8 @@ class OnlineIntegrationTests(unittest.TestCase):
       path = Path(folder) / "checkpoint.pt"
       torch.save(trainer.state_dict(), path)
       saved = torch.load(path, map_location="cpu", weights_only=True)
+      # Older online checkpoints have no warmup setting and must retain 0.
+      del saved["config"]["wm_only_iters"]
       resumed = OnlineTrainer(self.env, self.metadata, self.config)
       resumed.load_state_dict(saved)
       self.assertEqual(resumed.iteration, trainer.iteration)
@@ -549,6 +608,8 @@ class OnlineCliTests(unittest.TestCase):
         "32",
         "--warmup-steps",
         "8",
+        "--wm-only-iters",
+        "1",
         "--collect-steps",
         "1",
         "--world-dims",
@@ -608,7 +669,21 @@ class OnlineCliTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("WM loss", result.stdout)
+        self.assertIn("WM-only warmup:", result.stdout)
         self.assertNotIn('"actor_objective":', result.stdout)
+        saved = torch.load(output / "last.pt", map_location="cpu", weights_only=True)
+        self.assertEqual(saved["config"]["wm_only_iters"], 1)
+        self.assertEqual(saved["actor_updates"], iteration - 1)
+        self.assertEqual(saved["critic_updates"], iteration - 1)
+        rows = [
+          json.loads(line)
+          for line in (output / "metrics.jsonl").read_text().splitlines()
+        ]
+        self.assertEqual(rows[0]["training_phase"], "wm_only")
+        self.assertNotIn("actor_objective", rows[0])
+        if iteration == 2:
+          self.assertEqual(rows[-1]["training_phase"], "joint")
+          self.assertIn("actor_objective", rows[-1])
         if has_wandb:
           tracking = json.loads((output / "wandb_run.json").read_text())
           self.assertEqual(tracking["last_iteration"], iteration)

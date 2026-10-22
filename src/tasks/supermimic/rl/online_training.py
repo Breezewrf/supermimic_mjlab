@@ -304,13 +304,17 @@ class OnlineTrainer:
     world_start = time.perf_counter()
     world_metrics = self.update_world()
     world_seconds = time.perf_counter() - world_start
-    policy_start = time.perf_counter()
-    policy_metrics = self.update_policy()
-    policy_seconds = time.perf_counter() - policy_start
+    wm_only = self.iteration < self.config.wm_only_iters
+    policy_metrics, policy_seconds = {}, 0.0
+    if not wm_only:
+      policy_start = time.perf_counter()
+      policy_metrics = self.update_policy()
+      policy_seconds = time.perf_counter() - policy_start
     self.iteration += 1
     elapsed = time.perf_counter() - start
     record = {
       "iteration": self.iteration,
+      "training_phase": "wm_only" if wm_only else "joint",
       "environment_steps": self.environment_steps,
       "world_updates": self.world_updates,
       "actor_updates": self.actor_updates,
@@ -390,9 +394,8 @@ class OnlineTrainer:
   def load_state_dict(self, saved: dict):
     if saved.get("schema_version") != 1 or saved.get("kind") != "supermimic_online":
       raise ValueError("Not an online SuperMimic checkpoint")
-    if (
-      saved["config"] != asdict(self.config) or saved["clips"] != self.env.library.names
-    ):
+    saved_config = {"wm_only_iters": 0, **saved["config"]}
+    if saved_config != asdict(self.config) or saved["clips"] != self.env.library.names:
       raise ValueError("Online checkpoint configuration or motion library mismatch")
     if saved["robot_metadata"]["signature"] != self.metadata["signature"]:
       raise ValueError("Online checkpoint robot signature mismatch")

@@ -79,7 +79,7 @@ def main():
     "--iterations",
     type=int,
     default=1000,
-    help="Total online update rounds, including saved rounds",
+    help="Total update rounds, including WM-only warmup and saved rounds",
   )
   parser.add_argument("--eval-interval", type=int, default=100)
   parser.add_argument("--checkpoint-interval", type=int, default=100)
@@ -105,6 +105,11 @@ def main():
   )
   parser.add_argument("--wandb-mode", choices=("online", "offline"), default="online")
   parser.add_argument("--termination-mode", choices=("learned", "analytic"))
+  parser.add_argument(
+    "--wm-only-iters",
+    type=int,
+    help="Initial rounds that collect and train only the world model (default: 0)",
+  )
   parser.add_argument(
     "--relative-orientation",
     action=argparse.BooleanOptionalAction,
@@ -178,7 +183,9 @@ def main():
       parser.error(
         "Resume requires the original evaluation limit for comparable best checkpoints"
       )
-  config_values = dict(saved["config"]) if saved else asdict(OnlineConfig())
+  # Checkpoints written before WM-only warmup used joint updates from round one.
+  saved_config = {"wm_only_iters": 0, **saved["config"]} if saved else None
+  config_values = dict(saved_config) if saved else asdict(OnlineConfig())
   for field in fields(OnlineConfig):
     value = getattr(args, field.name, None)
     if value is not None:
@@ -191,7 +198,7 @@ def main():
     parser.error(str(error))
   manifest_hash = file_sha256(args.manifest)
   if saved and (
-    saved["config"] != asdict(config) or saved["manifest_sha256"] != manifest_hash
+    saved_config != asdict(config) or saved["manifest_sha256"] != manifest_hash
   ):
     parser.error("Resume requires the original training configuration and manifest")
   if saved and args.iterations < saved["iteration"]:

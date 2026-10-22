@@ -145,6 +145,10 @@ training length in Tables A.4-A.5. It reads the converted manifest at
 `src/assets/motions/g1/lafan1_npz/manifest.json` and trains the world model, Actor,
 and Critic jointly from scratch on all 40 LAFAN clips. No standalone world-model
 pretraining is required.
+To warm up the world model first, add `--warmup-steps 64 --wm-only-iters 500`:
+the first 500 rounds after initial collection keep collecting and fitting the
+world model, with Actor and Critic updates starting at round 501. Warmup rounds
+count toward `--iterations`, and checkpoints preserve progress. The default is `0`.
 
 ```bash
 python scripts/train_supermimic.py \
