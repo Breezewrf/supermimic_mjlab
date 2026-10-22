@@ -28,6 +28,7 @@ class OnlineConfig:
   clips: tuple[str, ...] = ()
   termination_mode: str = "learned"
   relative_orientation: bool = False
+  diagnostics_batch_size: int = 64
 
   def __post_init__(self):
     counts = (
@@ -40,6 +41,7 @@ class OnlineConfig:
       self.horizon,
       self.critic_epochs,
       self.critic_minibatches,
+      self.diagnostics_batch_size,
     )
     if min(counts) < 1 or self.capacity < 10 or self.warmup_steps < 8:
       raise ValueError("Positive counts, capacity >= 10 and warmup_steps >= 8 required")

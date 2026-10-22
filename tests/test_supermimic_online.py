@@ -516,6 +516,8 @@ class OnlineCliTests(unittest.TestCase):
         "--relative-orientation",
         "--termination-mode",
         "analytic",
+        "--diagnostics-batch-size",
+        "2",
         "--clips",
         "fixture_walk",
         "--evaluation-limit",
@@ -567,6 +569,11 @@ class OnlineCliTests(unittest.TestCase):
       self.assertEqual(checkpoint["world_updates"], 2)
       self.assertTrue(checkpoint["config"]["relative_orientation"])
       self.assertEqual(checkpoint["config"]["termination_mode"], "analytic")
+      diagnostics = json.loads((output / "diagnostics.json").read_text())
+      self.assertEqual(diagnostics["iteration"], 2)
+      self.assertTrue(diagnostics["world_model"]["horizons"]["1"]["available"])
+      self.assertFalse(diagnostics["world_model"]["horizons"]["32"]["available"])
+      self.assertTrue(checkpoint["validation_windows"])
       evaluation = Path(folder) / "evaluation.json"
       result = subprocess.run(
         prefix

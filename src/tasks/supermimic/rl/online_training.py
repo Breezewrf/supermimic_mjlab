@@ -14,6 +14,7 @@ from ..models.policy import MotionActor, MotionCritic
 from ..models.world_model import WorldModel
 from ..mdp.resets import RESET_NOISE
 from .imagination import critic_loss, frozen_parameters, gae_targets, imagine
+from .diagnostics import replay_diagnostics, sampler_diagnostics
 from .world_model_training import rollout, world_model_loss
 
 
@@ -112,6 +113,7 @@ class OnlineTrainer:
     self.world_updates, self.actor_updates, self.critic_updates = 0, 0, 0
     self.initialized = False
     self.last_collection = {}
+    self.validation_windows = {}
     self.phase = "initialization"
     self.simulation_parameters = simulation_parameters(env)
 
@@ -334,6 +336,19 @@ class OnlineTrainer:
       )
     return record
 
+  def diagnostics(self):
+    return {
+      "iteration": self.iteration,
+      "world_model": replay_diagnostics(
+        self.world,
+        self.replay,
+        self.env.library,
+        self.config.diagnostics_batch_size,
+        self.validation_windows,
+        self.iteration,
+      ),
+      "reset_sampler": sampler_diagnostics(self.env.sampler, self.env.library),
+    }
 
   def state_dict(self) -> dict:
     return {
@@ -352,6 +367,7 @@ class OnlineTrainer:
       "critic_optimizer": self.critic_optimizer.state_dict(),
       "replay": self.replay.state_dict(),
       "sampler": self.env.sampler.state_dict(),
+      "validation_windows": self.validation_windows,
       "iteration": self.iteration,
       "environment_steps": self.environment_steps,
       "world_updates": self.world_updates,
@@ -392,6 +408,7 @@ class OnlineTrainer:
       getattr(self, name).load_state_dict(saved[name])
     self.replay = ReplayBuffer.from_state_dict(saved["replay"], self.device)
     self.env.sampler.load_state_dict(saved["sampler"])
+    self.validation_windows = saved.get("validation_windows", {})
     for name in (
       "iteration",
       "environment_steps",

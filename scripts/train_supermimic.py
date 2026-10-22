@@ -133,6 +133,7 @@ def main():
     "horizon",
     "critic_epochs",
     "critic_minibatches",
+    "diagnostics_batch_size",
     "seed",
   ):
     parser.add_argument("--" + name.replace("_", "-"), type=int)
@@ -291,12 +292,16 @@ def main():
       report["evaluation_limit"] = args.evaluation_limit
       write_json(output / f"evaluation_{trainer.iteration:06d}.json", report)
       write_json(output / "evaluation.json", report)
+      diagnostics = trainer.diagnostics()
+      write_json(output / f"diagnostics_{trainer.iteration:06d}.json", diagnostics)
+      write_json(output / "diagnostics.json", diagnostics)
       if report["normalized_return"] > best_return:
         best_return = report["normalized_return"]
         save_checkpoint(output / "best.pt", checkpoint())
       console.evaluation(report)
       if tracking:
         tracking.evaluation(report)
+        tracking.diagnostics(diagnostics)
 
     log_path = output / "metrics.jsonl"
     if saved and log_path.exists():

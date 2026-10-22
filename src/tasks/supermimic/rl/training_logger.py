@@ -347,6 +347,38 @@ class WandbReporter:
     self.run.log(metrics)
     self._persist(record["iteration"])
 
+  def diagnostics(self, report: dict):
+    metrics = {"train/iteration": report["iteration"]}
+    for horizon, row in report["world_model"]["horizons"].items():
+      prefix = f"model_validation/{horizon}_step"
+      metrics[prefix + "/windows"] = row["windows"]
+      if row["available"]:
+        metrics[prefix + "/covered_clips"] = len(row["covered_clips"])
+        for name in ("model", "constant_velocity"):
+          for key, value in row[name].items():
+            metrics[f"{prefix}/{name}/{key}"] = value
+    metrics["reset_sampler/entropy"] = report["reset_sampler"]["entropy"]
+    metrics["reset_sampler/top_bins"] = self.sdk.Table(
+      columns=[
+        "motion",
+        "start_seconds",
+        "probability",
+        "normalized_return_estimate",
+      ],
+      data=[
+        [
+          row[key]
+          for key in (
+            "motion",
+            "start_seconds",
+            "probability",
+            "normalized_return_estimate",
+          )
+        ]
+        for row in report["reset_sampler"]["top"]
+      ],
+    )
+    self.run.log(metrics)
 
   def window(self, record: dict):
     if record["real_reward_per_step"] is None:

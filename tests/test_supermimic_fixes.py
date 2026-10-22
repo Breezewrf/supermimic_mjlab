@@ -22,6 +22,10 @@ from src.tasks.supermimic.mdp.terminations import soft_termination
 from src.tasks.supermimic.models.kinematics import robot_metadata
 from src.tasks.supermimic.models.policy import MotionActor, MotionCritic
 from src.tasks.supermimic.models.world_model import WorldModel
+from src.tasks.supermimic.rl.diagnostics import (
+  replay_diagnostics,
+  sampler_diagnostics,
+)
 from src.tasks.supermimic.rl.imagination import frozen_parameters, imagine
 from src.tasks.supermimic.rl.training_logger import MetricWindow
 from src.tasks.supermimic.rl.world_model_training import (
@@ -259,7 +263,45 @@ class ModelFixTests(unittest.TestCase):
     )
     torch.testing.assert_close(trace["history"][:, -1], expected)
 
+  def test_fixed_diagnostics_preserve_training_rng_and_survive_ring_overwrite(
+    self,
+  ):
+    replay = self.replay()
+    world = WorldModel(self.metadata, (16,))
+    rng = replay.generator.get_state().clone()
+    snapshots = {}
+    report = replay_diagnostics(world, replay, self.library, 4, snapshots, 0)
+    torch.testing.assert_close(replay.generator.get_state(), rng)
+    self.assertTrue(world.training)
+    for key in ("1", "8", "32"):
+      self.assertTrue(report["horizons"][key]["available"])
+      self.assertTrue(snapshots[key]["batch"]["mask"].all())
+      self.assertTrue(report["horizons"][key]["constant_velocity"]["finite"])
+    saved = copy.deepcopy(snapshots)
+    for value in replay.data.values():
+      value.zero_()
+    again = replay_diagnostics(world, replay, self.library, 4, snapshots, 100)
+    self.assertEqual(report, again)
+    for key in snapshots:
+      torch.testing.assert_close(
+        snapshots[key]["batch"]["state"], saved[key]["batch"]["state"]
+      )
+    sampler = ResetSampler(self.library.lengths)
+    self.assertEqual(
+      len(sampler_diagnostics(sampler, self.library)["top"]),
+      len(sampler.returns),
+    )
 
+  def test_missing_horizons_are_reported_without_padding_scores(self):
+    replay = self.replay()
+    replay.steps = 1
+    replay.data["terminated"][0] = True
+    report = replay_diagnostics(
+      WorldModel(self.metadata, (16,)), replay, self.library, 2, {}, 0
+    )
+    self.assertTrue(report["horizons"]["1"]["available"])
+    self.assertFalse(report["horizons"]["8"]["available"])
+    self.assertFalse(report["horizons"]["32"]["available"])
 
 
 class CollectionMetricTests(unittest.TestCase):
