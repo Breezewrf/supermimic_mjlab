@@ -318,3 +318,28 @@ Replay 恢复以及
 的真实仿真结果判断，不能用想象回报上升代替真实策略性能。
 
 历史短训结果单独保存在[实现验证记录](experiments/implementation_validation_zh.md)，不作为当前策略性能的验证结果。
+
+## 梯度范数溢出与训练发散
+
+`clip_grad_norm_` 报 `total norm ... is non-finite` 有两种情况：梯度元素已包含
+NaN/Inf，或者梯度元素仍有限、但 FP32 L2 范数计算溢出（例如梯度量级为 `1e20`）。
+不能仅凭这条异常区分两者。`checked_step` 保留常规裁剪路径；范数溢出时先检查
+每个参数的梯度，全部有限才使用 FP64 重算范数并裁剪，随后执行原来的 Actor
+逐元素裁剪。发现真实 NaN/Inf 时清空梯度并停止，错误中列出模型和参数名；
+不会执行该次 optimizer step。不要通过 `error_if_nonfinite=False` 绕过检查，
+也不要把 NaN/Inf 替换成零后继续更新。
+
+如果真实奖励下降而 Critic loss 持续上升，应先检查 `metrics.jsonl` 中的
+`actor_gradient_norm`、`critic_gradient_norm`、`actor_reward_objective`、
+`actor_bootstrap_objective` 以及世界模型的状态误差。范数计算修复并不保证解决
+世界模型、Actor 和 Critic 联合训练的发散。
+
+可先在新输出目录进行较保守的短训实验：在原命令中增加
+`--warmup-steps 64 --wm-only-iters 500 --learning-rate 5e-5`，将
+`--horizon 32` 改成 `--horizon 8`，并缩短评估及存档间隔，例如
+`--eval-interval 2000 --checkpoint-interval 200`。这些是排查配置，尚未验证
+论文规模下的收敛；稳定后再单独验证 32 步设置。更改这些训练参数需要新建运行，
+不能对原配置的 checkpoint 使用 `--resume`。
+
+若再次报告真实非有限梯度，可用 `--detect-anomaly --no-compile --amp none`
+定位最早出问题的反向算子；该诊断配置速度较慢，并可能增加显存占用。

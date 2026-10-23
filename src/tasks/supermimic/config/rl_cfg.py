@@ -1,5 +1,6 @@
 """Online world-model and actor-critic training configuration."""
 
+import math
 from dataclasses import dataclass
 
 
@@ -55,6 +56,7 @@ class OnlineConfig:
     if (
       not 0 < self.gamma < 1
       or not 0 <= self.gae_lambda <= 1
+      or not math.isfinite(self.learning_rate)
       or self.learning_rate <= 0
       or self.action_noise < 0
       or self.episode_length_s <= 0

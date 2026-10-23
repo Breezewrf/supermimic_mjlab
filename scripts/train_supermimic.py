@@ -117,6 +117,11 @@ def main():
   parser.add_argument("--wandb-mode", choices=("online", "offline"), default="online")
   parser.add_argument("--termination-mode", choices=("learned", "analytic"))
   parser.add_argument("--amp", choices=("bf16", "none"))
+  parser.add_argument(
+    "--learning-rate",
+    type=float,
+    help="Initial Adam learning rate for all three optimizers (default: 2e-4)",
+  )
   parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=None)
   parser.add_argument(
     "--wm-only-iters",

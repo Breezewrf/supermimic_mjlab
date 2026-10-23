@@ -60,11 +60,44 @@ def checked_step(
   loss, module, optimizer, *, element_clip: float | None = None
 ) -> float:
   if not torch.isfinite(loss):
-    raise FloatingPointError("Nonfinite training loss")
+    optimizer.zero_grad(set_to_none=True)
+    raise FloatingPointError(f"Nonfinite training loss in {type(module).__name__}")
   loss.backward()
-  norm = torch.nn.utils.clip_grad_norm_(
-    module.parameters(), 1.0, error_if_nonfinite=True
-  )
+  parameters = [p for p in module.parameters() if p.grad is not None]
+  try:
+    norm = torch.nn.utils.clip_grad_norm_(parameters, 1.0, error_if_nonfinite=True)
+  except RuntimeError as error:
+    if "non-finite" not in str(error):
+      raise
+    # A finite FP32 gradient can have an overflowing L2 norm (e.g. 1e20).
+    # clip_grad_norm_ raises before modifying gradients in that case. Recompute
+    # only this exceptional path in FP64, without changing the clipping order.
+    invalid = [
+      name
+      for name, parameter in module.named_parameters()
+      if parameter.grad is not None and not torch.isfinite(parameter.grad).all()
+    ]
+    if invalid:
+      optimizer.zero_grad(set_to_none=True)
+      raise FloatingPointError(
+        f"Nonfinite gradients in {type(module).__name__}: {', '.join(invalid)}. "
+        "Optimizer step was not applied. Use --detect-anomaly to locate the "
+        "backward operation; check world-model rollout and critic divergence."
+      ) from None
+    with torch.no_grad():
+      norm = torch.linalg.vector_norm(
+        torch.stack(
+          [torch.linalg.vector_norm(p.grad, dtype=torch.float64) for p in parameters]
+        )
+      )
+      if not torch.isfinite(norm):
+        optimizer.zero_grad(set_to_none=True)
+        raise FloatingPointError(
+          f"Nonfinite FP64 gradient norm in {type(module).__name__}"
+        ) from None
+      scale = (1.0 / (norm + 1e-6)).clamp(max=1.0)
+      for parameter in parameters:
+        parameter.grad.mul_(scale.to(parameter.grad.dtype))
   if element_clip is not None:
     for parameter in module.parameters():
       if parameter.grad is not None:

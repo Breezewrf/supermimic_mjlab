@@ -610,6 +610,8 @@ class OnlineCliTests(unittest.TestCase):
         "32",
         "--warmup-steps",
         "8",
+        "--learning-rate",
+        "5e-5",
         "--wm-only-iters",
         "1",
         "--collect-steps",
@@ -682,6 +684,7 @@ class OnlineCliTests(unittest.TestCase):
         self.assertNotIn('"actor_objective":', result.stdout)
         saved = torch.load(output / "last.pt", map_location="cpu", weights_only=True)
         self.assertEqual(saved["config"]["wm_only_iters"], 1)
+        self.assertEqual(saved["config"]["learning_rate"], 5e-5)
         self.assertEqual(saved["actor_updates"], iteration - 1)
         self.assertEqual(saved["critic_updates"], iteration - 1)
         weights = torch.load(
