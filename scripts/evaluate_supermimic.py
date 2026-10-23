@@ -154,6 +154,8 @@ def main(*, playback=False):
       f"Policy: {args.checkpoint or args.policy or 'zero_policy (baseline)'}",
       flush=True,
     )
+    if saved:
+      print(f"Reference schema: {saved['reference_schema']}", flush=True)
     while True:
       try:
         report = evaluate(
@@ -174,6 +176,10 @@ def main(*, playback=False):
         training_environment_steps=saved.get("environment_steps") if saved else None,
         evaluated_at=datetime.now(UTC).isoformat(),
         evaluation_limit=args.max_steps_per_clip,
+        reference_schema=saved.get("reference_schema") if saved else None,
+        reference_schema_inferred=bool(
+          saved and saved.get("reference_schema_inferred")
+        ),
       )
       save_report(report, args.output, args.csv)
       print(evaluation_summary(report), flush=True)

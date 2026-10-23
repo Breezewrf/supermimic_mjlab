@@ -4,6 +4,9 @@ from pathlib import Path
 
 import torch
 
+from ..models.legacy_policy import LEGACY_GOAL_DIM, LEGACY_REFERENCE_SCHEMA
+from ..models.policy import GOAL_DIM, REFERENCE_SCHEMA
+
 TRAINING_KIND = "supermimic_online"
 POLICY_KIND = "supermimic_actor"
 POLICY_REQUIRED_FIELDS = (
@@ -23,7 +26,30 @@ POLICY_OPTIONAL_FIELDS = (
   "best_return",
   "evaluation_limit",
   "source_checkpoint",
+  "reference_schema_inferred",
 )
+
+
+def _infer_reference_schema(actor: dict) -> str:
+  """Recognize the two historical Actor input layouts without changing weights."""
+  weight = actor.get("encoder.0.weight")
+  if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
+    raise ValueError(
+      "Cannot infer reference_schema: expected a 2D Actor encoder.0.weight"
+    )
+  schemas = {GOAL_DIM: REFERENCE_SCHEMA, LEGACY_GOAL_DIM: LEGACY_REFERENCE_SCHEMA}
+  width = weight.shape[1]
+  if width not in schemas:
+    raise ValueError(
+      f"Cannot infer reference_schema from Actor encoder input width {width}; "
+      f"recognized widths are {GOAL_DIM} and 2680. Use the checkpoint's matching code version."
+    )
+  return schemas[width]
+
+
+def resolve_reference_schema(saved: dict) -> str:
+  schema = saved.get("reference_schema")
+  return schema if schema is not None else _infer_reference_schema(saved["actor"])
 
 
 def _cpu_copy(value):
@@ -47,10 +73,10 @@ def policy_checkpoint(saved: dict) -> dict:
     or saved.get("schema_version") != 1
   ):
     raise ValueError("Expected a SuperMimic training checkpoint or policy weights")
-  missing = set(POLICY_REQUIRED_FIELDS) - saved.keys()
+  missing = (set(POLICY_REQUIRED_FIELDS) - {"reference_schema"}) - saved.keys()
   if missing:
     raise ValueError(f"Checkpoint lacks policy metadata: {', '.join(sorted(missing))}")
-  return {
+  policy = {
     "kind": POLICY_KIND,
     **{
       key: _cpu_copy(saved[key])
@@ -58,6 +84,10 @@ def policy_checkpoint(saved: dict) -> dict:
       if key in saved
     },
   }
+  if saved.get("reference_schema") is None:
+    policy["reference_schema"] = resolve_reference_schema(saved)
+    policy["reference_schema_inferred"] = True
+  return policy
 
 
 def save_checkpoint(path: Path, data: dict):

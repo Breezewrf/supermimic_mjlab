@@ -196,8 +196,14 @@ class CheckpointInferenceTests(unittest.TestCase):
       with self.assertRaisesRegex(ValueError, "manifest"):
         load_actor(checkpoint, manifest, "cpu")
       saved.pop("reference_schema")
+      manifest.write_text("{}")
       torch.save(saved, checkpoint)
-      with self.assertRaisesRegex(ValueError, "older reference"):
+      _, metadata, _ = load_actor(checkpoint, manifest, "cpu")
+      self.assertTrue(metadata["reference_schema_inferred"])
+      self.assertEqual(metadata["reference_schema"], REFERENCE_SCHEMA)
+      saved["reference_schema"] = "unknown_reference"
+      torch.save(saved, checkpoint)
+      with self.assertRaisesRegex(ValueError, "Unsupported reference schema"):
         load_actor(checkpoint, manifest, "cpu")
 
 

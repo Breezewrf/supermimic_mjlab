@@ -159,7 +159,8 @@ FP32. Rewards and Critic targets are batched across imagined time steps. Referen
 inputs contain 73 features per frame (730 per window). First updates compile
 kernels; measure steady-state speed afterward. CPU uses eager FP32. Use
 `--no-compile` or `--amp none` to isolate execution issues. Earlier 2680-feature
-policy checkpoints require their matching code version; start a new run here.
+policies support inference, evaluation, and playback through a legacy adapter.
+Resuming their training still requires matching code; start a new run for the 730-input architecture.
 
 ```bash
 python scripts/train_supermimic.py \
@@ -238,6 +239,11 @@ the same way. Evaluation and playback accept either format with the same actor w
 and data/robot/physics checks. When resuming an older run with `best.pt` and no
 `policy_best.pt`, the best policy is exported automatically; existing full snapshots
 are retained. Export does not migrate legacy feature schemas or physics settings.
+When `reference_schema` is missing, the Actor's `encoder.0.weight` input width
+identifies `root_joint_73_v1` (730) or `full_body_268` (2680). Export prints the
+inferred schema and records `reference_schema_inferred: true`. Evaluation and
+playback automatically select the original full-body feature computation for
+2680-input policies, preserving their weights. Unrecognized input widths are rejected.
 An already running training process needs to restart from `last.pt` to use this layout.
 
 ## Training logs and W&B
@@ -353,8 +359,9 @@ MUJOCO_GL=egl python scripts/evaluate_supermimic.py \
 
 Selected clips are concatenated at 960×540, 50 FPS. Live viewing requires a desktop
 display; MP4 export does not. Both paths validate checkpoint features, manifest,
-robot signature, and physics settings. Legacy reference-feature checkpoints require
-their matching code version; checkpoints from new training runs work directly.
+robot signature, and physics settings. Known 730/2680-input policies are selected
+automatically, including older checkpoints without `reference_schema`. Incompatible
+physics configurations are still rejected.
 Playback requires `--checkpoint` or `--policy`; evaluation without either explicitly
 runs a zero-action baseline.
 

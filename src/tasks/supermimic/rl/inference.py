@@ -5,8 +5,9 @@ from pathlib import Path
 import torch
 
 from ..data.world_model_data import file_sha256
+from ..models.legacy_policy import LEGACY_REFERENCE_SCHEMA, LegacyMotionActor
 from ..models.policy import REFERENCE_SCHEMA, MotionActor
-from .checkpoints import POLICY_KIND, TRAINING_KIND
+from .checkpoints import POLICY_KIND, TRAINING_KIND, resolve_reference_schema
 
 
 def load_actor(
@@ -22,15 +23,19 @@ def load_actor(
     raise ValueError(
       "Expected SuperMimic policy weights or an online training checkpoint"
     )
-  if saved.get("reference_schema") != REFERENCE_SCHEMA:
+  schema = resolve_reference_schema(saved)
+  if schema not in (REFERENCE_SCHEMA, LEGACY_REFERENCE_SCHEMA):
     raise ValueError(
-      "Checkpoint uses older reference features; use its matching code version"
+      f"Unsupported reference schema {schema!r}; use its matching code version"
     )
+  if saved.get("reference_schema") is None:
+    saved = {**saved, "reference_schema": schema, "reference_schema_inferred": True}
   if saved["manifest_sha256"] != file_sha256(manifest):
     raise ValueError("Checkpoint manifest does not match")
   if clips and not set(clips).issubset(saved["clips"]):
     raise ValueError("Evaluation clips must be present in the checkpoint")
-  policy = MotionActor(
+  actor_class = LegacyMotionActor if schema == LEGACY_REFERENCE_SCHEMA else MotionActor
+  policy = actor_class(
     saved["robot_metadata"]["default_q"],
     tuple(saved["config"]["actor_dims"]),
     saved["config"].get("relative_orientation", False),

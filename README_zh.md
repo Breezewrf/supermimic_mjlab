@@ -141,7 +141,8 @@ CUDA 训练默认启用 `--compile --amp bf16`：核心张量计算使用 `torch
 仅 MLP 使用 BF16 autocast，物理计算保留 FP32；想象奖励与 Critic 目标值跨时间
 批量计算。参考输入改为每帧 73 维、每窗口 730 维。初始轮需编译内核，应在编译
 结束后比较稳定速度。CPU 使用普通执行及 FP32。`--no-compile` 和 `--amp none`
-可分别关闭编译和混合精度；旧 2680 维策略断点需使用对应版本代码，新版本需新建训练。
+可分别关闭编译和混合精度。旧 2680 维策略支持推理、评估和可视化；恢复旧版训练仍需
+对应版本代码，新版 730 维架构需新建训练。
 
 ```bash
 python scripts/train_supermimic.py \
@@ -213,6 +214,10 @@ python scripts/export_supermimic_policy.py \
 两种格式保留相同 Actor 权重和数据／机器人／物理配置校验。续训旧目录时，若存在
 旧 `best.pt` 且尚无 `policy_best.pt`，会自动导出最佳策略；已有完整历史文件不会删除。
 这只改变存储格式，不转换旧版参考特征或物理配置。
+缺少 `reference_schema` 的旧断点会从 `actor["encoder.0.weight"]` 的输入维度推断：
+730 对应 `root_joint_73_v1`，2680 对应 `full_body_268`；导出文件记录
+`reference_schema_inferred: true`，命令行也会显示推断结果。评估和播放会为 2680 维
+策略自动选择旧版完整身体特征，保持原权重与特征计算不变；未知输入维度会明确报错。
 正在运行的训练进程需要从 `last.pt` 重启后才会采用新的保存方式。
 
 ## 训练日志与 W&B
@@ -317,8 +322,8 @@ MUJOCO_GL=egl python scripts/evaluate_supermimic.py \
 ```
 
 视频顺序拼接所选动作；默认 960×540、50 FPS。实时窗口需要桌面显示环境，视频导出
-不需要窗口。评估与播放共用 checkpoint、数据签名和物理参数校验，旧参考特征格式的
-checkpoint 需使用对应版本代码；新训练产生的 checkpoint 可直接使用。
+不需要窗口。评估与播放共用 checkpoint、数据签名和物理参数校验，自动识别已知的
+730／2680 维策略，包括缺少 `reference_schema` 的旧断点；不匹配的物理配置仍会拒绝加载。
 播放必须指定 `--checkpoint` 或 `--policy`；评估未指定策略时运行零动作基线，并明确标注。
 
 ## 测试
