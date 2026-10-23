@@ -75,7 +75,7 @@ scripts/
 ├── train_supermimic.py            # 在线联合训练
 ├── evaluate_supermimic.py         # checkpoint 策略评估
 ├── play_supermimic.py             # MuJoCo 实时策略／参考对照
-├── export_supermimic_policy.py    # 从完整断点提取轻量策略
+├── export_supermimic_policy.py    # 从完整断点提取策略或世界模型
 ├── data/
 │   └── convert_lafan_to_npz.py     # LAFAN CSV 转 NPZ
 └── offline/
@@ -213,6 +213,22 @@ python scripts/export_supermimic_policy.py \
   --checkpoint outputs/supermimic/lafan_horizon_fixed/best.pt \
   --output outputs/supermimic/lafan_horizon_fixed/policy_best.pt
 ```
+
+同一脚本也支持单独导出世界模型：
+
+```bash
+python scripts/export_supermimic_policy.py \
+  --component world-model \
+  --checkpoint outputs/supermimic/lafan_horizon_fixed/last.pt \
+  --output outputs/supermimic/lafan_horizon_fixed/world_model_last.pt
+```
+
+不指定 `--component` 时仍导出 policy。世界模型文件使用 `supermimic_world_model`
+格式，保留完整 `world` 权重（包括归一化参数、运动学数据和终止预测头）、网络配置、
+机器人／物理签名、动作来源和轮次，不含 Actor、Critic、Replay、优化器或 RNG 状态，
+不能用于续训。`policy_best.pt` 等轻量策略不含世界模型，不能从中恢复对应权重。
+需要比较同一轮策略与世界模型时，应从同一个完整断点分别导出；不要把不同轮次的
+`policy_best.pt` 和 `last.pt` 当作同一轮模型。本功能仅增加导出，尚未接入 play 预测叠加。
 
 `last.pt` 和已有 `iteration_*.pt` 也可同样导出。评估和播放兼容完整断点及轻量策略，
 两种格式保留相同 Actor 权重和数据／机器人／物理配置校验。续训旧目录时，若存在

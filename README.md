@@ -86,7 +86,7 @@ scripts/
 ├── train_supermimic.py            # Online joint training
 ├── evaluate_supermimic.py         # Checkpoint policy evaluation
 ├── play_supermimic.py             # Live MuJoCo policy/reference comparison
-├── export_supermimic_policy.py    # Extract lightweight actor weights
+├── export_supermimic_policy.py    # Extract policy or world-model weights
 ├── data/
 │   └── convert_lafan_to_npz.py     # LAFAN CSV-to-NPZ conversion
 └── offline/
@@ -243,6 +243,24 @@ python scripts/export_supermimic_policy.py \
   --checkpoint outputs/supermimic/lafan_horizon_fixed/best.pt \
   --output outputs/supermimic/lafan_horizon_fixed/policy_best.pt
 ```
+
+Export the world model separately with the same script:
+
+```bash
+python scripts/export_supermimic_policy.py \
+  --component world-model \
+  --checkpoint outputs/supermimic/lafan_horizon_fixed/last.pt \
+  --output outputs/supermimic/lafan_horizon_fixed/world_model_last.pt
+```
+
+The default component is `policy`. World-model files use kind
+`supermimic_world_model` and retain the complete `world` state dict, including
+normalization buffers, kinematics and the termination head, plus model configuration,
+robot/physics signatures, motion provenance and iteration. They contain no Actor,
+Critic, replay, optimizers or RNG state and cannot resume training. Policy-only
+files have no world weights to extract. To compare a policy with its world model
+at the same iteration, export both components from the same full checkpoint.
+Exporting a world model does not yet add a prediction overlay to `play`.
 
 Run from the project root. Export preserves the source and memory-maps replay storage
 without reading it into RAM. Existing `last.pt` and `iteration_*.pt` can be exported

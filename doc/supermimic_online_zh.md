@@ -194,6 +194,11 @@ Replay 常规采样也改为对随机候选做窗口/历史检查；仅候选极
 
 已有完整断点可用 `scripts/export_supermimic_policy.py --checkpoint <完整断点>
 --output <轻量策略.pt>` 提取推理权重，内存映射读取，不复制 Replay，也不改写源文件。
+同一命令添加 `--component world-model --output <世界模型.pt>` 可单独提取完整
+`world` 状态（含归一化参数、运动学与终止预测头）及重建配置、机器人／物理签名。
+该文件格式为 `supermimic_world_model`，不含 Actor、Critic、Replay、优化器或 RNG，
+不能续训；轻量 policy 本身不含世界模型。若需同轮次的策略与世界模型，应从同一个
+完整断点分别导出。世界模型导出不会自动启用 play 中的预测可视化。
 续训旧目录时，如旧 `best.pt` 存在而 `policy_best.pt` 不存在，会自动导出最佳策略。
 现存历史文件不会自动删除；正在运行的进程须从 `last.pt` 重启后才会使用新的保存方式。
 缺少 `reference_schema` 时，导出和推理会按 Actor 编码器输入维度识别 730／2680
