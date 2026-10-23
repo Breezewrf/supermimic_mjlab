@@ -173,6 +173,15 @@ including old 2680-input checkpoints without schema metadata. Old checkpoints
 without execution settings resume in eager FP32. A resume cannot change the layout;
 use a new output directory to train a different architecture.
 
+Optional input `RunningNorm` is enabled independently with
+`--actor-input-normalization` and `--critic-input-normalization` (both off by
+default). Actor observations and goals use separate statistics; all history frames
+share the observation statistics. Critic features use their own statistics.
+Only real collection updates the moments; imagination, critic fitting, evaluation
+and playback hold them fixed. Checkpoints and actor exports preserve the moments
+for both reference layouts. Resume restores the switches automatically and cannot
+toggle normalization on an existing run; older checkpoints default to disabled.
+
 ```bash
 python scripts/train_supermimic.py \
   --device cuda:0 \

@@ -78,6 +78,8 @@ def training_config(saved: dict) -> dict:
     "compile": False,
     "amp": "none",
     "reference_dim": dimensions[schema],
+    "actor_input_normalization": False,
+    "critic_input_normalization": False,
     **saved["config"],
   }
   if config["reference_dim"] != dimensions[schema]:

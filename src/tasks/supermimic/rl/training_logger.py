@@ -152,6 +152,16 @@ class ConsoleReporter:
     compiled = config.get("compile", True) and device.startswith("cuda")
     precision = config.get("amp", "bf16") if device.startswith("cuda") else "fp32"
     reference_dim = config.get("reference_dim", 730)
+    if config.get("actor_input_normalization") or config.get(
+      "critic_input_normalization"
+    ):
+      self.message(
+        "RunningNorm: actor="
+        + str(config.get("actor_input_normalization", False))
+        + ", critic="
+        + str(config.get("critic_input_normalization", False))
+        + " | statistics: real collection only"
+      )
     self.message(
       f"Execution: {'torch.compile' if compiled else 'eager'} | MLP: {precision} | "
       f"reference: 10 x {reference_dim // 10} = {reference_dim} features"

@@ -125,6 +125,13 @@ def main():
   parser.add_argument("--wandb-mode", choices=("online", "offline"), default="online")
   parser.add_argument("--termination-mode", choices=("learned", "analytic"))
   parser.add_argument("--amp", choices=("bf16", "none"))
+  for name in ("actor-input-normalization", "critic-input-normalization"):
+    parser.add_argument(
+      "--" + name,
+      action=argparse.BooleanOptionalAction,
+      default=None,
+      help="Enable RunningNorm for the selected network's inputs (default: disabled)",
+    )
   parser.add_argument(
     "--reference-dim",
     type=int,
@@ -236,6 +243,13 @@ def main():
   except ValueError as error:
     parser.error(str(error))
   manifest_hash = file_sha256(args.manifest)
+  if saved and any(
+    getattr(config, name) != saved_config[name]
+    for name in ("actor_input_normalization", "critic_input_normalization")
+  ):
+    parser.error(
+      "Resume cannot change input normalization; start a new run to enable or disable RunningNorm"
+    )
   if saved and config.reference_dim != saved_config["reference_dim"]:
     parser.error(
       "Resume cannot change --reference-dim; use a new output directory for a new architecture"

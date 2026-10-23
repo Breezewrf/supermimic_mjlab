@@ -134,12 +134,14 @@ class OnlineTrainer:
       config.relative_orientation,
       config.amp,
       reference_dim=config.reference_dim,
+      input_normalization=config.actor_input_normalization,
     ).to(self.device)
     self.critic = MotionCritic(
       metadata["default_q"],
       config.critic_dims,
       config.amp,
       reference_dim=config.reference_dim,
+      input_normalization=config.critic_input_normalization,
     ).to(self.device)
     self.kernels = TrainingKernels(
       self.actor,
@@ -182,6 +184,19 @@ class OnlineTrainer:
     timeouts, motion_ends = rewards.long(), rewards.long()
     for _ in range(steps):
       inputs = self.env.policy_input()
+      if (
+        self.config.actor_input_normalization or self.config.critic_input_normalization
+      ):
+        goal = self.actor.reference_features(
+          inputs["future_reference"], self.actor.default_q
+        )
+        # Count only the newest real observation, not overlapping history stacks.
+        self.actor.update_normalization(inputs["history"][:, -1], goal)
+        if self.config.critic_input_normalization:
+          features = self.critic.features(
+            self.env.read_state(), inputs["future_reference"], self.env.context, goal
+          )
+          self.critic.update_normalization(features)
       action = self.actor(inputs["history"], inputs["future_reference"])
       noise = torch.randn(action.shape, device=self.device, generator=self.noise_rng)
       _, reward, terminated, truncated, extras = self.env.step(

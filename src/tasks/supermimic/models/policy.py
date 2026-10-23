@@ -14,6 +14,7 @@ from ..mdp.state import (
   yaw_quat,
 )
 from .execution import run_mlp
+from .normalization import RunningNorm
 
 REFERENCE_DIM = 73
 GOAL_DIM = 10 * REFERENCE_DIM
@@ -120,6 +121,7 @@ class MotionActor(nn.Module):
     relative_orientation: bool = False,
     amp: str = "none",
     reference_dim: int = GOAL_DIM,
+    input_normalization: bool = False,
   ):
     super().__init__()
     self.hidden_dims = tuple(hidden_dims)
@@ -128,7 +130,14 @@ class MotionActor(nn.Module):
     self.reference_dim = reference_dim
     self.reference_schema = schema_for_dimension(reference_dim)
     self.reference_features = reference_feature_function(reference_dim)
+    self.input_normalization = input_normalization
     self.observation_dim = 99 if relative_orientation else 93
+    self.obs_norm = (
+      RunningNorm(self.observation_dim) if input_normalization else nn.Identity()
+    )
+    self.goal_norm = (
+      RunningNorm(reference_dim) if input_normalization else nn.Identity()
+    )
     self.register_buffer("default_q", default_q.detach().clone().float())
     self.register_buffer(
       "observation_scale",
@@ -146,10 +155,15 @@ class MotionActor(nn.Module):
       raise ValueError(
         f"Actor needs ten {self.observation_dim}-dimensional observations"
       )
-    latent = run_mlp(self.encoder, goal, self.amp).tanh()
+    latent = run_mlp(self.encoder, self.goal_norm(goal), self.amp).tanh()
+    observation = (
+      self.obs_norm(history)
+      if self.input_normalization
+      else history / self.observation_scale
+    )
     return run_mlp(
       self.decoder,
-      torch.cat((latent, (history / self.observation_scale).flatten(-2)), -1),
+      torch.cat((latent, observation.flatten(-2)), -1),
       self.amp,
     )
 
@@ -157,6 +171,12 @@ class MotionActor(nn.Module):
     return self.forward_features(
       history, self.reference_features(future_reference, self.default_q)
     )
+
+  @torch.no_grad()
+  def update_normalization(self, observation: Tensor, goal: Tensor) -> None:
+    if self.input_normalization:
+      self.obs_norm.update(observation)
+      self.goal_norm.update(goal)
 
 
 class MotionCritic(nn.Module):
@@ -166,6 +186,7 @@ class MotionCritic(nn.Module):
     hidden_dims: tuple[int, ...] = (256, 128),
     amp: str = "none",
     reference_dim: int = GOAL_DIM,
+    input_normalization: bool = False,
   ):
     super().__init__()
     self.hidden_dims = tuple(hidden_dims)
@@ -173,6 +194,10 @@ class MotionCritic(nn.Module):
     self.reference_dim = reference_dim
     self.reference_schema = schema_for_dimension(reference_dim)
     self.reference_features = reference_feature_function(reference_dim)
+    self.input_normalization = input_normalization
+    self.input_norm = (
+      RunningNorm(71 + reference_dim + 33) if input_normalization else nn.Identity()
+    )
     self.register_buffer("default_q", default_q.detach().clone().float())
     self.register_buffer(
       "context_scale", torch.tensor([1.0] + [0.01] * 29 + [0.025, 0.05, 0.05])
@@ -210,4 +235,9 @@ class MotionCritic(nn.Module):
     return self.forward_features(self.features(state, reference, context)).squeeze(-1)
 
   def forward_features(self, features: Tensor) -> Tensor:
-    return run_mlp(self.value, features, self.amp)
+    return run_mlp(self.value, self.input_norm(features), self.amp)
+
+  @torch.no_grad()
+  def update_normalization(self, features: Tensor) -> None:
+    if self.input_normalization:
+      self.input_norm.update(features)

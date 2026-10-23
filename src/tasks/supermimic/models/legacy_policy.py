@@ -24,7 +24,13 @@ class LegacyMotionActor(MotionActor):
     hidden_dims: tuple[int, ...] = (2048, 1024, 512, 256),
     relative_orientation: bool = False,
     amp: str = "none",
+    input_normalization: bool = False,
   ):
     super().__init__(
-      default_q, hidden_dims, relative_orientation, amp, reference_dim=LEGACY_GOAL_DIM
+      default_q,
+      hidden_dims,
+      relative_orientation,
+      amp,
+      reference_dim=LEGACY_GOAL_DIM,
+      input_normalization=input_normalization,
     )

@@ -47,6 +47,7 @@ def load_actor(
     tuple(saved["config"]["actor_dims"]),
     saved["config"].get("relative_orientation", False),
     saved["config"].get("amp", "none"),
+    input_normalization=saved["config"].get("actor_input_normalization", False),
   )
   policy.load_state_dict(saved["actor"])
   return policy.to(device).eval(), saved, clips or tuple(saved["clips"])

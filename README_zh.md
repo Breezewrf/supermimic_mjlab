@@ -148,6 +148,18 @@ Actor、Critic、真实采集和想象训练统一使用所选特征。对照旧
 完整 checkpoint 续训自动识别参考维度，兼容缺少 schema 元数据的旧 2680 维断点；
 旧断点缺少执行配置时沿用非编译 FP32。续训不能切换参考维度，更换架构需新建输出目录。
 
+Actor／Critic 输入可分别启用 `RunningNorm`，默认均关闭：
+
+```bash
+--actor-input-normalization --critic-input-normalization
+```
+
+Actor 对每帧本体观测和参考输入分别归一化，10 帧观测历史共享同一套逐维统计；
+Critic 对完整输入特征独立归一化。统计只从真实采集数据更新，想象反传、价值拟合、
+评估和播放期间固定。统计随完整断点或轻量 Actor 权重保存，兼容 730／2680 维。
+可只启用其中一个开关做对照实验；新实验请使用新输出目录。恢复会自动读取开关，
+不能通过 `--resume` 给已有未归一化模型直接启用它们。未记录这些配置的旧断点按关闭恢复。
+
 ```bash
 python scripts/train_supermimic.py \
   --device cuda:0 \

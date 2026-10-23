@@ -34,6 +34,8 @@ class OnlineConfig:
   compile: bool = True
   amp: str = "bf16"
   reference_dim: int = 730
+  actor_input_normalization: bool = False
+  critic_input_normalization: bool = False
 
   def __post_init__(self):
     if self.reference_dim not in (730, 2680):
