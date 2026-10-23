@@ -33,8 +33,11 @@ class OnlineConfig:
   diagnostics_batch_size: int = 64
   compile: bool = True
   amp: str = "bf16"
+  reference_dim: int = 730
 
   def __post_init__(self):
+    if self.reference_dim not in (730, 2680):
+      raise ValueError("reference_dim must be 730 or 2680")
     counts = (
       self.num_envs,
       self.collect_steps,

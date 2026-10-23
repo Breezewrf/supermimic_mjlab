@@ -19,11 +19,12 @@ from src.tasks.supermimic.config.task_cfg import (
 )
 from src.tasks.supermimic.data.world_model_data import file_sha256
 from src.tasks.supermimic.models.kinematics import robot_metadata
-from src.tasks.supermimic.models.policy import REFERENCE_SCHEMA
+from src.tasks.supermimic.models.policy import schema_for_dimension
 from src.tasks.supermimic.rl.checkpoints import (
   export_policy,
   policy_checkpoint,
   save_checkpoint,
+  training_config,
 )
 from src.tasks.supermimic.rl.evaluation import evaluate
 from src.tasks.supermimic.rl.online_training import (
@@ -118,6 +119,12 @@ def main():
   parser.add_argument("--termination-mode", choices=("learned", "analytic"))
   parser.add_argument("--amp", choices=("bf16", "none"))
   parser.add_argument(
+    "--reference-dim",
+    type=int,
+    choices=(730, 2680),
+    help="Ten-frame reference input width: compact 730 (default) or original full-body 2680",
+  )
+  parser.add_argument(
     "--learning-rate",
     type=float,
     help="Initial Adam learning rate for all three optimizers (default: 2e-4)",
@@ -195,10 +202,6 @@ def main():
       "--resume requires a full online training checkpoint (last.pt); policy weights cannot resume training"
     )
   if saved:
-    if saved.get("reference_schema") != REFERENCE_SCHEMA:
-      parser.error(
-        "Checkpoint uses older reference features; the 730-dimensional policy requires a new run"
-      )
     if saved.get("sampler", {}).get("schema_version") != 2:
       parser.error(
         "Legacy reset scores are incompatible with this fix; start a new run. Old actors remain usable for evaluation."
@@ -209,8 +212,10 @@ def main():
       parser.error(
         "Resume requires the original evaluation limit for comparable best checkpoints"
       )
-  # Checkpoints written before WM-only warmup used joint updates from round one.
-  saved_config = {"wm_only_iters": 0, **saved["config"]} if saved else None
+  try:
+    saved_config = training_config(saved) if saved else None
+  except ValueError as error:
+    parser.error(str(error))
   config_values = dict(saved_config) if saved else asdict(OnlineConfig())
   for field in fields(OnlineConfig):
     value = getattr(args, field.name, None)
@@ -223,6 +228,10 @@ def main():
   except ValueError as error:
     parser.error(str(error))
   manifest_hash = file_sha256(args.manifest)
+  if saved and config.reference_dim != saved_config["reference_dim"]:
+    parser.error(
+      "Resume cannot change --reference-dim; use a new output directory for a new architecture"
+    )
   if saved and (
     saved_config != asdict(config) or saved["manifest_sha256"] != manifest_hash
   ):
@@ -274,7 +283,7 @@ def main():
       "manifest_sha256": manifest_hash,
       "runtime": runtime,
       "robot_signature": trainer.metadata["signature"],
-      "reference_schema": REFERENCE_SCHEMA,
+      "reference_schema": schema_for_dimension(config.reference_dim),
       "execution": {
         "compiled": trainer.kernels.enabled,
         "mlp_precision": config.amp if args.device.startswith("cuda") else "fp32",

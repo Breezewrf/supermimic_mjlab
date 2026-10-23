@@ -6,7 +6,6 @@ import torch
 from torch import Tensor
 
 from ..mdp.state import add_sensor_noise, observe
-from ..models.policy import reference_features
 
 
 @contextmanager
@@ -96,7 +95,9 @@ def imagine(
   windows = {
     key: value.unfold(1, 10, 1).movedim(-1, 2) for key, value in future.items()
   }
-  goal_fn = kernels.goals if kernels is not None else reference_features
+  if actor.reference_dim != critic.reference_dim:
+    raise ValueError("Actor and critic reference dimensions differ")
+  goal_fn = kernels.goals if kernels is not None else actor.reference_features
   with torch.no_grad():
     goals = goal_fn(windows, actor.default_q)
   first_action = history[:, -1, -29:]

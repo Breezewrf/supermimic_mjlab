@@ -52,6 +52,26 @@ def resolve_reference_schema(saved: dict) -> str:
   return schema if schema is not None else _infer_reference_schema(saved["actor"])
 
 
+def training_config(saved: dict) -> dict:
+  """Fill only historically absent settings, preserving the saved execution mode."""
+  schema = resolve_reference_schema(saved)
+  dimensions = {REFERENCE_SCHEMA: GOAL_DIM, LEGACY_REFERENCE_SCHEMA: LEGACY_GOAL_DIM}
+  if schema not in dimensions:
+    raise ValueError(f"Unsupported training reference schema {schema!r}")
+  config = {
+    "wm_only_iters": 0,
+    "compile": False,
+    "amp": "none",
+    "reference_dim": dimensions[schema],
+    **saved["config"],
+  }
+  if config["reference_dim"] != dimensions[schema]:
+    raise ValueError("Checkpoint reference dimension and schema differ")
+  if saved["actor"]["encoder.0.weight"].shape[1] != config["reference_dim"]:
+    raise ValueError("Checkpoint Actor input width and reference dimension differ")
+  return config
+
+
 def _cpu_copy(value):
   if isinstance(value, torch.Tensor):
     # Clone also breaks storage aliases: a small view must not serialize a large

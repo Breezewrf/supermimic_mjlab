@@ -151,9 +151,10 @@ class ConsoleReporter:
       )
     compiled = config.get("compile", True) and device.startswith("cuda")
     precision = config.get("amp", "bf16") if device.startswith("cuda") else "fp32"
+    reference_dim = config.get("reference_dim", 730)
     self.message(
       f"Execution: {'torch.compile' if compiled else 'eager'} | MLP: {precision} | "
-      "reference: 10 x 73 = 730 features"
+      f"reference: 10 x {reference_dim // 10} = {reference_dim} features"
     )
     if compiled:
       self.message(
@@ -244,9 +245,7 @@ class ConsoleReporter:
     else:
       from .evaluation import evaluation_summary
 
-      self.message(
-        f"{evaluation_summary(report)} | iteration {report['iteration']:,}"
-      )
+      self.message(f"{evaluation_summary(report)} | iteration {report['iteration']:,}")
 
 
 class WandbReporter:

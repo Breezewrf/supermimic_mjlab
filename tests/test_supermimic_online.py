@@ -66,6 +66,12 @@ def make_starts(library, default_q, count=2, *, frame_id=0):
 
 
 class OnlineConfigTests(unittest.TestCase):
+  def test_reference_dimension_requires_a_supported_layout(self):
+    for width in (730, 2680):
+      self.assertEqual(OnlineConfig(reference_dim=width).reference_dim, width)
+    with self.assertRaisesRegex(ValueError, "reference_dim"):
+      OnlineConfig(reference_dim=73)
+
   def test_wm_only_iters_accepts_zero_and_positive_but_rejects_negative(self):
     self.assertEqual(OnlineConfig().wm_only_iters, 0)
     self.assertEqual(OnlineConfig(wm_only_iters=500).wm_only_iters, 500)
@@ -581,6 +587,27 @@ class OnlineIntegrationTests(unittest.TestCase):
       for episode, mask in zip(windows["episode_id"], windows["mask"]):
         self.assertEqual(len(episode[mask].unique()), 1)
 
+  def test_full_body_training_resumes_historical_checkpoint(self):
+    config = replace(self.config, reference_dim=2680, amp="none", compile=False)
+    trainer = self.trainer(config)
+    trainer.train_iteration()
+    saved = copy.deepcopy(trainer.state_dict())
+    self.assertEqual(saved["reference_schema"], "full_body_268")
+    self.assertEqual(trainer.critic.value[0].in_features, 2784)
+    # b050140 checkpoints predate schema, execution and dimension metadata.
+    del saved["reference_schema"]
+    for key in ("reference_dim", "amp", "compile", "wm_only_iters"):
+      del saved["config"][key]
+    resumed = OnlineTrainer(self.env, self.metadata, config)
+    resumed.load_state_dict(saved)
+    for name in ("actor", "critic", "world"):
+      for key, value in getattr(trainer, name).state_dict().items():
+        torch.testing.assert_close(getattr(resumed, name).state_dict()[key], value)
+    self.assertEqual(resumed.actor_updates, trainer.actor_updates)
+    row = resumed.train_iteration()
+    self.assertTrue(torch.isfinite(torch.tensor(row["actor_objective"])))
+    self.assertEqual(resumed.iteration, 2)
+
   def test_capacity_overflow_rejects_corrupted_physical_transitions(self):
     counter = self.env.sim.data.ncollision
     original = counter.clone()
@@ -594,6 +621,12 @@ class OnlineIntegrationTests(unittest.TestCase):
 
 class OnlineCliTests(unittest.TestCase):
   def test_cpu_train_resume_and_checkpoint_inference(self):
+    self.run_cli_training(730)
+
+  def test_full_body_cpu_train_resume_and_checkpoint_inference(self):
+    self.run_cli_training(2680)
+
+  def run_cli_training(self, reference_dim):
     with tempfile.TemporaryDirectory() as folder:
       output = Path(folder) / "training"
       manifest, _ = make_motions(Path(folder) / "motions", robot_metadata())
@@ -606,6 +639,8 @@ class OnlineCliTests(unittest.TestCase):
         "cpu",
         "--num-envs",
         "2",
+        "--reference-dim",
+        str(reference_dim),
         "--capacity",
         "32",
         "--warmup-steps",
@@ -663,6 +698,17 @@ class OnlineCliTests(unittest.TestCase):
       for iteration in (1, 2):
         command = common + ["--iterations", str(iteration)]
         if iteration == 2:
+          # Resume infers either layout without an explicit dimension argument.
+          offset = command.index("--reference-dim")
+          del command[offset : offset + 2]
+          if reference_dim == 2680:
+            historical = torch.load(
+              output / "last.pt", map_location="cpu", weights_only=True
+            )
+            del historical["reference_schema"]
+            for key in ("reference_dim", "amp", "compile"):
+              del historical["config"][key]
+            torch.save(historical, output / "last.pt")
           command += [
             "--resume",
             str(output / "last.pt"),
@@ -685,6 +731,11 @@ class OnlineCliTests(unittest.TestCase):
         saved = torch.load(output / "last.pt", map_location="cpu", weights_only=True)
         self.assertEqual(saved["config"]["wm_only_iters"], 1)
         self.assertEqual(saved["config"]["learning_rate"], 5e-5)
+        self.assertEqual(saved["config"]["reference_dim"], reference_dim)
+        self.assertEqual(saved["actor"]["encoder.0.weight"].shape[1], reference_dim)
+        self.assertEqual(
+          saved["critic"]["value.0.weight"].shape[1], reference_dim + 104
+        )
         self.assertEqual(saved["actor_updates"], iteration - 1)
         self.assertEqual(saved["critic_updates"], iteration - 1)
         weights = torch.load(

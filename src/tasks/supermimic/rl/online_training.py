@@ -11,8 +11,9 @@ import torch
 from ..config.rl_cfg import OnlineConfig
 from ..data.replay_buffer import ReplayBuffer
 from ..mdp.resets import RESET_NOISE
-from ..models.policy import REFERENCE_SCHEMA, MotionActor, MotionCritic
+from ..models.policy import MotionActor, MotionCritic, schema_for_dimension
 from ..models.world_model import WorldModel
+from .checkpoints import resolve_reference_schema, training_config
 from .diagnostics import replay_diagnostics, sampler_diagnostics
 from .execution import TrainingKernels
 from .imagination import frozen_parameters, imagine
@@ -128,10 +129,17 @@ class OnlineTrainer:
       config.amp,
     ).to(self.device)
     self.actor = MotionActor(
-      metadata["default_q"], config.actor_dims, config.relative_orientation, config.amp
+      metadata["default_q"],
+      config.actor_dims,
+      config.relative_orientation,
+      config.amp,
+      reference_dim=config.reference_dim,
     ).to(self.device)
     self.critic = MotionCritic(
-      metadata["default_q"], config.critic_dims, config.amp
+      metadata["default_q"],
+      config.critic_dims,
+      config.amp,
+      reference_dim=config.reference_dim,
     ).to(self.device)
     self.kernels = TrainingKernels(
       self.actor,
@@ -413,7 +421,7 @@ class OnlineTrainer:
     return {
       "schema_version": 1,
       "kind": "supermimic_actor",
-      "reference_schema": REFERENCE_SCHEMA,
+      "reference_schema": schema_for_dimension(self.config.reference_dim),
       "config": asdict(self.config),
       "robot_metadata": self.metadata,
       "simulation": self.simulation_parameters,
@@ -451,11 +459,14 @@ class OnlineTrainer:
   def load_state_dict(self, saved: dict):
     if saved.get("schema_version") != 1 or saved.get("kind") != "supermimic_online":
       raise ValueError("Not an online SuperMimic checkpoint")
-    if saved.get("reference_schema") != REFERENCE_SCHEMA:
+    if resolve_reference_schema(saved) != schema_for_dimension(
+      self.config.reference_dim
+    ):
       raise ValueError(
-        "Checkpoint reference features differ; the 730-dimensional policy requires a new run"
+        f"Checkpoint reference features differ from the {self.config.reference_dim}-dimensional policy; "
+        "use the checkpoint's reference dimension to resume"
       )
-    saved_config = {"wm_only_iters": 0, **saved["config"]}
+    saved_config = training_config(saved)
     if saved_config != asdict(self.config) or saved["clips"] != self.env.library.names:
       raise ValueError("Online checkpoint configuration or motion library mismatch")
     if saved["robot_metadata"]["signature"] != self.metadata["signature"]:

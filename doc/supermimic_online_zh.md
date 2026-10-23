@@ -111,9 +111,24 @@ MLP 矩阵运算使用 BF16 autocast，权重及物理状态仍为 FP32；积分
 批量计算并停止梯度。终点 bootstrap 单独保留对终点状态的梯度。Critic 的
 时间求和损失和轨迹 minibatch 划分保持原样。
 
-checkpoint 记录 `reference_schema=root_joint_73_v1`。此前 2680 维策略与新版训练
-架构不兼容，旧版续训需匹配代码，新架构需使用新输出目录重新训练。推理、评估与
-可视化支持 `full_body_268` 适配器，沿用旧版特征和原始权重。
+训练可通过 `--reference-dim` 选择两种参考输入，默认保持 730：
+
+| 参数 | 每帧参考 | 10 帧编码器输入 | Critic 总输入 | checkpoint schema |
+| --- | --- | --- | --- | --- |
+| `--reference-dim 730` | pelvis 和关节，73 维 | 730 | 834 | `root_joint_73_v1` |
+| `--reference-dim 2680` | 14 个 body 和关节，268 维 | 2680 | 2784 | `full_body_268` |
+
+2680 模式复用原版的特征顺序、参考水平/yaw 锚点及缩放，保留绝对参考高度。
+Actor、Critic、真实采集、普通及编译想象训练均使用所选特征。要对照旧版 FP32
+训练，可在原命令中增加 `--reference-dim 2680 --amp none --no-compile`；
+该选项只选择参考架构，不自动调整学习率、horizon 或预热配置，也不保证逐位复现旧训练。
+
+完整训练 checkpoint 保存所选维度和 schema，`--resume` 自动恢复，无需重复指定。
+缺少这些字段的历史 checkpoint 从 Actor 编码器输入宽度推断；缺少 `compile`、
+`amp` 的旧断点按非编译 FP32 恢复。旧 2680 维完整训练断点可在当前代码中续训，
+仍要求原有 motion manifest、机器人、物理配置、训练配置和 RNG 后端一致。
+仅有 Actor 的轻量策略不支持续训。不能在续训中把 2680 改成 730 或反向切换，
+不同架构需新建训练。推理、评估、可视化和导出继续自动识别两种架构。
 
 ## 三阶段更新
 

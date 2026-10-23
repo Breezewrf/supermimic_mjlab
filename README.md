@@ -156,11 +156,18 @@ count toward `--iterations`, and checkpoints preserve progress. The default is `
 CUDA training defaults to `--compile --amp bf16`. Core tensor computations use
 `torch.compile`; only MLPs use BF16 autocast, while physical computations remain
 FP32. Rewards and Critic targets are batched across imagined time steps. Reference
-inputs contain 73 features per frame (730 per window). First updates compile
+inputs default to 73 features per frame (730 per window). First updates compile
 kernels; measure steady-state speed afterward. CPU uses eager FP32. Use
-`--no-compile` or `--amp none` to isolate execution issues. Earlier 2680-feature
-policies support inference, evaluation, and playback through a legacy adapter.
-Resuming their training still requires matching code; start a new run for the 730-input architecture.
+`--no-compile` or `--amp none` to isolate execution issues.
+Use `--reference-dim 2680` to train the original 268-feature-per-frame full-body
+representation, including its original scaling and absolute reference height;
+`--reference-dim 730` selects the compact representation (default). Actor and Critic
+use the selected layout throughout collection and imagination. For an FP32 eager
+comparison with the old baseline, add `--amp none --no-compile`.
+Resume automatically restores the reference dimension from a full checkpoint,
+including old 2680-input checkpoints without schema metadata. Old checkpoints
+without execution settings resume in eager FP32. A resume cannot change the layout;
+use a new output directory to train a different architecture.
 
 ```bash
 python scripts/train_supermimic.py \

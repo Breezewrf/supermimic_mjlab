@@ -22,6 +22,7 @@ from src.tasks.supermimic.rl.checkpoints import (
   export_policy,
   policy_checkpoint,
   save_checkpoint,
+  training_config,
 )
 from src.tasks.supermimic.rl.inference import load_actor
 from src.tasks.supermimic.rl.online_training import OnlineTrainer
@@ -211,6 +212,29 @@ class CheckpointTests(unittest.TestCase):
     exported = policy_checkpoint(self.saved)
     self.assertEqual(exported["reference_schema"], "custom_reference_v2")
     self.assertNotIn("reference_schema_inferred", exported)
+
+  def test_training_config_infers_historical_dimension_and_fp32_execution(self):
+    del self.saved["reference_schema"]
+    del self.saved["config"]["amp"]
+    for width in (730, 2680):
+      with self.subTest(width=width):
+        self.saved["actor"]["encoder.0.weight"] = torch.zeros(8, width)
+        config = training_config(self.saved)
+        self.assertEqual(config["reference_dim"], width)
+        self.assertEqual(config["amp"], "none")
+        self.assertFalse(config["compile"])
+        self.assertEqual(config["wm_only_iters"], 0)
+
+  def test_training_config_rejects_mismatched_dimension_or_weights(self):
+    self.saved["config"]["reference_dim"] = 2680
+    with self.assertRaisesRegex(ValueError, "dimension and schema differ"):
+      training_config(self.saved)
+    self.saved["config"]["reference_dim"] = 730
+    self.saved["actor"]["encoder.0.weight"] = torch.zeros(8, 2680)
+    with self.assertRaisesRegex(
+      ValueError, "input width and reference dimension differ"
+    ):
+      training_config(self.saved)
 
 
 if __name__ == "__main__":
