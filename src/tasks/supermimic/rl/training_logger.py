@@ -149,6 +149,16 @@ class ConsoleReporter:
         f"WM-only warmup: {min(iteration, config['wm_only_iters']):,}/"
         f"{config['wm_only_iters']:,} rounds completed; actor and critic updates follow"
       )
+    compiled = config.get("compile", True) and device.startswith("cuda")
+    precision = config.get("amp", "bf16") if device.startswith("cuda") else "fp32"
+    self.message(
+      f"Execution: {'torch.compile' if compiled else 'eager'} | MLP: {precision} | "
+      "reference: 10 x 73 = 730 features"
+    )
+    if compiled:
+      self.message(
+        "First updates compile kernels; compare speed after compilation settles."
+      )
     if self.log_format == "table":
       self.message(
         "Table: interval means | Fail%: failure events per transition | GPU: PyTorch peak GiB"
@@ -232,10 +242,10 @@ class ConsoleReporter:
         }
       )
     else:
+      from .evaluation import evaluation_summary
+
       self.message(
-        f"Evaluation @ {report['iteration']:,} | normalized return {report['normalized_return']:.6f} | "
-        f"success {report['successes']}/{len(report['motions'])} | "
-        f"mean completion {sum(row['completion'] for row in report['motions']) / len(report['motions']):.1%}"
+        f"{evaluation_summary(report)} | iteration {report['iteration']:,}"
       )
 
 

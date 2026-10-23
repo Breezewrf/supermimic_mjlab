@@ -5,7 +5,7 @@ from contextlib import contextmanager
 import torch
 from torch import Tensor
 
-from ..mdp.state import add_sensor_noise
+from ..mdp.state import add_sensor_noise, observe
 from ..models.policy import reference_features
 
 
@@ -46,6 +46,24 @@ def critic_loss(values: Tensor, targets: Tensor, mask: Tensor) -> Tensor:
   return error.square().sum(dim=1).mean()
 
 
+def imagination_step(actor, world, state, history, goal, context, reference_quat):
+  action = actor.forward_features(history, goal)
+  next_state = world(state, action, context)
+  observation = observe(
+    next_state,
+    action,
+    actor.default_q,
+    context,
+    reference_quat if world.relative_orientation else None,
+  )
+  return next_state, action, observation
+
+
+def reward_terms(world, state, action, context, reference, previous_action):
+  prediction = world.task_heads(state, action, context, reference, previous_action)
+  return prediction["reward"], prediction["termination_probability"]
+
+
 def imagine(
   actor,
   world,
@@ -56,6 +74,7 @@ def imagine(
   gamma: float = 0.99,
   generator: torch.Generator | None = None,
   sensor_noise: bool = True,
+  kernels=None,
 ) -> dict:
   if horizon < 1:
     raise ValueError("Imagination horizon must be positive")
@@ -72,59 +91,87 @@ def imagine(
     raise ValueError("An imagined start must have a full reference horizon")
   # Future goal features pad at the last frame, including at the bootstrap state.
   future = library.get_future(motion, frame, horizon + 10)
-  survival = state.new_ones(len(state))
-  reward_objective = state.new_zeros(len(state))
-  rewards, continuations, values, features = [], [], [], []
+  # These windows are views: (batch, H+1, 10, ...). Reference-only feature
+  # construction is shared by actor and critic and is batched across time.
+  windows = {
+    key: value.unfold(1, 10, 1).movedim(-1, 2) for key, value in future.items()
+  }
+  goal_fn = kernels.goals if kernels is not None else reference_features
+  with torch.no_grad():
+    goals = goal_fn(windows, actor.default_q)
+  first_action = history[:, -1, -29:]
   actions, states = [], [state]
   for t in range(horizon):
-    reference = {key: value[:, t : t + 10] for key, value in future.items()}
-    goal = reference_features(reference, actor.default_q)
-    critic_input = critic.features(state, reference, context, goal)
-    features.append(critic_input.detach())
-    with torch.no_grad():
-      values.append(critic.value(critic_input.detach()).squeeze(-1))
-    action = actor.forward_features(history, goal)
-    next_state = world(state, action, context)
-    prediction = world.task_heads(
-      next_state,
-      action,
+    step_args = (
+      state,
+      history,
+      goals[:, t],
       context,
-      {key: value[:, t + 1] for key, value in future.items()},
-      history[:, -1, -29:],
+      future["body_quat_w"][:, t + 1, 0],
     )
-    reward = prediction["reward"]
-    # Clip end is a truncation, so only physical failure cuts continuation.
-    continuation = 1 - prediction["termination_probability"]
-    reward_objective = reward_objective + gamma**t * survival * reward
-    survival = survival * continuation
-    observation = prediction["clean_observation"]
+    if kernels is None:
+      next_state, action, observation = imagination_step(actor, world, *step_args)
+    else:
+      next_state, action, observation = kernels.imag_step(*step_args)
     if sensor_noise:
       observation = add_sensor_noise(observation, generator)
     history = torch.cat((history[:, 1:], observation[:, None]), 1)
     state = next_state
-    rewards.append(reward)
-    continuations.append(continuation)
     actions.append(action)
     states.append(state)
+  states = torch.stack(states, 1)
+  executed = torch.stack(actions, 1)
+  previous = torch.cat((first_action[:, None], executed[:, :-1]), 1)
+  contexts = context[:, None].expand(-1, horizon + 1, -1)
+  next_reference = {
+    key: value[:, 1 : horizon + 1].flatten(0, 1) for key, value in future.items()
+  }
+  reward_args = (
+    states[:, 1:].flatten(0, 1),
+    executed.flatten(0, 1),
+    contexts[:, 1:].flatten(0, 1),
+    next_reference,
+    previous.flatten(0, 1),
+  )
+  if kernels is None:
+    rewards, failure = reward_terms(world, *reward_args)
+  else:
+    rewards, failure = kernels.reward(*reward_args)
+  rewards = rewards.reshape(len(state), horizon)
+  continuation = 1 - failure.reshape(len(state), horizon)
+  alive = continuation.cumprod(1)
+  survival = alive[:, -1]
+  before = torch.cat((torch.ones_like(alive[:, :1]), alive[:, :-1]), 1)
+  discount = gamma ** torch.arange(horizon, device=state.device, dtype=state.dtype)
+  reward_objective = (discount * before * rewards).sum(1)
+  feature_fn = kernels.critic_features if kernels is not None else critic.features
+  value_fn = kernels.critic_targets if kernels is not None else critic.forward_features
+  # Detached, batched target values must not train the actor or retain its graph.
+  with torch.no_grad():
+    features = feature_fn(states.detach(), windows, contexts, goals)
+    values = value_fn(features).squeeze(-1)
   terminal_reference = {
     key: value[:, horizon : horizon + 10] for key, value in future.items()
   }
-  terminal_value = critic(state, terminal_reference, context)
+  # Keep the terminal bootstrap differentiable through the final physical state.
+  terminal_features = feature_fn(state, terminal_reference, context, goals[:, -1])
+  bootstrap_fn = (
+    kernels.critic_bootstrap if kernels is not None else critic.forward_features
+  )
+  terminal_value = bootstrap_fn(terminal_features).squeeze(-1)
   bootstrap_objective = gamma**horizon * survival * terminal_value
   objective = reward_objective + bootstrap_objective
-  values.append(terminal_value.detach())
-  rewards = torch.stack(rewards, 1)
   return {
     "objective": objective.mean(),
     "reward_objective": reward_objective.mean(),
     "bootstrap_objective": bootstrap_objective.mean(),
     "rewards": rewards,
-    "continuation": torch.stack(continuations, 1),
-    "values": torch.stack(values, 1),
-    "critic_features": torch.stack(features, 1),
+    "continuation": continuation,
+    "values": values,
+    "critic_features": features[:, :-1],
     "mask": torch.ones_like(rewards, dtype=torch.bool),
     "survival": survival,
-    "states": torch.stack(states, 1),
+    "states": states,
     "actions": actions,
     "history": history,
   }

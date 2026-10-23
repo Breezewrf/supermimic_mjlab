@@ -78,13 +78,14 @@ Encoder 读取当前参考帧及其后 9 帧，输出 32 维 tanh latent。Decod
 与最近 10 帧、每帧 93 维本体观测，输出 29 维线性动作；仅 latent 使用 tanh。
 输出层以小权重初始化，初始动作接近默认关节设定值。
 
-每个参考帧展开为 268 维：29 维默认姿态相对关节角、29 维关节速度，以及 14 个
-刚体的位置、6D 姿态、线速度和角速度。整个窗口使用首帧参考 pelvis 的水平位置
-与 yaw 作为共同坐标锚点，保留高度和未来位移。位置除以 0.3，关节角除以 0.3，
-关节速度除以 5，角速度除以 3.14。参考尾部沿用动作库的末帧填充。
+每个参考帧展开为 73 维：相对窗口首帧的根位置 3 维、相对首帧 yaw 的根 6D
+姿态、各帧根自身坐标系下的线速度和角速度各 3 维、原始关节角 29 维、关节速度
+乘 0.1 后的 29 维。10 帧共 730 维，不再重复输入 14 个刚体的 FK 目标。
+字段及量纲对齐 `supermimic_vibed` 的紧凑表示；窗口仍沿用当前帧及其后 9 帧，
+本次没有改变动作库的时间索引约定。尾部沿用动作库末帧填充。
 
-Critic 为 `(256, 128)` ELU 网络，接收 71 维特权物理状态、2680 维参考特征与
-33 维上下文，共 2784 维，输出标量价值。物理状态同样变换到当前参考窗口锚点；
+Critic 为 `(256, 128)` ELU 网络，接收 71 维特权物理状态、730 维参考特征与
+33 维上下文，共 834 维，输出标量价值。物理状态同样变换到当前参考窗口锚点；
 四元数统一符号。Critic 与 Actor 不共享参数，真实推理仅需要 Actor。
 
 Actor 本体观测沿用第一阶段定义：关节角、关节速度、机体根角速度、投影重力、
@@ -96,6 +97,22 @@ Actor 本体观测沿用第一阶段定义：关节角、关节速度、机体�
 采集与想象都使用对应状态时刻的参考朝向，额外六维训练噪声半宽为 0.05。
 默认关闭此选项，以便与修复采样器后的 93 维基线独立对照。整体旋转机器人与参考
 不改变相对朝向；仅旋转机器人则改变相对朝向，不恢复参考的全局 yaw。
+
+CUDA 训练默认启用 `--compile --amp bf16`。编译边界包括世界模型 8 步动力学
+rollout 及损失、想象单步、参考特征、批量奖励和 Critic 特征/价值、GAE 与价值损失。
+每个编译边界使用 `fullgraph=True`，编译失败会报错；不会静默切回普通执行。
+MLP 矩阵运算使用 BF16 autocast，权重及物理状态仍为 FP32；积分、FK、奖励、
+观测与损失归约保持 FP32。CPU 自动使用普通执行及 FP32；不支持 BF16 的 GPU
+可显式选择 `--amp none`，可用 `--no-compile` 单独排查编译问题。
+首次训练需编译内核，耗时与稳定阶段不同；应在编译完成后比较每轮时间。
+
+动作与状态按时间顺序生成，循环中仅计算动力学与观测。完整想象轨迹生成后，
+合并 batch/time 一次计算 FK、奖励和终止；所有时刻的 Critic 特征及目标价值
+批量计算并停止梯度。终点 bootstrap 单独保留对终点状态的梯度。Critic 的
+时间求和损失和轨迹 minibatch 划分保持原样。
+
+checkpoint 记录 `reference_schema=root_joint_73_v1`。此前 2680 维策略的权重
+形状不兼容，训练恢复及 checkpoint 评估会明确拒绝；需使用新输出目录重新训练。
 
 ## 三阶段更新
 
@@ -151,10 +168,18 @@ Replay 常规采样也改为对随机候选做窗口/历史检查；仅候选极
 
 ## 断点、推理与真实评估
 
-`last.pt` 保存最近训练断点，`best.pt` 按固定起点真实仿真的平均归一化回报选择，
-包括初始化策略候选。编号断点为 `iteration_000100.pt` 等。每个断点包含三个网络、
-优化器、归一化、完整 Replay、重置采样器、训练计数和各随机数发生器状态，并校验
-manifest、动作名称和机器人模型签名。
+`last.pt` 是完整续训断点，包含三个网络、优化器、完整 Replay、重置采样器、训练计数
+和各随机数发生器状态。`policy_best.pt` 按固定起点真实仿真的平均归一化回报选择，
+包括初始化策略候选；它和 `policy_last.pt`、`policy_iteration_*.pt` 仅保存 Actor
+与推理所需的配置和签名，不包含 Replay、World Model、Critic 或优化器。
+两种格式都可评估并校验 manifest、动作名称、机器人签名和物理配置；只有完整断点
+能用于 `--resume`。默认不再保存历史完整断点；显式添加
+`--full-checkpoint-interval 10000` 才会生成 `iteration_010000.pt` 等文件。
+
+已有完整断点可用 `scripts/export_supermimic_policy.py --checkpoint <完整断点>
+--output <轻量策略.pt>` 提取推理权重，内存映射读取，不复制 Replay，也不改写源文件。
+续训旧目录时，如旧 `best.pt` 存在而 `policy_best.pt` 不存在，会自动导出最佳策略。
+现存历史文件不会自动删除；正在运行的进程须从 `last.pt` 重启后才会使用新的保存方式。
 
 采样器评分语义已升级为版本 2，旧训练断点不能直接续训；请使用新的输出目录开始
 对照实验。关闭自碰撞后机器人模型签名也已改变，因此更早物理配置下的断点不能
@@ -181,13 +206,27 @@ python scripts/train_supermimic.py \
 
 ```bash
 python scripts/evaluate_supermimic.py \
-  --device cuda:0 --checkpoint outputs/supermimic/online_training/best.pt \
+  --device cuda:0 --checkpoint outputs/supermimic/online_training/policy_best.pt \
   --output outputs/supermimic/online_policy_evaluation.json
 ```
 
 默认评估训练动作库中的所有动作，从各动作首帧开始、关闭域随机化和观测噪声，
 运行至物理失败或动作结束。评估使用独立环境，并恢复训练 RNG，不消耗训练环境的
 episode。原有 `--policy module:function` 入口继续支持，与 `--checkpoint` 互斥。
+
+终端以 `Evaluation return <分数>` 汇总，单动作分数为累计奖励除以
+`5 × 0.02 × (完整动作帧数 − 1)`，再对动作取平均。`normalized_return_framew`
+给出按完整动作长度加权的分数；`n_failed` / `failed` 只统计物理失败。
+调试步数限制和意外超时会将 `evaluation_complete` 标为 `false`，终端显示
+`INCOMPLETE`。加 `--csv outputs/supermimic/eval.csv` 可追加 checkpoint 比较记录。
+
+`python scripts/play_supermimic.py --checkpoint <路径> --clips walk1_subject1 --loop`
+提供真实仿真策略与蓝色半透明参考动作的 MuJoCo 实时对照。空格暂停，右方向键单步，
+`G` 切换参考动作；`--speed 0.5` 慢放，`--global-ghost` 查看绝对位移与朝向偏差。
+无桌面环境可用 `MUJOCO_GL=egl python scripts/evaluate_supermimic.py --checkpoint <路径>
+--clips walk1_subject1 --video outputs/supermimic/walk.mp4` 导出视频，需要 `ffmpeg`。
+渲染使用独立 MuJoCo 缓冲区，显示 `transition.next_state`，不会改写评估仿真或将
+自动重置后的新姿态误当作失败终帧。详见 [README 实时验证说明](../README_zh.md#mujoco-实时动作验证)。
 
 输出还包括 `config.json`、每轮 `metrics.jsonl`、最近评估 `evaluation.json` 和
 编号评估报告。训练日志记录真实奖励、失败次数、想象奖励、生存权重、三类更新计数、

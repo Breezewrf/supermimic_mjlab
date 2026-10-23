@@ -19,6 +19,12 @@ from src.tasks.supermimic.config.task_cfg import (
 )
 from src.tasks.supermimic.data.world_model_data import file_sha256
 from src.tasks.supermimic.models.kinematics import robot_metadata
+from src.tasks.supermimic.models.policy import REFERENCE_SCHEMA
+from src.tasks.supermimic.rl.checkpoints import (
+  export_policy,
+  policy_checkpoint,
+  save_checkpoint,
+)
 from src.tasks.supermimic.rl.evaluation import evaluate
 from src.tasks.supermimic.rl.online_training import (
   OnlineTrainer,
@@ -35,12 +41,6 @@ from src.tasks.supermimic.rl.training_logger import (
 
 def write_json(path: Path, data: dict):
   path.write_text(json.dumps(data, indent=2, allow_nan=False) + "\n")
-
-
-def save_checkpoint(path: Path, data: dict):
-  temporary = path.with_suffix(".tmp")
-  torch.save(data, temporary)
-  temporary.replace(path)
 
 
 def evaluate_actor(actor, manifest, config, device, limit=None):
@@ -82,7 +82,18 @@ def main():
     help="Total update rounds, including WM-only warmup and saved rounds",
   )
   parser.add_argument("--eval-interval", type=int, default=100)
-  parser.add_argument("--checkpoint-interval", type=int, default=100)
+  parser.add_argument(
+    "--checkpoint-interval",
+    type=int,
+    default=100,
+    help="Save last.pt for resume and actor-only policy weights every N rounds",
+  )
+  parser.add_argument(
+    "--full-checkpoint-interval",
+    type=int,
+    default=0,
+    help="Additionally keep historical full iteration_NNNNNN.pt snapshots (0: disabled)",
+  )
   parser.add_argument("--log-interval", type=int, default=10)
   parser.add_argument("--log-format", choices=("table", "json"), default="table")
   parser.add_argument(
@@ -105,6 +116,8 @@ def main():
   )
   parser.add_argument("--wandb-mode", choices=("online", "offline"), default="online")
   parser.add_argument("--termination-mode", choices=("learned", "analytic"))
+  parser.add_argument("--amp", choices=("bf16", "none"))
+  parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=None)
   parser.add_argument(
     "--wm-only-iters",
     type=int,
@@ -158,6 +171,8 @@ def main():
     args.cpu_threads,
   ) < 1 or (args.evaluation_limit is not None and args.evaluation_limit < 1):
     parser.error("Counts must be positive")
+  if args.full_checkpoint_interval < 0:
+    parser.error("--full-checkpoint-interval must be nonnegative")
   if args.device.startswith("cuda") and not torch.cuda.is_available():
     parser.error("CUDA is not visible to this Python process")
   torch.set_num_threads(args.cpu_threads)
@@ -171,8 +186,14 @@ def main():
   if saved and (
     saved.get("schema_version") != 1 or saved.get("kind") != "supermimic_online"
   ):
-    parser.error("--resume requires an online SuperMimic checkpoint")
+    parser.error(
+      "--resume requires a full online training checkpoint (last.pt); policy weights cannot resume training"
+    )
   if saved:
+    if saved.get("reference_schema") != REFERENCE_SCHEMA:
+      parser.error(
+        "Checkpoint uses older reference features; the 730-dimensional policy requires a new run"
+      )
     if saved.get("sampler", {}).get("schema_version") != 2:
       parser.error(
         "Legacy reset scores are incompatible with this fix; start a new run. Old actors remain usable for evaluation."
@@ -248,8 +269,15 @@ def main():
       "manifest_sha256": manifest_hash,
       "runtime": runtime,
       "robot_signature": trainer.metadata["signature"],
+      "reference_schema": REFERENCE_SCHEMA,
+      "execution": {
+        "compiled": trainer.kernels.enabled,
+        "mlp_precision": config.amp if args.device.startswith("cuda") else "fp32",
+        "physics_precision": "fp32",
+      },
       "simulation": trainer.simulation_parameters,
       "evaluation_limit": args.evaluation_limit,
+      "full_checkpoint_interval": args.full_checkpoint_interval,
       "resume": str(args.resume) if args.resume else None,
     }
     write_json(output / "config.json", run_config)
@@ -283,6 +311,17 @@ def main():
         "wandb_run": dict(tracking.state) if tracking else None,
       }
 
+    def inference_checkpoint():
+      return policy_checkpoint(
+        {
+          **trainer.policy_state_dict(),
+          "manifest_sha256": manifest_hash,
+          "runtime": runtime,
+          "best_return": best_return,
+          "evaluation_limit": args.evaluation_limit,
+        }
+      )
+
     def validate():
       nonlocal best_return
       console.message(f"Evaluating policy at iteration {trainer.iteration:,}...")
@@ -304,7 +343,7 @@ def main():
       write_json(output / "diagnostics.json", diagnostics)
       if report["normalized_return"] > best_return:
         best_return = report["normalized_return"]
-        save_checkpoint(output / "best.pt", checkpoint())
+        save_checkpoint(output / "policy_best.pt", inference_checkpoint())
       console.evaluation(report)
       if tracking:
         tracking.evaluation(report)
@@ -325,6 +364,9 @@ def main():
     if not saved:
       validate()
       save_checkpoint(output / "last.pt", checkpoint())
+    elif not (output / "policy_best.pt").exists() and (output / "best.pt").exists():
+      export_policy(output / "best.pt", output / "policy_best.pt")
+    save_checkpoint(output / "policy_last.pt", inference_checkpoint())
     if args.device.startswith("cuda"):
       torch.cuda.reset_peak_memory_stats(args.device)
     window = MetricWindow()
@@ -351,14 +393,22 @@ def main():
           or trainer.iteration == args.iterations
         ):
           validate()
-        if (
-          trainer.iteration % args.checkpoint_interval == 0
-          or trainer.iteration == args.iterations
-        ):
+        periodic = trainer.iteration % args.checkpoint_interval == 0
+        historical_full = bool(
+          args.full_checkpoint_interval
+          and trainer.iteration % args.full_checkpoint_interval == 0
+        )
+        if periodic or historical_full or trainer.iteration == args.iterations:
           snapshot = checkpoint()
           save_checkpoint(output / "last.pt", snapshot)
-          if trainer.iteration % args.checkpoint_interval == 0:
+          if historical_full:
             save_checkpoint(output / f"iteration_{trainer.iteration:06d}.pt", snapshot)
+          weights = inference_checkpoint()
+          save_checkpoint(output / "policy_last.pt", weights)
+          if periodic:
+            save_checkpoint(
+              output / f"policy_iteration_{trainer.iteration:06d}.pt", weights
+            )
           console.message(
             f"Checkpoint saved at iteration {trainer.iteration:,}: {output / 'last.pt'}"
           )

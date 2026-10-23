@@ -11,11 +11,12 @@ import torch
 from ..config.rl_cfg import OnlineConfig
 from ..data.replay_buffer import ReplayBuffer
 from ..mdp.resets import RESET_NOISE
-from ..models.policy import MotionActor, MotionCritic
+from ..models.policy import REFERENCE_SCHEMA, MotionActor, MotionCritic
 from ..models.world_model import WorldModel
 from .diagnostics import replay_diagnostics, sampler_diagnostics
-from .imagination import critic_loss, frozen_parameters, gae_targets, imagine
-from .world_model_training import rollout, world_model_loss
+from .execution import TrainingKernels
+from .imagination import frozen_parameters, imagine
+from .world_model_training import rollout
 
 
 def rng_state() -> dict:
@@ -78,6 +79,12 @@ class OnlineTrainer:
       raise ValueError("Environment count differs from online configuration")
     self.env, self.metadata, self.config = env, metadata, config
     self.device = str(env.device)
+    if (
+      self.device.startswith("cuda")
+      and config.amp == "bf16"
+      and not torch.cuda.is_bf16_supported()
+    ):
+      raise ValueError("This GPU does not support BF16; use --amp none")
     if env.foundation_config.relative_orientation != config.relative_orientation:
       raise ValueError("Environment and policy observation settings differ")
     self.world = WorldModel(
@@ -85,12 +92,19 @@ class OnlineTrainer:
       config.world_dims,
       config.termination_mode,
       config.relative_orientation,
+      config.amp,
     ).to(self.device)
     self.actor = MotionActor(
-      metadata["default_q"], config.actor_dims, config.relative_orientation
+      metadata["default_q"], config.actor_dims, config.relative_orientation, config.amp
     ).to(self.device)
-    self.critic = MotionCritic(metadata["default_q"], config.critic_dims).to(
-      self.device
+    self.critic = MotionCritic(
+      metadata["default_q"], config.critic_dims, config.amp
+    ).to(self.device)
+    self.kernels = TrainingKernels(
+      self.actor,
+      self.world,
+      self.critic,
+      enabled=config.compile and self.device.startswith("cuda"),
     )
     self.world_optimizer = torch.optim.Adam(
       self.world.parameters(), lr=config.learning_rate
@@ -193,8 +207,9 @@ class OnlineTrainer:
         batch,
         self.env.library,
         diagnostics=index == self.config.wm_batches - 1,
+        dynamics=self.kernels.world_rollout,
       )
-      loss, parts = world_model_loss(prediction, batch, analytic_losses=False)
+      loss, parts = self.kernels.world_loss(prediction, batch)
       norm = checked_step(loss, self.world, self.world_optimizer)
       self.world_updates += 1
       for name, value in {
@@ -228,6 +243,7 @@ class OnlineTrainer:
         horizon=cfg.horizon,
         gamma=cfg.gamma,
         generator=self.imagination_rng,
+        kernels=self.kernels,
       )
       objective = float(trajectory["objective"].detach())
       reward_objective = float(trajectory["reward_objective"].detach())
@@ -240,7 +256,7 @@ class OnlineTrainer:
       )
     self.actor_updates += 1
     # Targets and critic data come from this one rollout, before any critic fit.
-    targets = gae_targets(
+    targets = self.kernels.gae(
       trajectory["rewards"],
       trajectory["continuation"],
       trajectory["values"],
@@ -262,8 +278,8 @@ class OnlineTrainer:
       )
       for indices in order.tensor_split(cfg.critic_minibatches):
         self.critic_optimizer.zero_grad(set_to_none=True)
-        loss = critic_loss(
-          self.critic.value(inputs[indices]).squeeze(-1),
+        loss = self.kernels.critic_loss(
+          self.kernels.critic_value(inputs[indices]).squeeze(-1),
           targets[indices],
           mask[indices],
         )
@@ -359,17 +375,27 @@ class OnlineTrainer:
       "reset_sampler": sampler_diagnostics(self.env.sampler, self.env.library),
     }
 
-  def state_dict(self) -> dict:
+  def policy_state_dict(self) -> dict:
+    """Actor and simulator metadata only; never serialize replay for inference."""
     return {
       "schema_version": 1,
-      "kind": "supermimic_online",
+      "kind": "supermimic_actor",
+      "reference_schema": REFERENCE_SCHEMA,
       "config": asdict(self.config),
       "robot_metadata": self.metadata,
       "simulation": self.simulation_parameters,
       "clips": self.env.library.names,
+      "actor": self.actor.state_dict(),
+      "iteration": self.iteration,
+      "environment_steps": self.environment_steps,
+    }
+
+  def state_dict(self) -> dict:
+    return {
+      **self.policy_state_dict(),
+      "kind": "supermimic_online",
       "device_type": torch.device(self.device).type,
       "world": self.world.state_dict(),
-      "actor": self.actor.state_dict(),
       "critic": self.critic.state_dict(),
       "world_optimizer": self.world_optimizer.state_dict(),
       "actor_optimizer": self.actor_optimizer.state_dict(),
@@ -377,8 +403,6 @@ class OnlineTrainer:
       "replay": self.replay.state_dict(),
       "sampler": self.env.sampler.state_dict(),
       "validation_windows": self.validation_windows,
-      "iteration": self.iteration,
-      "environment_steps": self.environment_steps,
       "world_updates": self.world_updates,
       "actor_updates": self.actor_updates,
       "critic_updates": self.critic_updates,
@@ -394,6 +418,10 @@ class OnlineTrainer:
   def load_state_dict(self, saved: dict):
     if saved.get("schema_version") != 1 or saved.get("kind") != "supermimic_online":
       raise ValueError("Not an online SuperMimic checkpoint")
+    if saved.get("reference_schema") != REFERENCE_SCHEMA:
+      raise ValueError(
+        "Checkpoint reference features differ; the 730-dimensional policy requires a new run"
+      )
     saved_config = {"wm_only_iters": 0, **saved["config"]}
     if saved_config != asdict(self.config) or saved["clips"] != self.env.library.names:
       raise ValueError("Online checkpoint configuration or motion library mismatch")

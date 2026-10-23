@@ -30,6 +30,8 @@ class OnlineConfig:
   termination_mode: str = "learned"
   relative_orientation: bool = False
   diagnostics_batch_size: int = 64
+  compile: bool = True
+  amp: str = "bf16"
 
   def __post_init__(self):
     counts = (
@@ -60,6 +62,8 @@ class OnlineConfig:
       raise ValueError("Invalid optimizer, noise or return settings")
     if self.termination_mode not in ("learned", "analytic"):
       raise ValueError("termination_mode must be learned or analytic")
+    if self.amp not in ("none", "bf16"):
+      raise ValueError("amp must be none or bf16")
     for widths in (self.world_dims, self.actor_dims, self.critic_dims):
       if not widths or min(widths) < 1:
         raise ValueError("Network hidden widths must be positive")

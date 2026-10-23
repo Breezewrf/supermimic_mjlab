@@ -61,6 +61,7 @@ src/tasks/supermimic/
 │   ├── imagination.py        # BPTT、软生存权重、GAE 与 Critic 损失
 │   ├── online_training.py    # 采集、世界模型拟合、Actor–Critic 更新
 │   ├── training_logger.py    # 终端表格和 W&B 日志
+│   ├── checkpoints.py        # 完整断点与轻量策略导出
 │   ├── world_model_training.py # 独立世界模型训练与验证
 │   └── evaluation.py         # 固定起点完整动作评估
 ├── env.py                    # SuperMimicEnv：真实仿真接口
@@ -73,6 +74,8 @@ src/tasks/supermimic/
 scripts/
 ├── train_supermimic.py            # 在线联合训练
 ├── evaluate_supermimic.py         # checkpoint 策略评估
+├── play_supermimic.py             # MuJoCo 实时策略／参考对照
+├── export_supermimic_policy.py    # 从完整断点提取轻量策略
 ├── data/
 │   └── convert_lafan_to_npz.py     # LAFAN CSV 转 NPZ
 └── offline/
@@ -80,7 +83,7 @@ scripts/
     └── train_world_model.py       # 独立世界模型训练与验证
 ```
 
-日常在线训练和评估使用根目录的两个入口。`offline/` 中的脚本用于诊断和离线实验，
+日常在线训练、评估和可视化使用根目录的脚本。`offline/` 中的脚本用于诊断和离线实验，
 在线联合训练无需先运行这些脚本。导入示例：
 
 ```python
@@ -134,6 +137,12 @@ episode 重采样；评估关闭这些扰动。范围与生命周期见[环境�
 初始采集后前 500 轮只训练世界模型，第 501 轮开始联合训练。预热期间仍继续采集；
 预热轮数包含在 `--iterations` 中，断点续训会保留进度。该选项默认 `0`。
 
+CUDA 训练默认启用 `--compile --amp bf16`：核心张量计算使用 `torch.compile`，
+仅 MLP 使用 BF16 autocast，物理计算保留 FP32；想象奖励与 Critic 目标值跨时间
+批量计算。参考输入改为每帧 73 维、每窗口 730 维。初始轮需编译内核，应在编译
+结束后比较稳定速度。CPU 使用普通执行及 FP32。`--no-compile` 和 `--amp none`
+可分别关闭编译和混合精度；旧 2680 维策略断点需使用对应版本代码，新版本需新建训练。
+
 ```bash
 python scripts/train_supermimic.py \
   --device cuda:0 \
@@ -179,10 +188,32 @@ python scripts/train_supermimic.py \
 | `metrics.jsonl` | 采集、世界模型、Actor、Critic 与耗时指标 |
 | `simulator.log` | 仿真器初始化和 kernel 输出 |
 | `wandb_run.json`、`wandb/` | 可选 W&B run 标识与本地日志 |
-| `last.pt` | 最新网络、优化器、Replay、采样器和 RNG 状态 |
-| `best.pt` | 固定起点真实仿真评估回报最高的 checkpoint |
-| `iteration_*.pt` | 定期保存的训练断点 |
+| `last.pt` | 完整续训断点：三个网络、优化器、Replay、采样器和 RNG 状态 |
+| `policy_best.pt` | 真实仿真评估回报最高的轻量 Actor 权重及推理元数据 |
+| `policy_last.pt` | 最近保存的轻量 Actor 权重及推理元数据 |
+| `policy_iteration_*.pt` | 按 `--checkpoint-interval` 保存的轻量策略文件 |
+| `iteration_*.pt` | 显式开启 `--full-checkpoint-interval N` 后保存的历史完整断点 |
 | `evaluation*.json` | 各动作回报、成功数与失败原因 |
+
+默认只更新一份完整的 `last.pt`，历史完整断点默认关闭，避免每次保存都复制数 GB
+Replay。轻量策略不含 Replay、World Model、Critic 或优化器，可直接用于评估和
+MuJoCo 可视化，不能用于 `--resume`。若需保留每 10000 轮的完整历史，添加
+`--full-checkpoint-interval 10000`；该选项不会自动删除旧文件。
+
+已有完整断点无需重新训练即可导出。以下命令在项目根目录执行，源文件保持不变，
+导出不需要动作数据或 GPU，也不会把 Replay 整体读入内存：
+
+```bash
+python scripts/export_supermimic_policy.py \
+  --checkpoint outputs/supermimic/lafan_horizon_fixed/best.pt \
+  --output outputs/supermimic/lafan_horizon_fixed/policy_best.pt
+```
+
+`last.pt` 和已有 `iteration_*.pt` 也可同样导出。评估和播放兼容完整断点及轻量策略，
+两种格式保留相同 Actor 权重和数据／机器人／物理配置校验。续训旧目录时，若存在
+旧 `best.pt` 且尚无 `policy_best.pt`，会自动导出最佳策略；已有完整历史文件不会删除。
+这只改变存储格式，不转换旧版参考特征或物理配置。
+正在运行的训练进程需要从 `last.pt` 重启后才会采用新的保存方式。
 
 ## 训练日志与 W&B
 
@@ -240,13 +271,55 @@ wandb sync outputs/supermimic/online_offline/wandb/offline-run-*
 
 ```bash
 python scripts/evaluate_supermimic.py \
-  --device cuda:0 --checkpoint outputs/supermimic/online_training/best.pt \
-  --output outputs/supermimic/online_policy_evaluation.json
+  --device cuda:0 --checkpoint outputs/supermimic/online_training/policy_best.pt \
+  --output outputs/supermimic/online_policy_evaluation.json \
+  --csv outputs/supermimic/eval.csv
 ```
 
 默认评估全部训练动作，直到动作完成或物理失败。归一化回报按完整动作的最大可达
 回报计算，提前失败会降低得分。`--max-steps-per-clip` 仅用于调试，报告会标记未完整
-评估的动作。`best.pt` 可能仍是初始化策略，应以评估报告判断训练是否改善。
+评估的动作。`policy_best.pt` 可能仍是初始化策略，应以评估报告判断训练是否改善。
+
+参照 [supermimic_vibed 的评估协议](https://github.com/zita-ch/supermimic_vibed/blob/main/supermimic/evaluate.py)，
+终端输出 `Evaluation return <分数>`，例如 `Evaluation return 0.824`（仅为输出格式示例，
+不是当前模型的实测成绩）。每段动作的分数为 `累计奖励 / (5 × 0.02 × (帧数 − 1))`，
+再对全部动作取算术平均。报告同时包含逐动作分数、物理失败原因、完成率、
+`normalized_return_framew`（按完整动作帧数加权）、`n_failed` 和 `failed`。
+截断调试或意外超时会显示 `INCOMPLETE`，并将 `evaluation_complete` 设为 `false`；
+完整评估中提前跌倒仍计为物理失败，分母始终使用完整动作长度。
+CSV 记录 checkpoint、训练轮数、动作选择及分数，便于比较相同动作集上的模型。
+
+### MuJoCo 实时动作验证
+
+加载同一个 checkpoint，实时对照策略执行与参考动作：
+
+```bash
+python scripts/play_supermimic.py \
+  --device cuda:0 --checkpoint outputs/supermimic/online_training/policy_best.pt \
+  --clips walk1_subject1 run1_subject2 --loop
+```
+
+实体机器人是策略在 MuJoCo Warp 物理仿真中的执行结果，蓝色半透明机器人是对应帧
+的参考姿态。默认参考根部 XY 和朝向按 body tracking 奖励对齐；加 `--global-ghost`
+查看绝对位移与朝向偏差。空格暂停，右方向键单步，`G` 切换参考机器人，关闭窗口退出。
+`--speed 0.5` 可慢放，`--no-ghost` 可只看策略。`--loop` 反复播放所选动作，
+每轮完整评估后写报告；中途关闭窗口不会保存该轮的不完整成绩。失败时显示自动重置
+前的最后一帧，之后切换下一段动作。`evaluate_supermimic.py --viewer native` 也可
+边评估边观看；不加 `--viewer` 的评估默认无窗口。
+
+无桌面服务器可导出同一评估过程的视频（需要 `ffmpeg`）：
+
+```bash
+MUJOCO_GL=egl python scripts/evaluate_supermimic.py \
+  --device cuda:0 --checkpoint outputs/supermimic/online_training/policy_best.pt \
+  --clips walk1_subject1 --video outputs/supermimic/walk.mp4 \
+  --output outputs/supermimic/walk_evaluation.json
+```
+
+视频顺序拼接所选动作；默认 960×540、50 FPS。实时窗口需要桌面显示环境，视频导出
+不需要窗口。评估与播放共用 checkpoint、数据签名和物理参数校验，旧参考特征格式的
+checkpoint 需使用对应版本代码；新训练产生的 checkpoint 可直接使用。
+播放必须指定 `--checkpoint` 或 `--policy`；评估未指定策略时运行零动作基线，并明确标注。
 
 ## 测试
 

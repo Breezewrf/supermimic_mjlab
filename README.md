@@ -67,6 +67,7 @@ src/tasks/supermimic/
 │   ├── imagination.py        # BPTT, soft survival, GAE, Critic loss
 │   ├── online_training.py    # Collection, model fitting, Actor-Critic updates
 │   ├── training_logger.py    # Terminal tables and W&B tracking
+│   ├── checkpoints.py        # Full training snapshots and actor-only exports
 │   ├── world_model_training.py # Standalone model training and validation
 │   └── evaluation.py         # Fixed-start, full-clip simulator evaluation
 ├── env.py                    # SuperMimicEnv simulator interface
@@ -80,6 +81,8 @@ Scripts are organized by purpose and frequency of use:
 scripts/
 ├── train_supermimic.py            # Online joint training
 ├── evaluate_supermimic.py         # Checkpoint policy evaluation
+├── play_supermimic.py             # Live MuJoCo policy/reference comparison
+├── export_supermimic_policy.py    # Extract lightweight actor weights
 ├── data/
 │   └── convert_lafan_to_npz.py     # LAFAN CSV-to-NPZ conversion
 └── offline/
@@ -87,7 +90,7 @@ scripts/
     └── train_world_model.py       # Standalone model training and validation
 ```
 
-Use the two scripts at the root for routine online training and evaluation.
+Use the root scripts for routine online training, evaluation, and playback.
 The `offline/` scripts support diagnostics and offline experiments; online training
 can start directly without running them. Example imports:
 
@@ -150,6 +153,14 @@ the first 500 rounds after initial collection keep collecting and fitting the
 world model, with Actor and Critic updates starting at round 501. Warmup rounds
 count toward `--iterations`, and checkpoints preserve progress. The default is `0`.
 
+CUDA training defaults to `--compile --amp bf16`. Core tensor computations use
+`torch.compile`; only MLPs use BF16 autocast, while physical computations remain
+FP32. Rewards and Critic targets are batched across imagined time steps. Reference
+inputs contain 73 features per frame (730 per window). First updates compile
+kernels; measure steady-state speed afterward. CPU uses eager FP32. Use
+`--no-compile` or `--amp none` to isolate execution issues. Earlier 2680-feature
+policy checkpoints require their matching code version; start a new run here.
+
 ```bash
 python scripts/train_supermimic.py \
   --device cuda:0 \
@@ -200,10 +211,34 @@ New runs require a new output directory. Main outputs:
 | `metrics.jsonl` | Collection, model, Actor, Critic, and timing metrics |
 | `simulator.log` | Simulator initialization and kernel output |
 | `wandb_run.json`, `wandb/` | Optional W&B run identity and local tracking data |
-| `last.pt` | Latest networks, optimizers, replay, sampler, and RNG states |
-| `best.pt` | Checkpoint with the highest fixed-start simulator evaluation return |
-| `iteration_*.pt` | Periodic training checkpoints |
+| `last.pt` | Full resume state: networks, optimizers, replay, sampler, and RNG states |
+| `policy_best.pt` | Actor-only weights and metadata with the highest fixed-start evaluation return |
+| `policy_last.pt` | Latest saved actor-only weights and inference metadata |
+| `policy_iteration_*.pt` | Lightweight policies saved at `--checkpoint-interval` |
+| `iteration_*.pt` | Historical full snapshots, enabled with `--full-checkpoint-interval N` |
 | `evaluation*.json` | Per-motion returns, success counts, and failure reasons |
+
+By default, training updates one full `last.pt` and keeps lightweight policy history.
+Policy files contain the Actor and validation metadata, without replay, world model,
+Critic, or optimizers. Use them for evaluation and MuJoCo playback; resume requires a
+full training checkpoint. Add `--full-checkpoint-interval 10000` to retain full
+historical snapshots every 10000 iterations. No old files are automatically deleted.
+
+Export an existing full checkpoint without retraining, a GPU, or motion data:
+
+```bash
+python scripts/export_supermimic_policy.py \
+  --checkpoint outputs/supermimic/lafan_horizon_fixed/best.pt \
+  --output outputs/supermimic/lafan_horizon_fixed/policy_best.pt
+```
+
+Run from the project root. Export preserves the source and memory-maps replay storage
+without reading it into RAM. Existing `last.pt` and `iteration_*.pt` can be exported
+the same way. Evaluation and playback accept either format with the same actor weights
+and data/robot/physics checks. When resuming an older run with `best.pt` and no
+`policy_best.pt`, the best policy is exported automatically; existing full snapshots
+are retained. Export does not migrate legacy feature schemas or physics settings.
+An already running training process needs to restart from `last.pt` to use this layout.
 
 ## Training logs and W&B
 
@@ -268,15 +303,60 @@ randomization and observation noise disabled:
 
 ```bash
 python scripts/evaluate_supermimic.py \
-  --device cuda:0 --checkpoint outputs/supermimic/online_training/best.pt \
-  --output outputs/supermimic/online_policy_evaluation.json
+  --device cuda:0 --checkpoint outputs/supermimic/online_training/policy_best.pt \
+  --output outputs/supermimic/online_policy_evaluation.json \
+  --csv outputs/supermimic/eval.csv
 ```
 
 Evaluation uses all training motions by default, until completion or physical failure.
 Returns are normalized by the maximum possible return for the complete clip, so early
 failure lowers the score. `--max-steps-per-clip` is for debugging; unfinished motions
-are marked in the report. `best.pt` may still contain the initial policy; use the
+are marked in the report. `policy_best.pt` may still contain the initial policy; use the
 evaluation report to determine whether training has improved tracking.
+
+Following the [reference evaluator](https://github.com/zita-ch/supermimic_vibed/blob/main/supermimic/evaluate.py),
+the terminal prints `Evaluation return <score>`, for example `Evaluation return 0.824`
+(an illustration of the format, not a measured result). Each clip's undiscounted reward
+is divided by `5 * 0.02 * (frames - 1)`, then averaged equally across clips. JSON also
+reports `normalized_return_framew` (weighted by full clip lengths), per-clip errors,
+completion, `n_failed`, and `failed`. Debug limits and unexpected timeouts are marked
+`INCOMPLETE` / `evaluation_complete: false`. Physical failures are evaluated outcomes;
+their denominators still include the entire clip. CSV rows include checkpoint,
+iteration, motion selection, and scores for comparison on the same motion set.
+
+### Live MuJoCo validation
+
+```bash
+python scripts/play_supermimic.py \
+  --device cuda:0 --checkpoint outputs/supermimic/online_training/policy_best.pt \
+  --clips walk1_subject1 run1_subject2 --loop
+```
+
+The solid robot executes the policy in MuJoCo Warp; the translucent blue robot shows
+the current reference. Reference XY and heading are aligned as in the body tracking
+reward by default; `--global-ghost` reveals absolute position and heading errors.
+Space pauses, Right steps once, and `G` toggles the reference. Close the window to exit.
+Use `--speed 0.5` for slow motion or `--no-ghost` to hide the reference. `--loop` repeats
+selected clips, saving a report after each complete pass. Closing the window midway
+does not save the interrupted pass. The final pose before automatic reset is displayed,
+including falls. `evaluate_supermimic.py --viewer native` also enables live viewing;
+evaluation is headless by default.
+
+On a server without a desktop, export the same evaluation to MP4 (requires `ffmpeg`):
+
+```bash
+MUJOCO_GL=egl python scripts/evaluate_supermimic.py \
+  --device cuda:0 --checkpoint outputs/supermimic/online_training/policy_best.pt \
+  --clips walk1_subject1 --video outputs/supermimic/walk.mp4 \
+  --output outputs/supermimic/walk_evaluation.json
+```
+
+Selected clips are concatenated at 960×540, 50 FPS. Live viewing requires a desktop
+display; MP4 export does not. Both paths validate checkpoint features, manifest,
+robot signature, and physics settings. Legacy reference-feature checkpoints require
+their matching code version; checkpoints from new training runs work directly.
+Playback requires `--checkpoint` or `--policy`; evaluation without either explicitly
+runs a zero-action baseline.
 
 ## Tests
 

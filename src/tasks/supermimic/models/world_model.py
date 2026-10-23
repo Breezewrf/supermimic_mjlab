@@ -18,6 +18,7 @@ from ..mdp.state import (
   rotvec_to_quat,
 )
 from ..mdp.terminations import failure_terms, soft_termination
+from .execution import run_mlp
 from .kinematics import G1Kinematics
 
 GROUPS = (3, 3, 29, 3, 3, 29)
@@ -114,6 +115,7 @@ class WorldModel(nn.Module):
     hidden_dims: tuple[int, ...] = (2048, 2048, 2048),
     termination_mode: str = "learned",
     relative_orientation: bool = False,
+    amp: str = "none",
   ):
     super().__init__()
     if not hidden_dims or any(width < 1 for width in hidden_dims):
@@ -123,6 +125,7 @@ class WorldModel(nn.Module):
       raise ValueError("termination_mode must be learned or analytic")
     self.termination_mode = termination_mode
     self.relative_orientation = relative_orientation
+    self.amp = amp
     self.kinematics = G1Kinematics(metadata)
     widths = (130, *hidden_dims, 70)
     layers = []
@@ -158,7 +161,9 @@ class WorldModel(nn.Module):
     features = (
       self.features(state, action, context) - self.input_mean
     ) / self.input_std
-    return integrate(state, self.dynamics(features) * self.correction_scale)
+    return integrate(
+      state, run_mlp(self.dynamics, features, self.amp) * self.correction_scale
+    )
 
   def termination(
     self, next_state: Tensor, reference_next: dict[str, Tensor]
@@ -170,7 +175,7 @@ class WorldModel(nn.Module):
     features = torch.stack(
       (errors["height_error"] / 0.25, errors["tilt_error"] / 0.8), dim=-1
     )
-    logits = self.termination_head(features).squeeze(-1)
+    logits = run_mlp(self.termination_head, features, self.amp).squeeze(-1)
     return {
       "termination_logit": logits,
       "termination_probability": logits.sigmoid(),

@@ -559,6 +559,8 @@ class OnlineIntegrationTests(unittest.TestCase):
       path = Path(folder) / "checkpoint.pt"
       torch.save(trainer.state_dict(), path)
       saved = torch.load(path, map_location="cpu", weights_only=True)
+      with self.assertRaisesRegex(ValueError, "730-dimensional"):
+        trainer.load_state_dict(saved | {"reference_schema": "full_body_268"})
       # Older online checkpoints have no warmup setting and must retain 0.
       del saved["config"]["wm_only_iters"]
       resumed = OnlineTrainer(self.env, self.metadata, self.config)
@@ -643,6 +645,8 @@ class OnlineCliTests(unittest.TestCase):
         str(output),
         "--log-interval",
         "1",
+        "--checkpoint-interval",
+        "1",
       ]
       has_wandb = importlib.util.find_spec("wandb") is not None
       if has_wandb:
@@ -657,7 +661,12 @@ class OnlineCliTests(unittest.TestCase):
       for iteration in (1, 2):
         command = common + ["--iterations", str(iteration)]
         if iteration == 2:
-          command += ["--resume", str(output / "last.pt")]
+          command += [
+            "--resume",
+            str(output / "last.pt"),
+            "--full-checkpoint-interval",
+            "2",
+          ]
         result = subprocess.run(
           command,
           cwd=ROOT,
@@ -675,6 +684,21 @@ class OnlineCliTests(unittest.TestCase):
         self.assertEqual(saved["config"]["wm_only_iters"], 1)
         self.assertEqual(saved["actor_updates"], iteration - 1)
         self.assertEqual(saved["critic_updates"], iteration - 1)
+        weights = torch.load(
+          output / "policy_last.pt", map_location="cpu", weights_only=True
+        )
+        self.assertEqual(weights["kind"], "supermimic_actor")
+        self.assertNotIn("replay", weights)
+        self.assertNotIn("world", weights)
+        self.assertEqual(weights["iteration"], iteration)
+        for key, value in saved["actor"].items():
+          torch.testing.assert_close(weights["actor"][key], value, rtol=0, atol=0)
+        self.assertTrue((output / f"policy_iteration_{iteration:06d}.pt").exists())
+        self.assertFalse((output / "iteration_000001.pt").exists())
+        self.assertTrue((output / "policy_best.pt").exists())
+        self.assertFalse((output / "best.pt").exists())
+        if iteration == 2:
+          self.assertTrue((output / "iteration_000002.pt").exists())
         rows = [
           json.loads(line)
           for line in (output / "metrics.jsonl").read_text().splitlines()
@@ -733,6 +757,31 @@ class OnlineCliTests(unittest.TestCase):
       self.assertEqual(len(report["motions"]), 1)
       self.assertEqual(report["motions"][0]["motion"], "fixture_walk")
       self.assertTrue(report["motions"][0]["evaluation_limited"])
+      result = subprocess.run(
+        prefix
+        + [
+          "scripts/evaluate_supermimic.py",
+          "--manifest",
+          str(manifest),
+          "--device",
+          "cpu",
+          "--checkpoint",
+          str(output / "policy_last.pt"),
+          "--max-steps-per-clip",
+          "2",
+          "--output",
+          str(evaluation),
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+      )
+      self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+      lightweight_report = json.loads(evaluation.read_text())
+      self.assertEqual(lightweight_report["motions"], report["motions"])
 
 
 if __name__ == "__main__":

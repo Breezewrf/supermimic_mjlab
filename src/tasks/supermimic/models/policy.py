@@ -8,14 +8,17 @@ from torch import Tensor, nn
 from ..mdp.state import (
   quat_apply,
   quat_conjugate,
+  quat_inverse_apply,
   quat_mul,
   quat_normalize,
   yaw_quat,
 )
+from .execution import run_mlp
 
-REFERENCE_DIM = 268
+REFERENCE_DIM = 73
 GOAL_DIM = 10 * REFERENCE_DIM
 CRITIC_DIM = 71 + GOAL_DIM + 33
+REFERENCE_SCHEMA = "root_joint_73_v1"
 
 
 def mlp(input_dim: int, hidden: tuple[int, ...], output_dim: int) -> nn.Sequential:
@@ -34,11 +37,13 @@ def reference_anchor(reference: dict[str, Tensor]) -> tuple[Tensor, Tensor]:
 
 
 def reference_features(reference: dict[str, Tensor], default_q: Tensor) -> Tensor:
-  """Ten frames in the first reference pelvis' horizontal/yaw frame; 268/frame."""
-  origin, inverse_yaw = reference_anchor(reference)
-  rotation = inverse_yaw[..., None, None, :]
-  position = quat_apply(rotation, reference["body_pos_w"] - origin[..., None, None, :])
-  quaternion = quat_normalize(quat_mul(rotation, reference["body_quat_w"]))
+  """Root displacement/6D rotation/local velocities and joints; 73 per frame."""
+  root_pos = reference["body_pos_w"][..., 0, :]
+  root_quat = reference["body_quat_w"][..., 0, :]
+  inverse_yaw = quat_conjugate(yaw_quat(root_quat[..., 0, :]))
+  rotation = inverse_yaw[..., None, :]
+  position = quat_apply(rotation, root_pos - root_pos[..., :1, :])
+  quaternion = quat_normalize(quat_mul(rotation, root_quat))
   # First two rotation-matrix columns avoid quaternion sign discontinuities.
   orientation = torch.cat(
     (
@@ -48,16 +53,16 @@ def reference_features(reference: dict[str, Tensor], default_q: Tensor) -> Tenso
     -1,
   )
   parts = (
-    (reference["joint_pos"] - default_q) / 0.3,
-    reference["joint_vel"] / 5,
-    (position / 0.3).flatten(-2),
-    orientation.flatten(-2),
-    quat_apply(rotation, reference["body_lin_vel_w"]).flatten(-2),
-    (quat_apply(rotation, reference["body_ang_vel_w"]) / 3.14).flatten(-2),
+    position,
+    orientation,
+    quat_inverse_apply(root_quat, reference["body_lin_vel_w"][..., 0, :]),
+    quat_inverse_apply(root_quat, reference["body_ang_vel_w"][..., 0, :]),
+    reference["joint_pos"],
+    reference["joint_vel"] * 0.1,
   )
   result = torch.cat(parts, -1)
   if result.shape[-2:] != (10, REFERENCE_DIM):
-    raise ValueError("Expected ten reference frames and fourteen tracked bodies")
+    raise ValueError("Expected ten reference frames with 73 root/joint features")
   return result.flatten(-2)
 
 
@@ -67,10 +72,12 @@ class MotionActor(nn.Module):
     default_q: Tensor,
     hidden_dims: tuple[int, ...] = (2048, 1024, 512, 256),
     relative_orientation: bool = False,
+    amp: str = "none",
   ):
     super().__init__()
     self.hidden_dims = tuple(hidden_dims)
     self.relative_orientation = relative_orientation
+    self.amp = amp
     self.observation_dim = 99 if relative_orientation else 93
     self.register_buffer("default_q", default_q.detach().clone().float())
     self.register_buffer(
@@ -89,9 +96,11 @@ class MotionActor(nn.Module):
       raise ValueError(
         f"Actor needs ten {self.observation_dim}-dimensional observations"
       )
-    latent = self.encoder(goal).tanh()
-    return self.decoder(
-      torch.cat((latent, (history / self.observation_scale).flatten(-2)), -1)
+    latent = run_mlp(self.encoder, goal, self.amp).tanh()
+    return run_mlp(
+      self.decoder,
+      torch.cat((latent, (history / self.observation_scale).flatten(-2)), -1),
+      self.amp,
     )
 
   def forward(self, history: Tensor, future_reference: dict[str, Tensor]) -> Tensor:
@@ -101,9 +110,15 @@ class MotionActor(nn.Module):
 
 
 class MotionCritic(nn.Module):
-  def __init__(self, default_q: Tensor, hidden_dims: tuple[int, ...] = (256, 128)):
+  def __init__(
+    self,
+    default_q: Tensor,
+    hidden_dims: tuple[int, ...] = (256, 128),
+    amp: str = "none",
+  ):
     super().__init__()
     self.hidden_dims = tuple(hidden_dims)
+    self.amp = amp
     self.register_buffer("default_q", default_q.detach().clone().float())
     self.register_buffer(
       "context_scale", torch.tensor([1.0] + [0.01] * 29 + [0.025, 0.05, 0.05])
@@ -138,4 +153,7 @@ class MotionCritic(nn.Module):
   def forward(
     self, state: Tensor, reference: dict[str, Tensor], context: Tensor
   ) -> Tensor:
-    return self.value(self.features(state, reference, context)).squeeze(-1)
+    return self.forward_features(self.features(state, reference, context)).squeeze(-1)
+
+  def forward_features(self, features: Tensor) -> Tensor:
+    return run_mlp(self.value, features, self.amp)
