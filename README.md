@@ -2,6 +2,10 @@
 
 English | [简体中文](README_zh.md)
 
+<p align="center">
+  <img src="doc/assets/demo_v0.gif" alt="SuperMimic demo">
+</p>
+
 A reproduction of [SuperMimic](doc/supermimic.pdf) for multi-motion tracking on the
 Unitree G1, built with mjlab, MuJoCo, and MuJoCo Warp. The current policy collects
 simulator transitions, a differentiable world model learns from 8-step autoregressive
@@ -322,6 +326,14 @@ python scripts/evaluate_supermimic.py \
 ```
 
 Evaluation uses all training motions by default, until completion or physical failure.
+Training evaluations and headless evaluation run clips in parallel, with up to 64
+environments by default (all 40 LAFAN1 clips fit in one batch). Use
+`--eval-num-envs N` during training or `--num-envs N` in the evaluation script to
+limit parallelism; `1` selects serial evaluation. Larger motion libraries run in
+batches. Each clip stops contributing rewards and errors at its first completion
+or failure, including when its environment automatically resets. Playback, viewer
+and video use one environment. Reports record `evaluation_num_envs`; training also
+reports `evaluation_wall_seconds`, including environment initialization.
 Returns are normalized by the maximum possible return for the complete clip, so early
 failure lowers the score. `--max-steps-per-clip` is for debugging; unfinished motions
 are marked in the report. `policy_best.pt` may still contain the initial policy; use the

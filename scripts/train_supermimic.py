@@ -5,6 +5,7 @@ import importlib.metadata
 import importlib.util
 import json
 import sys
+import time
 import traceback
 from dataclasses import asdict, fields
 from pathlib import Path
@@ -26,7 +27,7 @@ from src.tasks.supermimic.rl.checkpoints import (
   save_checkpoint,
   training_config,
 )
-from src.tasks.supermimic.rl.evaluation import evaluate
+from src.tasks.supermimic.rl.evaluation import evaluate, evaluation_env_count
 from src.tasks.supermimic.rl.online_training import (
   OnlineTrainer,
   restore_rng,
@@ -44,7 +45,7 @@ def write_json(path: Path, data: dict):
   path.write_text(json.dumps(data, indent=2, allow_nan=False) + "\n")
 
 
-def evaluate_actor(actor, manifest, config, device, limit=None):
+def evaluate_actor(actor, manifest, config, device, limit=None, max_envs=64):
   from src.tasks.supermimic.env import SuperMimicEnv
 
   saved_rng, training = rng_state(), actor.training
@@ -55,7 +56,7 @@ def evaluate_actor(actor, manifest, config, device, limit=None):
       FoundationConfig(
         manifest=manifest,
         clips=config.clips,
-        num_envs=1,
+        num_envs=evaluation_env_count(manifest, config.clips, max_envs),
         seed=config.seed,
         episode_length_s=1e9,
         relative_orientation=config.relative_orientation,
@@ -83,6 +84,12 @@ def main():
     help="Total update rounds, including WM-only warmup and saved rounds",
   )
   parser.add_argument("--eval-interval", type=int, default=100)
+  parser.add_argument(
+    "--eval-num-envs",
+    type=int,
+    default=64,
+    help="Maximum parallel evaluation environments (capped by selected clips; 1: serial)",
+  )
   parser.add_argument(
     "--checkpoint-interval",
     type=int,
@@ -178,6 +185,7 @@ def main():
   if min(
     args.iterations,
     args.eval_interval,
+    args.eval_num_envs,
     args.checkpoint_interval,
     args.log_interval,
     args.cpu_threads,
@@ -291,6 +299,7 @@ def main():
       },
       "simulation": trainer.simulation_parameters,
       "evaluation_limit": args.evaluation_limit,
+      "evaluation_max_envs": args.eval_num_envs,
       "full_checkpoint_interval": args.full_checkpoint_interval,
       "resume": str(args.resume) if args.resume else None,
     }
@@ -339,6 +348,7 @@ def main():
     def validate():
       nonlocal best_return
       console.message(f"Evaluating policy at iteration {trainer.iteration:,}...")
+      evaluation_started = time.perf_counter()
       with simulator_output(sim_log, args.verbose_sim):
         report = evaluate_actor(
           trainer.actor,
@@ -346,7 +356,9 @@ def main():
           config,
           args.device,
           args.evaluation_limit,
+          max_envs=args.eval_num_envs,
         )
+      report["evaluation_wall_seconds"] = time.perf_counter() - evaluation_started
       report["iteration"] = trainer.iteration
       report["training_environment_steps"] = trainer.environment_steps
       report["evaluation_limit"] = args.evaluation_limit
@@ -359,6 +371,10 @@ def main():
         best_return = report["normalized_return"]
         save_checkpoint(output / "policy_best.pt", inference_checkpoint())
       console.evaluation(report)
+      console.message(
+        f"Evaluation: {report['evaluation_num_envs']} environments, "
+        f"{report['evaluation_wall_seconds']:.1f}s including initialization"
+      )
       if tracking:
         tracking.evaluation(report)
         tracking.diagnostics(diagnostics)

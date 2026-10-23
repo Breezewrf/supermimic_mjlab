@@ -125,10 +125,11 @@ class PlaybackTerminationTests(unittest.TestCase):
     self.assertIn("PLAYBACK", evaluation_summary(report))
 
   def test_cli_defaults_and_playback_override(self):
-    for script, options, termination in (
-      ("play_supermimic.py", [], False),
-      ("play_supermimic.py", ["--termination"], True),
-      ("evaluate_supermimic.py", [], True),
+    for script, options, termination, width in (
+      ("play_supermimic.py", [], False, 1),
+      ("play_supermimic.py", ["--termination"], True, 1),
+      ("evaluate_supermimic.py", [], True, 2),
+      ("evaluate_supermimic.py", ["--num-envs", "1"], True, 1),
     ):
       with self.subTest(script=script, options=options):
         output = self.directory / "cli.json"
@@ -160,6 +161,7 @@ class PlaybackTerminationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         report = json.loads(output.read_text())
         self.assertEqual(report["termination_enabled"], termination)
+        self.assertEqual(report["evaluation_num_envs"], width)
         self.assertEqual(
           report["evaluation_mode"], "standard" if termination else "playback"
         )

@@ -289,6 +289,13 @@ python scripts/evaluate_supermimic.py \
 回报计算，提前失败会降低得分。`--max-steps-per-clip` 仅用于调试，报告会标记未完整
 评估的动作。`policy_best.pt` 可能仍是初始化策略，应以评估报告判断训练是否改善。
 
+训练内评估和无窗口评估默认使用最多 64 个并行环境，40 个 LAFAN1 动作可一次并行运行。
+训练时用 `--eval-num-envs N`，独立评估用 `--num-envs N` 限制并行数量；设为 `1`
+可回到串行评估，动作数量超过环境数时分批执行。每个动作独立运行至完成或失败，
+结束后即使环境自动重置，也不会继续累计该动作的奖励、误差或失败记录。
+play、实时窗口及视频导出保持单环境。JSON 中的 `evaluation_num_envs` 记录实际环境数；
+训练评估另记录 `evaluation_wall_seconds`，包含环境初始化耗时。
+
 参照 [supermimic_vibed 的评估协议](https://github.com/zita-ch/supermimic_vibed/blob/main/supermimic/evaluate.py)，
 终端输出 `Evaluation return <分数>`，例如 `Evaluation return 0.824`（仅为输出格式示例，
 不是当前模型的实测成绩）。每段动作的分数为 `累计奖励 / (5 × 0.02 × (帧数 − 1))`，

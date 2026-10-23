@@ -18,6 +18,7 @@ from src.tasks.supermimic.config.task_cfg import (
 from src.tasks.supermimic.rl.evaluation import (
   EvaluationInterrupted,
   evaluate,
+  evaluation_env_count,
   evaluation_summary,
   save_report,
   zero_policy,
@@ -49,6 +50,11 @@ def main(*, playback=False):
   parser.add_argument("--clips", nargs="*", default=[])
   parser.add_argument("--device", default="cuda:0")
   parser.add_argument("--seed", type=int, default=0)
+  parser.add_argument(
+    "--num-envs",
+    type=int,
+    help="Maximum parallel environments (headless evaluation: 64; play/viewer/video: 1)",
+  )
   parser.add_argument(
     "--policy",
     help="Python module:function accepting (history, future_reference); default: zero actions",
@@ -101,6 +107,12 @@ def main(*, playback=False):
     help="Export evaluation as MP4 (requires ffmpeg; headless: MUJOCO_GL=egl)",
   )
   args = parser.parse_args()
+  visual = playback or args.viewer != "none" or args.video is not None
+  max_envs = args.num_envs if args.num_envs is not None else (1 if visual else 64)
+  if max_envs < 1:
+    parser.error("--num-envs must be positive")
+  if visual and max_envs != 1:
+    parser.error("Playback, viewer and video require --num-envs 1")
   termination = args.termination if args.termination is not None else not playback
   perturbations = (
     args.perturbations
@@ -150,7 +162,7 @@ def main(*, playback=False):
   config = FoundationConfig(
     manifest=args.manifest,
     clips=tuple(args.clips),
-    num_envs=1,
+    num_envs=evaluation_env_count(args.manifest, tuple(args.clips), max_envs),
     seed=args.seed,
     episode_length_s=1e9,
     terminate_on_failure=termination,

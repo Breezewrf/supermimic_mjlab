@@ -232,6 +232,12 @@ python scripts/evaluate_supermimic.py \
 运行至物理失败或动作结束。评估使用独立环境，并恢复训练 RNG，不消耗训练环境的
 episode。原有 `--policy module:function` 入口继续支持，与 `--checkpoint` 互斥。
 
+训练评估和无窗口评估默认以最多 64 个环境并行动作，超过环境数的动作分批运行。
+`--eval-num-envs N` 控制训练评估的并行数；独立评估对应 `--num-envs N`，设为 `1`
+可串行对照。每段动作完成或失败后立即停止计分，自动重置后的数据不计入原动作。
+play、窗口和视频仍为单环境。评估 JSON 记录 `evaluation_num_envs`，训练另输出包含
+初始化的评估耗时 `evaluation_wall_seconds`；这些选项不改变归一化公式或失败阈值。
+
 终端以 `Evaluation return <分数>` 汇总，单动作分数为累计奖励除以
 `5 × 0.02 × (完整动作帧数 − 1)`，再对动作取平均。`normalized_return_framew`
 给出按完整动作长度加权的分数；`n_failed` / `failed` 只统计物理失败。

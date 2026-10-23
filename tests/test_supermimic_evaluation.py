@@ -143,7 +143,9 @@ class EvaluationProtocolTests(unittest.TestCase):
     env = FakeEnv()
     env.num_envs = 2
     with self.assertRaisesRegex(ValueError, "one environment"):
-      evaluate(env)
+      evaluate(env, on_frame=lambda *args: None)
+    with self.assertRaisesRegex(ValueError, "one environment"):
+      evaluate(env, before_step=lambda env: None)
     with self.assertRaisesRegex(ValueError, "positive"):
       evaluate(FakeEnv(), max_steps_per_clip=0)
     env = FakeEnv()
