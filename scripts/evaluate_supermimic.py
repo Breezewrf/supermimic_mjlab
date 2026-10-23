@@ -23,7 +23,11 @@ from src.tasks.supermimic.rl.evaluation import (
   save_report,
   zero_policy,
 )
-from src.tasks.supermimic.rl.inference import load_actor, validate_environment
+from src.tasks.supermimic.rl.inference import (
+  load_actor,
+  load_world_model,
+  validate_environment,
+)
 
 
 def print_motion(row: dict):
@@ -53,7 +57,7 @@ def main(*, playback=False):
   parser.add_argument(
     "--num-envs",
     type=int,
-    help="Maximum parallel environments (headless evaluation: 64; play/viewer/video: 1)",
+    help="Maximum parallel environments (headless: 64; play/viewer/video/world-model: 1)",
   )
   parser.add_argument(
     "--policy",
@@ -63,6 +67,30 @@ def main(*, playback=False):
     "--checkpoint",
     type=Path,
     help="Actor-only policy weights or a full online training checkpoint",
+  )
+  parser.add_argument(
+    "--world-model",
+    "--world-model-checkpoint",
+    type=Path,
+    help="Show world-model predictions from exported world weights or a full checkpoint",
+  )
+  parser.add_argument(
+    "--world-model-horizon",
+    type=int,
+    default=32,
+    help="Future lead or comparison resync horizon in steps (default: 32)",
+  )
+  parser.add_argument(
+    "--world-model-mode",
+    choices=("future", "compare"),
+    default="future",
+    help="future: policy rollout ahead of physics (default); compare: same-time dynamics errors",
+  )
+  parser.add_argument(
+    "--world-model-refresh",
+    type=int,
+    default=4,
+    help="Recompute future previews every N control steps; cached trajectory advances between updates",
   )
   parser.add_argument(
     "--max-steps-per-clip",
@@ -108,11 +136,22 @@ def main(*, playback=False):
   )
   args = parser.parse_args()
   visual = playback or args.viewer != "none" or args.video is not None
-  max_envs = args.num_envs if args.num_envs is not None else (1 if visual else 64)
+  single_env = visual or args.world_model is not None
+  max_envs = args.num_envs if args.num_envs is not None else (1 if single_env else 64)
   if max_envs < 1:
     parser.error("--num-envs must be positive")
-  if visual and max_envs != 1:
-    parser.error("Playback, viewer and video require --num-envs 1")
+  if single_env and max_envs != 1:
+    parser.error(
+      "World-model comparison, playback, viewer and video require --num-envs 1"
+    )
+  if args.world_model_horizon < 1:
+    parser.error("--world-model-horizon must be positive")
+  if args.world_model_refresh < 1:
+    parser.error("--world-model-refresh must be positive")
+  if args.world_model and args.world_model_mode == "future" and not args.checkpoint:
+    parser.error(
+      "Future preview requires --checkpoint; custom --policy callbacks can use --world-model-mode compare"
+    )
   termination = args.termination if args.termination is not None else not playback
   perturbations = (
     args.perturbations
@@ -157,6 +196,16 @@ def main(*, playback=False):
     except ValueError as error:
       parser.error(str(error))
     args.clips = list(clips)
+  world = world_saved = None
+  if args.world_model:
+    try:
+      world, world_saved = load_world_model(
+        args.world_model, args.manifest, args.device, tuple(args.clips)
+      )
+    except ValueError as error:
+      parser.error(str(error))
+    if not args.clips:
+      args.clips = list(world_saved["clips"])
   from src.tasks.supermimic.env import SuperMimicEnv
 
   config = FoundationConfig(
@@ -173,13 +222,32 @@ def main(*, playback=False):
   env = SuperMimicEnv(config, device=args.device)
   displays = []
   live_viewer = None
+  comparison = None
   try:
     if saved:
       validate_environment(env, saved)
+    if world_saved:
+      validate_environment(env, world_saved)
+      from src.tasks.supermimic.rl.world_model_playback import (
+        WorldModelFuturePreview,
+        WorldModelPlayback,
+      )
+
+      if args.world_model_mode == "future":
+        comparison = WorldModelFuturePreview(
+          env, world, policy, args.world_model_horizon, args.world_model_refresh
+        )
+      else:
+        comparison = WorldModelPlayback(env, world, args.world_model_horizon)
+    observed_policy = comparison.policy(policy) if comparison is not None else policy
     if args.viewer == "native" or args.video:
       from src.tasks.supermimic.rl.visualization import LiveViewer, VideoRecorder
 
-      visual_options = {"ghost": not args.no_ghost, "global_ghost": args.global_ghost}
+      visual_options = {
+        "ghost": not args.no_ghost,
+        "global_ghost": args.global_ghost,
+        "world_model": comparison,
+      }
       if args.viewer == "native":
         live_viewer = LiveViewer(
           env, speed=args.speed, perturbations=perturbations, **visual_options
@@ -189,6 +257,10 @@ def main(*, playback=False):
           "MuJoCo: solid = policy; blue ghost = reference. Space: pause; Right: step; G: ghost.",
           flush=True,
         )
+        if comparison is not None:
+          print(
+            "Orange ghost = world-model prediction; W: toggle prediction.", flush=True
+          )
         if perturbations:
           print(
             "Mouse forces ON: double-click a robot body, then hold Ctrl and drag. Release to stop.",
@@ -198,6 +270,8 @@ def main(*, playback=False):
         displays.append(VideoRecorder(env, args.video, **visual_options))
 
     def on_frame(*frame):
+      if comparison is not None:
+        comparison.on_frame(*frame)
       for display in displays:
         display(*frame)
 
@@ -207,6 +281,12 @@ def main(*, playback=False):
     )
     if saved:
       print(f"Reference schema: {saved['reference_schema']}", flush=True)
+    if world_saved:
+      print(
+        f"World model: {args.world_model} (iteration {world_saved.get('iteration', 'unknown')}); "
+        f"{comparison.description()}. External forces are not model inputs.",
+        flush=True,
+      )
     if not termination:
       print(
         "Failure termination OFF: height/tilt failures do not reset playback; clips still end normally.",
@@ -215,12 +295,14 @@ def main(*, playback=False):
     while True:
       if live_viewer:
         live_viewer.begin_evaluation()
+      if comparison is not None:
+        comparison.begin_evaluation()
       try:
         report = evaluate(
           env,
-          policy,
+          observed_policy,
           args.max_steps_per_clip,
-          on_frame=on_frame if displays else None,
+          on_frame=on_frame if displays or comparison is not None else None,
           on_motion=print_motion,
           before_step=live_viewer.before_step if live_viewer else None,
         )
@@ -249,6 +331,12 @@ def main(*, playback=False):
         report["evaluation_mode"] = "interactive"
       if perturbed_steps:
         report["protocol"] += "; interactive mouse forces applied"
+      if comparison is not None:
+        report["world_model_comparison"] = {
+          "checkpoint": str(args.world_model),
+          "iteration": world_saved.get("iteration"),
+          **comparison.report(),
+        }
       save_report(report, args.output, args.csv)
       print(evaluation_summary(report), flush=True)
       print(f"Report: {args.output}", flush=True)

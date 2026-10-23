@@ -445,6 +445,9 @@ def main():
     completed = True
   except Exception as error:
     if output.exists():
+      context = getattr(trainer, "failure_context", None)
+      if context is not None:
+        save_checkpoint(output / "critic_failure.pt", context)
       write_json(
         output / "failure.json",
         {

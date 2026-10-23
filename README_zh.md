@@ -228,7 +228,7 @@ python scripts/export_supermimic_policy.py \
 机器人／物理签名、动作来源和轮次，不含 Actor、Critic、Replay、优化器或 RNG 状态，
 不能用于续训。`policy_best.pt` 等轻量策略不含世界模型，不能从中恢复对应权重。
 需要比较同一轮策略与世界模型时，应从同一个完整断点分别导出；不要把不同轮次的
-`policy_best.pt` 和 `last.pt` 当作同一轮模型。本功能仅增加导出，尚未接入 play 预测叠加。
+`policy_best.pt` 和 `last.pt` 当作同一轮模型。导出文件可通过 play 的 `--world-model` 加载。
 
 `last.pt` 和已有 `iteration_*.pt` 也可同样导出。评估和播放兼容完整断点及轻量策略，
 两种格式保留相同 Actor 权重和数据／机器人／物理配置校验。续训旧目录时，若存在
@@ -330,6 +330,32 @@ python scripts/play_supermimic.py \
   --device cuda:0 --checkpoint outputs/supermimic/online_training/policy_best.pt \
   --clips walk1_subject1 run1_subject2 --loop
 ```
+
+加入世界模型预测对照：
+
+```bash
+python scripts/play_supermimic.py \
+  --device cuda:0 --checkpoint outputs/policy_best.pt \
+  --world-model outputs/world_model_7000.pt \
+  --world-model-horizon 32 --clips walk1_subject1 run1_subject2 --loop
+```
+
+默认 `--world-model-mode future` 会在世界模型内根据预测观测运行策略，橙色机器人
+显示**未来 32 步（0.64 秒）后的预测姿态**，并绘制橙色根部路径。
+`--world-model-refresh 4` 表示每 4 个控制步从当前真实状态和观测历史重新预测，
+其间沿缓存轨迹前进，保持固定的未来时间差；参考特征批量编码以减少开销。
+若预览影响流畅度，可增大 refresh。接近动作末尾时提前量缩短，不预测到下一个动作。
+
+`--world-model-mode compare` 保留原来的同时刻动力学误差对照，使用真实动作连续
+预测并每隔 horizon 步同步；在此模式下设 `--world-model-horizon 1` 可检查单步误差。
+`W` 显隐橙色预测，`G` 显隐蓝色参考。预测始终保留绝对位置和朝向。
+未来模式会显示 `FUTURE +0.64s`，等真实仿真到达目标帧后才统计该预测的误差，
+不会将未来姿态与当前姿态直接比较。JSON 的 `world_model_comparison` 记录模式和
+逐动作误差；预测出现 NaN／Inf 时隐藏至下次刷新，不影响真实仿真。
+
+世界模型会校验动作库、所选动作、机器人签名和物理配置，建议与策略使用同一轮权重。
+该选项也支持 `--video` 及 `--viewer none` 的诊断运行，固定使用单环境，不改变真实
+仿真回报。鼠标外力只进入真实物理；世界模型没有外力输入，因此拖拽时预测可能偏离。
 
 实体机器人是策略在 MuJoCo Warp 物理仿真中的执行结果，蓝色半透明机器人是对应帧
 的参考姿态。默认参考根部 XY 和朝向按 body tracking 奖励对齐；加 `--global-ghost`

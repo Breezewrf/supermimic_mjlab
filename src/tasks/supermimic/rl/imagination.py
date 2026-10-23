@@ -42,7 +42,10 @@ def gae_targets(
 def critic_loss(values: Tensor, targets: Tensor, mask: Tensor) -> Tensor:
   """Equation (3): sum valid time steps, then average over trajectories."""
   error = torch.where(mask, values - targets, 0.0)
-  return error.square().sum(dim=1).mean()
+  # FP32 intermediate squares/reductions can overflow even when the final batch
+  # mean fits FP32. Keep the same objective and gradients, using FP64 arithmetic
+  # until the scalar is formed; genuinely unrepresentable losses still fail.
+  return error.double().square().sum(dim=1).mean().to(values.dtype)
 
 
 def imagination_step(actor, world, state, history, goal, context, reference_quat):

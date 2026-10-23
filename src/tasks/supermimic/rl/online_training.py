@@ -309,22 +309,53 @@ class OnlineTrainer:
     survival = float(trajectory["survival"].detach().mean())
     reward = float(trajectory["rewards"].detach()[mask].mean())
     # Release the 32-step actor graph before the twenty small critic updates.
+    critic_source = {
+      key: trajectory[key].detach() for key in ("rewards", "continuation", "values")
+    }
     del trajectory
     self.phase = "critic"
     losses, norms = [], []
-    for _ in range(cfg.critic_epochs):
+    for epoch in range(cfg.critic_epochs):
       # Shuffle complete trajectories so the time sum in Eq. (3) is preserved.
       order = torch.randperm(
         len(targets), device=self.device, generator=self.critic_rng
       )
-      for indices in order.tensor_split(cfg.critic_minibatches):
+      for minibatch, indices in enumerate(order.tensor_split(cfg.critic_minibatches)):
         self.critic_optimizer.zero_grad(set_to_none=True)
+        predictions = self.kernels.critic_value(inputs[indices]).squeeze(-1)
         loss = self.kernels.critic_loss(
-          self.kernels.critic_value(inputs[indices]).squeeze(-1),
+          predictions,
           targets[indices],
           mask[indices],
         )
-        norms.append(checked_step(loss, self.critic, self.critic_optimizer))
+        try:
+          norms.append(checked_step(loss, self.critic, self.critic_optimizer))
+        except FloatingPointError:
+          # This is a diagnostic artifact, not a resumable training checkpoint:
+          # the actor and earlier critic minibatches may already have updated.
+          tensors = {
+            "inputs": inputs[indices],
+            "targets": targets[indices],
+            "mask": mask[indices],
+            "predictions": predictions,
+            "loss": loss,
+            **{key: value[indices] for key, value in critic_source.items()},
+          }
+          self.failure_context = {
+            "kind": "supermimic_critic_failure",
+            "iteration": self.iteration,
+            "epoch": epoch,
+            "minibatch": minibatch,
+            "config": asdict(cfg),
+            "critic": {
+              key: value.detach().cpu().clone()
+              for key, value in self.critic.state_dict().items()
+            },
+            "tensors": {
+              key: value.detach().cpu().clone() for key, value in tensors.items()
+            },
+          }
+          raise
         losses.append(float(loss.detach()))
         self.critic_updates += 1
     self.critic_optimizer.zero_grad(set_to_none=True)

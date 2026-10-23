@@ -608,6 +608,45 @@ class OnlineIntegrationTests(unittest.TestCase):
     self.assertTrue(torch.isfinite(torch.tensor(row["actor_objective"])))
     self.assertEqual(resumed.iteration, 2)
 
+  def test_critic_failure_captures_reproducible_minibatch_without_stepping(self):
+    config = replace(self.config, reference_dim=2680, amp="none", compile=False)
+    trainer = self.trainer(config)
+    before = copy.deepcopy(trainer.critic.state_dict())
+    with (
+      patch.object(
+        trainer.kernels,
+        "critic_loss",
+        side_effect=lambda values, *_: values.sum() * float("nan"),
+      ),
+      self.assertRaisesRegex(
+        FloatingPointError, "Nonfinite training loss in MotionCritic"
+      ),
+    ):
+      trainer.update_policy()
+    context = trainer.failure_context
+    self.assertEqual(context["kind"], "supermimic_critic_failure")
+    self.assertEqual(context["epoch"], 0)
+    self.assertEqual(context["minibatch"], 0)
+    self.assertEqual(context["tensors"]["inputs"].shape[-1], 2784)
+    self.assertEqual(trainer.critic_updates, 0)
+    self.assertEqual(trainer.actor_updates, 1)
+    for key, value in trainer.critic.state_dict().items():
+      torch.testing.assert_close(value, before[key], rtol=0, atol=0)
+    self.assertTrue(all(p.grad is None for p in trainer.critic.parameters()))
+    self.assertTrue(
+      all(not value.requires_grad for value in context["tensors"].values())
+    )
+    with tempfile.TemporaryDirectory() as folder:
+      path = Path(folder) / "critic_failure.pt"
+      torch.save(context, path)
+      restored = torch.load(path, weights_only=True)
+      trainer.critic.load_state_dict(restored["critic"])
+      with torch.no_grad():
+        actual = trainer.critic.forward_features(restored["tensors"]["inputs"]).squeeze(
+          -1
+        )
+      torch.testing.assert_close(actual, restored["tensors"]["predictions"])
+
   def test_capacity_overflow_rejects_corrupted_physical_transitions(self):
     counter = self.env.sim.data.ncollision
     original = counter.clone()
