@@ -98,6 +98,31 @@ Actor 本体观测沿用第一阶段定义：关节角、关节速度、机体�
 默认关闭此选项，以便与修复采样器后的 93 维基线独立对照。整体旋转机器人与参考
 不改变相对朝向；仅旋转机器人则改变相对朝向，不恢复参考的全局 yaw。
 
+### 可选 Actor／Critic RunningNorm
+
+`--actor-input-normalization` 启用两套独立的 RunningNorm：一套用于每帧
+93／99 维本体观测，一套用于 730／2680 维参考特征。启用后，Actor 本体观测
+以 RunningNorm 代替固定 `observation_scale` 缩放；参考特征定义和顺序保持原样。
+`--critic-input-normalization` 对 Critic 拼接后的特征启用独立 RunningNorm。
+两个开关默认关闭，也可通过对应 `--no-...` 参数显式关闭。
+
+RunningNorm 维护逐维累计均值、总体方差和样本计数，统计量使用 FP64 更新，
+网络前向仍使用原有精度，计算 `(x - mean) / (std + 0.01)`。累计样本达到
+2 亿后停止更新。遇到 NaN／Inf 样本直接报错，不污染统计量。
+
+每个真实采集步在生成动作前更新统计：Actor 仅计入最新一帧观测，避免重复统计
+重叠历史；参考和 Critic 特征也各计入该批真实起点一次。Critic 不使用想象状态
+更新统计。世界模型预热期间也会更新统计，但不会因此更新 Actor／Critic 权重。
+想象 rollout、末端 bootstrap 和整轮 Critic 拟合中，forward 不更新统计，保留
+归一化对输入的梯度。真实采集之后没有再采集的更新轮继续沿用同一套统计。
+
+完整 checkpoint 和轻量 Actor 导出都携带对应统计；评估、播放自动恢复并冻结。
+旧 checkpoint 缺少开关时视为关闭，不增加 state_dict 键，也不改变原来的输入缩放。
+`--resume` 自动恢复原开关，不允许中途启用或关闭；更换归一化设置应新建训练，
+不能把旧权重直接解释为已经学习了新输入分布的模型。
+
+### 执行精度与编译
+
 CUDA 训练默认启用 `--compile --amp bf16`。编译边界包括世界模型 8 步动力学
 rollout 及损失、想象单步、参考特征、批量奖励和 Critic 特征/价值、GAE 与价值损失。
 每个编译边界使用 `fullgraph=True`，编译失败会报错；不会静默切回普通执行。
@@ -111,9 +136,24 @@ MLP 矩阵运算使用 BF16 autocast，权重及物理状态仍为 FP32；积分
 批量计算并停止梯度。终点 bootstrap 单独保留对终点状态的梯度。Critic 的
 时间求和损失和轨迹 minibatch 划分保持原样。
 
-checkpoint 记录 `reference_schema=root_joint_73_v1`。此前 2680 维策略与新版训练
-架构不兼容，旧版续训需匹配代码，新架构需使用新输出目录重新训练。推理、评估与
-可视化支持 `full_body_268` 适配器，沿用旧版特征和原始权重。
+训练可通过 `--reference-dim` 选择两种参考输入，默认保持 730：
+
+| 参数 | 每帧参考 | 10 帧编码器输入 | Critic 总输入 | checkpoint schema |
+| --- | --- | --- | --- | --- |
+| `--reference-dim 730` | pelvis 和关节，73 维 | 730 | 834 | `root_joint_73_v1` |
+| `--reference-dim 2680` | 14 个 body 和关节，268 维 | 2680 | 2784 | `full_body_268` |
+
+2680 模式复用原版的特征顺序、参考水平/yaw 锚点及缩放，保留绝对参考高度。
+Actor、Critic、真实采集、普通及编译想象训练均使用所选特征。要对照旧版 FP32
+训练，可在原命令中增加 `--reference-dim 2680 --amp none --no-compile`；
+该选项只选择参考架构，不自动调整学习率、horizon 或预热配置，也不保证逐位复现旧训练。
+
+完整训练 checkpoint 保存所选维度和 schema，`--resume` 自动恢复，无需重复指定。
+缺少这些字段的历史 checkpoint 从 Actor 编码器输入宽度推断；缺少 `compile`、
+`amp` 的旧断点按非编译 FP32 恢复。旧 2680 维完整训练断点可在当前代码中续训，
+仍要求原有 motion manifest、机器人、物理配置、训练配置和 RNG 后端一致。
+仅有 Actor 的轻量策略不支持续训。不能在续训中把 2680 改成 730 或反向切换，
+不同架构需新建训练。推理、评估、可视化和导出继续自动识别两种架构。
 
 ## 三阶段更新
 
@@ -179,6 +219,11 @@ Replay 常规采样也改为对随机候选做窗口/历史检查；仅候选极
 
 已有完整断点可用 `scripts/export_supermimic_policy.py --checkpoint <完整断点>
 --output <轻量策略.pt>` 提取推理权重，内存映射读取，不复制 Replay，也不改写源文件。
+同一命令添加 `--component world-model --output <世界模型.pt>` 可单独提取完整
+`world` 状态（含归一化参数、运动学与终止预测头）及重建配置、机器人／物理签名。
+该文件格式为 `supermimic_world_model`，不含 Actor、Critic、Replay、优化器或 RNG，
+不能续训；轻量 policy 本身不含世界模型。若需同轮次的策略与世界模型，应从同一个
+完整断点分别导出。play 添加 `--world-model <世界模型.pt>` 可显示橙色预测机器人。
 续训旧目录时，如旧 `best.pt` 存在而 `policy_best.pt` 不存在，会自动导出最佳策略。
 现存历史文件不会自动删除；正在运行的进程须从 `last.pt` 重启后才会使用新的保存方式。
 缺少 `reference_schema` 时，导出和推理会按 Actor 编码器输入维度识别 730／2680
@@ -217,6 +262,12 @@ python scripts/evaluate_supermimic.py \
 运行至物理失败或动作结束。评估使用独立环境，并恢复训练 RNG，不消耗训练环境的
 episode。原有 `--policy module:function` 入口继续支持，与 `--checkpoint` 互斥。
 
+训练评估和无窗口评估默认以最多 64 个环境并行动作，超过环境数的动作分批运行。
+`--eval-num-envs N` 控制训练评估的并行数；独立评估对应 `--num-envs N`，设为 `1`
+可串行对照。每段动作完成或失败后立即停止计分，自动重置后的数据不计入原动作。
+play、窗口和视频仍为单环境。评估 JSON 记录 `evaluation_num_envs`，训练另输出包含
+初始化的评估耗时 `evaluation_wall_seconds`；这些选项不改变归一化公式或失败阈值。
+
 终端以 `Evaluation return <分数>` 汇总，单动作分数为累计奖励除以
 `5 × 0.02 × (完整动作帧数 − 1)`，再对动作取平均。`normalized_return_framew`
 给出按完整动作长度加权的分数；`n_failed` / `failed` 只统计物理失败。
@@ -226,10 +277,19 @@ episode。原有 `--policy module:function` 入口继续支持，与 `--checkpoi
 `python scripts/play_supermimic.py --checkpoint <路径> --clips walk1_subject1 --loop`
 提供真实仿真策略与蓝色半透明参考动作的 MuJoCo 实时对照。空格暂停，右方向键单步，
 `G` 切换参考动作；`--speed 0.5` 慢放，`--global-ghost` 查看绝对位移与朝向偏差。
+添加 `--world-model outputs/world_model_7000.pt --world-model-horizon 32` 可比较
+世界模型与真实仿真的状态。默认 `--world-model-mode future` 在模型内根据预测观测
+运行策略，显示未来 32 步（0.64 秒）后的姿态及根部路径；每
+`--world-model-refresh 4` 步刷新，其间沿缓存轨迹前进。`--world-model-mode compare`
+保留使用实际动作的同时刻误差对照，配合 `--world-model-horizon 1` 可做单步检查。
+`W` 显隐橙色机器人；未来模式仅在真实仿真到达预测目标帧后统计误差。
+JSON 的 `world_model_comparison` 保存模式和逐动作误差。预测使用独立渲染缓冲区，不改变
+策略动作、物理状态或真实评估得分。鼠标外力不属于世界模型输入。该选项也支持
+视频导出及无窗口诊断，固定单环境，并校验世界模型的动作库、机器人和物理配置。
 无桌面环境可用 `MUJOCO_GL=egl python scripts/evaluate_supermimic.py --checkpoint <路径>
 --clips walk1_subject1 --video outputs/supermimic/walk.mp4` 导出视频，需要 `ffmpeg`。
 渲染使用独立 MuJoCo 缓冲区，显示 `transition.next_state`，不会改写评估仿真或将
-自动重置后的新姿态误当作失败终帧。详见 [README 实时验证说明](../README_zh.md#mujoco-实时动作验证)。
+自动重置后的新姿态误当作失败终帧。详见[播放与世界模型可视化](training_and_playback_zh.md#播放与世界模型可视化)。
 播放入口默认支持鼠标外力：双击实体机器人身体，按住 `Ctrl`＋右键拖拽施力，
 `Ctrl`＋左键拖拽施加力矩。外力通过原生查看器相同的 `qfrc_applied` 通道进入物理
 仿真，未将拖拽转换为姿态写入。松开、换动作或关窗口会清除外力；可用
@@ -318,3 +378,28 @@ Replay 恢复以及
 的真实仿真结果判断，不能用想象回报上升代替真实策略性能。
 
 历史短训结果单独保存在[实现验证记录](experiments/implementation_validation_zh.md)，不作为当前策略性能的验证结果。
+
+## 梯度范数溢出与训练发散
+
+`clip_grad_norm_` 报 `total norm ... is non-finite` 有两种情况：梯度元素已包含
+NaN/Inf，或者梯度元素仍有限、但 FP32 L2 范数计算溢出（例如梯度量级为 `1e20`）。
+不能仅凭这条异常区分两者。`checked_step` 保留常规裁剪路径；范数溢出时先检查
+每个参数的梯度，全部有限才使用 FP64 重算范数并裁剪，随后执行原来的 Actor
+逐元素裁剪。发现真实 NaN/Inf 时清空梯度并停止，错误中列出模型和参数名；
+不会执行该次 optimizer step。不要通过 `error_if_nonfinite=False` 绕过检查，
+也不要把 NaN/Inf 替换成零后继续更新。
+
+如果真实奖励下降而 Critic loss 持续上升，应先检查 `metrics.jsonl` 中的
+`actor_gradient_norm`、`critic_gradient_norm`、`actor_reward_objective`、
+`actor_bootstrap_objective` 以及世界模型的状态误差。范数计算修复并不保证解决
+世界模型、Actor 和 Critic 联合训练的发散。
+
+可先在新输出目录进行较保守的短训实验：在原命令中增加
+`--warmup-steps 64 --wm-only-iters 500 --learning-rate 5e-5`，将
+`--horizon 32` 改成 `--horizon 8`，并缩短评估及存档间隔，例如
+`--eval-interval 2000 --checkpoint-interval 200`。这些是排查配置，尚未验证
+论文规模下的收敛；稳定后再单独验证 32 步设置。更改这些训练参数需要新建运行，
+不能对原配置的 checkpoint 使用 `--resume`。
+
+若再次报告真实非有限梯度，可用 `--detect-anomaly --no-compile --amp none`
+定位最早出问题的反向算子；该诊断配置速度较慢，并可能增加显存占用。

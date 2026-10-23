@@ -1,5 +1,6 @@
 """Online world-model and actor-critic training configuration."""
 
+import math
 from dataclasses import dataclass
 
 
@@ -32,8 +33,13 @@ class OnlineConfig:
   diagnostics_batch_size: int = 64
   compile: bool = True
   amp: str = "bf16"
+  reference_dim: int = 730
+  actor_input_normalization: bool = False
+  critic_input_normalization: bool = False
 
   def __post_init__(self):
+    if self.reference_dim not in (730, 2680):
+      raise ValueError("reference_dim must be 730 or 2680")
     counts = (
       self.num_envs,
       self.collect_steps,
@@ -55,6 +61,7 @@ class OnlineConfig:
     if (
       not 0 < self.gamma < 1
       or not 0 <= self.gae_lambda <= 1
+      or not math.isfinite(self.learning_rate)
       or self.learning_rate <= 0
       or self.action_noise < 0
       or self.episode_length_s <= 0

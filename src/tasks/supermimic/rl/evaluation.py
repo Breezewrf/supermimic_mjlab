@@ -10,6 +10,34 @@ from torch import Tensor
 
 Policy = Callable[[Tensor, dict[str, Tensor]], Tensor]
 FrameCallback = Callable[[object, int, int, Tensor, float], None]
+ERROR_METRICS = (
+  "body_position_error",
+  "body_orientation_error",
+  "root_position_error",
+  "root_orientation_error",
+)
+FAILURE_METRICS = ("height_failure", "tilt_failure", "physical_failure")
+
+
+def evaluation_env_count(
+  manifest: Path, clips: tuple[str, ...] = (), max_envs: int = 64
+) -> int:
+  """Size the evaluation pool from selected clips, without loading motion arrays."""
+  if max_envs < 1:
+    raise ValueError("Evaluation environment count must be positive")
+  requested = set(clips)
+  entries = json.loads(Path(manifest).read_text())["clips"]
+  count = sum(
+    not requested
+    or bool(
+      requested.intersection(
+        (Path(entry["file"]).as_posix(), Path(entry["file"]).with_suffix("").as_posix())
+      )
+    )
+    for entry in entries
+  )
+  # MotionLibrary supplies the detailed validation for empty/unknown selections.
+  return max(1, min(max_envs, count))
 
 
 class EvaluationInterrupted(Exception):
@@ -116,8 +144,10 @@ def evaluate(
   on_motion: Callable[[dict], None] | None = None,
   before_step: Callable[[object], None] | None = None,
 ) -> dict:
-  if env.num_envs != 1:
-    raise ValueError("Fixed-clip evaluation requires exactly one environment")
+  if env.num_envs < 1:
+    raise ValueError("Evaluation requires at least one environment")
+  if env.num_envs > 1 and (on_frame is not None or before_step is not None):
+    raise ValueError("Frame and interaction callbacks require exactly one environment")
   cfg = env.foundation_config
   if cfg.randomization or cfg.sensor_noise or cfg.reset_noise:
     raise ValueError("Evaluation must disable randomization, reset and sensor noise")
@@ -125,8 +155,11 @@ def evaluate(
     raise ValueError("Evaluation step limit must be positive")
   if not len(env.library.names):
     raise ValueError("Evaluation requires at least one motion")
+  if env.num_envs > 1:
+    return _evaluation_report(
+      env, _evaluate_parallel(env, policy, max_steps_per_clip, on_motion)
+    )
   rows = []
-  termination_enabled = cfg.terminate_on_failure
   for clip, name in enumerate(env.library.names):
     inputs, _ = env.reset(seed=cfg.seed, options={"motion_id": clip, "frame_id": 0})
     expected = int(env.library.lengths[clip]) - 1
@@ -147,12 +180,7 @@ def evaluate(
       if not torch.isfinite(reward).all():
         raise FloatingPointError(f"Nonfinite evaluation reward in {name}")
       reward_sum += float(reward[0])
-      for key in (
-        "body_position_error",
-        "body_orientation_error",
-        "root_position_error",
-        "root_orientation_error",
-      ):
+      for key in ERROR_METRICS:
         error_sums[key] = error_sums.get(key, 0.0) + float(extras["metrics"][key][0])
       terminated, truncated = bool(terminal[0]), bool(cutoff[0])
       reasons = [
@@ -201,6 +229,134 @@ def evaluate(
     )
     if on_motion:
       on_motion(rows[-1])
+  return _evaluation_report(env, rows)
+
+
+def _evaluate_parallel(env, policy, max_steps_per_clip, on_motion) -> list[dict]:
+  """Run fixed batches; mask each lane after its first finished episode.
+
+  The environment may auto-reset finished lanes while others are still running.
+  Their later rewards, errors and failures never contribute to the original clip.
+  Accumulators stay on the simulation device until the batch ends. Float64 sums
+  preserve the serial evaluator's Python-float reward accumulation.
+  """
+  device, width = env.device, env.num_envs
+  lengths = torch.as_tensor(env.library.lengths, device=device)
+  expected_steps = (lengths - 1).cpu().tolist()
+  if min(expected_steps) < 1:
+    raise ValueError("Every motion needs at least two frames")
+  rows = []
+  for start in range(0, len(env.library.names), width):
+    count = min(width, len(env.library.names) - start)
+    # Fill the final batch's unused lanes with a valid clip, but never score them.
+    motion_ids = torch.arange(start, start + width, device=device).clamp_max(
+      len(env.library.names) - 1
+    )
+    inputs, _ = env.reset(
+      seed=env.foundation_config.seed,
+      options={"motion_id": motion_ids, "frame_id": 0},
+    )
+    horizons = lengths[motion_ids] - 1
+    if max_steps_per_clip is not None:
+      horizons = horizons.clamp_max(max_steps_per_clip)
+    active = torch.arange(width, device=device) < count
+    reward_sum = torch.zeros(width, dtype=torch.float64, device=device)
+    error_sums = torch.zeros(
+      width, len(ERROR_METRICS), dtype=torch.float64, device=device
+    )
+    steps = torch.zeros(width, dtype=torch.long, device=device)
+    first_failure = torch.zeros_like(steps)
+    terminated = torch.zeros_like(active)
+    truncated = torch.zeros_like(active)
+    timed_out = torch.zeros_like(active)
+    failures = torch.zeros(width, len(FAILURE_METRICS), dtype=torch.bool, device=device)
+    invalid_reward = torch.zeros_like(active)
+    for step in range(int(horizons[:count].max())):
+      action = policy(inputs["history"], inputs["future_reference"])
+      action = torch.where(active[:, None], action, 0.0)
+      inputs, reward, terminal, cutoff, extras = env.step(action)
+      metrics = extras["metrics"]
+      invalid_reward |= active & ~torch.isfinite(reward)
+      reward_sum += torch.where(active, reward, 0.0).double()
+      errors = torch.stack([metrics[key] for key in ERROR_METRICS], -1)
+      error_sums += torch.where(active[:, None], errors, 0.0).double()
+      steps += active.long()
+      height = metrics.get("height_failure", torch.zeros_like(active))
+      tilt = metrics.get("tilt_failure", torch.zeros_like(active))
+      detected = torch.stack((height, tilt, terminal & ~(height | tilt)), -1)
+      failed_now = active & detected.any(-1)
+      first_failure = torch.where(
+        failed_now & (first_failure == 0), step + 1, first_failure
+      )
+      failures |= active[:, None] & detected
+      terminated |= active & terminal
+      truncated |= active & cutoff
+      timed_out |= active & extras["transition"]["time_out"]
+      active &= ~(terminal | cutoff | (step + 1 >= horizons))
+      if not bool(active.any()):
+        break
+    if bool(invalid_reward.any()):
+      raise FloatingPointError("Nonfinite evaluation reward in parallel batch")
+    # One small device-to-host copy per batch, rather than one per scalar/step.
+    results = (
+      torch.cat(
+        (
+          reward_sum[:, None],
+          steps[:, None],
+          terminated[:, None],
+          truncated[:, None],
+          timed_out[:, None],
+          first_failure[:, None],
+          failures,
+          error_sums,
+        ),
+        -1,
+      )[:count]
+      .cpu()
+      .tolist()
+    )
+    for slot, result in enumerate(results):
+      total, completed, terminal, cutoff, timeout, first, *values = result
+      completed, terminal, cutoff = int(completed), bool(terminal), bool(cutoff)
+      reasons = [key for key, failed in zip(FAILURE_METRICS, values[:3]) if failed]
+      expected = expected_steps[start + slot]
+      limited = completed < expected and not (terminal or cutoff)
+      reason = (
+        "+".join(reasons)
+        if terminal
+        else "time_limit"
+        if timeout
+        else "evaluation_limit"
+        if limited
+        else None
+      )
+      row = {
+        "motion": env.library.names[start + slot],
+        "steps": completed,
+        "expected_steps": expected,
+        "completion": completed / expected,
+        "success": completed == expected and not reasons,
+        "terminated": terminal,
+        "failure_detected": bool(reasons),
+        "first_failure_step": int(first) if first else None,
+        "detected_failure_reasons": sorted(reasons),
+        "failure_reason": reason,
+        "evaluation_limited": limited,
+        "return": total,
+        "normalized_return": total / (5 * env.step_dt * expected),
+        "mean_errors": {
+          key: value / completed for key, value in zip(ERROR_METRICS, values[3:])
+        },
+      }
+      rows.append(row)
+      if on_motion:
+        on_motion(row)
+  return rows
+
+
+def _evaluation_report(env, rows: list[dict]) -> dict:
+  cfg = env.foundation_config
+  termination_enabled = cfg.terminate_on_failure
   failed = [row["motion"] for row in rows if row["failure_detected"]]
   successes = sum(row["success"] for row in rows)
   complete = not any(
@@ -208,6 +364,7 @@ def evaluate(
   )
   return {
     "seed": cfg.seed,
+    "evaluation_num_envs": env.num_envs,
     "termination_enabled": termination_enabled,
     "evaluation_mode": "standard" if termination_enabled else "playback",
     "motions": rows,

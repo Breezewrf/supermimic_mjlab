@@ -6,7 +6,6 @@ import torch
 from torch import Tensor
 
 from ..mdp.state import add_sensor_noise, observe
-from ..models.policy import reference_features
 
 
 @contextmanager
@@ -43,7 +42,10 @@ def gae_targets(
 def critic_loss(values: Tensor, targets: Tensor, mask: Tensor) -> Tensor:
   """Equation (3): sum valid time steps, then average over trajectories."""
   error = torch.where(mask, values - targets, 0.0)
-  return error.square().sum(dim=1).mean()
+  # FP32 intermediate squares/reductions can overflow even when the final batch
+  # mean fits FP32. Keep the same objective and gradients, using FP64 arithmetic
+  # until the scalar is formed; genuinely unrepresentable losses still fail.
+  return error.double().square().sum(dim=1).mean().to(values.dtype)
 
 
 def imagination_step(actor, world, state, history, goal, context, reference_quat):
@@ -96,7 +98,9 @@ def imagine(
   windows = {
     key: value.unfold(1, 10, 1).movedim(-1, 2) for key, value in future.items()
   }
-  goal_fn = kernels.goals if kernels is not None else reference_features
+  if actor.reference_dim != critic.reference_dim:
+    raise ValueError("Actor and critic reference dimensions differ")
+  goal_fn = kernels.goals if kernels is not None else actor.reference_features
   with torch.no_grad():
     goals = goal_fn(windows, actor.default_q)
   first_action = history[:, -1, -29:]

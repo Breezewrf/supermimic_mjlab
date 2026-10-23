@@ -5,6 +5,7 @@ import importlib.metadata
 import importlib.util
 import json
 import sys
+import time
 import traceback
 from dataclasses import asdict, fields
 from pathlib import Path
@@ -19,13 +20,14 @@ from src.tasks.supermimic.config.task_cfg import (
 )
 from src.tasks.supermimic.data.world_model_data import file_sha256
 from src.tasks.supermimic.models.kinematics import robot_metadata
-from src.tasks.supermimic.models.policy import REFERENCE_SCHEMA
+from src.tasks.supermimic.models.policy import schema_for_dimension
 from src.tasks.supermimic.rl.checkpoints import (
   export_policy,
   policy_checkpoint,
   save_checkpoint,
+  training_config,
 )
-from src.tasks.supermimic.rl.evaluation import evaluate
+from src.tasks.supermimic.rl.evaluation import evaluate, evaluation_env_count
 from src.tasks.supermimic.rl.online_training import (
   OnlineTrainer,
   restore_rng,
@@ -43,7 +45,7 @@ def write_json(path: Path, data: dict):
   path.write_text(json.dumps(data, indent=2, allow_nan=False) + "\n")
 
 
-def evaluate_actor(actor, manifest, config, device, limit=None):
+def evaluate_actor(actor, manifest, config, device, limit=None, max_envs=64):
   from src.tasks.supermimic.env import SuperMimicEnv
 
   saved_rng, training = rng_state(), actor.training
@@ -54,7 +56,7 @@ def evaluate_actor(actor, manifest, config, device, limit=None):
       FoundationConfig(
         manifest=manifest,
         clips=config.clips,
-        num_envs=1,
+        num_envs=evaluation_env_count(manifest, config.clips, max_envs),
         seed=config.seed,
         episode_length_s=1e9,
         relative_orientation=config.relative_orientation,
@@ -82,6 +84,12 @@ def main():
     help="Total update rounds, including WM-only warmup and saved rounds",
   )
   parser.add_argument("--eval-interval", type=int, default=100)
+  parser.add_argument(
+    "--eval-num-envs",
+    type=int,
+    default=64,
+    help="Maximum parallel evaluation environments (capped by selected clips; 1: serial)",
+  )
   parser.add_argument(
     "--checkpoint-interval",
     type=int,
@@ -117,6 +125,24 @@ def main():
   parser.add_argument("--wandb-mode", choices=("online", "offline"), default="online")
   parser.add_argument("--termination-mode", choices=("learned", "analytic"))
   parser.add_argument("--amp", choices=("bf16", "none"))
+  for name in ("actor-input-normalization", "critic-input-normalization"):
+    parser.add_argument(
+      "--" + name,
+      action=argparse.BooleanOptionalAction,
+      default=None,
+      help="Enable RunningNorm for the selected network's inputs (default: disabled)",
+    )
+  parser.add_argument(
+    "--reference-dim",
+    type=int,
+    choices=(730, 2680),
+    help="Ten-frame reference input width: compact 730 (default) or original full-body 2680",
+  )
+  parser.add_argument(
+    "--learning-rate",
+    type=float,
+    help="Initial Adam learning rate for all three optimizers (default: 2e-4)",
+  )
   parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=None)
   parser.add_argument(
     "--wm-only-iters",
@@ -166,6 +192,7 @@ def main():
   if min(
     args.iterations,
     args.eval_interval,
+    args.eval_num_envs,
     args.checkpoint_interval,
     args.log_interval,
     args.cpu_threads,
@@ -190,10 +217,6 @@ def main():
       "--resume requires a full online training checkpoint (last.pt); policy weights cannot resume training"
     )
   if saved:
-    if saved.get("reference_schema") != REFERENCE_SCHEMA:
-      parser.error(
-        "Checkpoint uses older reference features; the 730-dimensional policy requires a new run"
-      )
     if saved.get("sampler", {}).get("schema_version") != 2:
       parser.error(
         "Legacy reset scores are incompatible with this fix; start a new run. Old actors remain usable for evaluation."
@@ -204,8 +227,10 @@ def main():
       parser.error(
         "Resume requires the original evaluation limit for comparable best checkpoints"
       )
-  # Checkpoints written before WM-only warmup used joint updates from round one.
-  saved_config = {"wm_only_iters": 0, **saved["config"]} if saved else None
+  try:
+    saved_config = training_config(saved) if saved else None
+  except ValueError as error:
+    parser.error(str(error))
   config_values = dict(saved_config) if saved else asdict(OnlineConfig())
   for field in fields(OnlineConfig):
     value = getattr(args, field.name, None)
@@ -218,6 +243,17 @@ def main():
   except ValueError as error:
     parser.error(str(error))
   manifest_hash = file_sha256(args.manifest)
+  if saved and any(
+    getattr(config, name) != saved_config[name]
+    for name in ("actor_input_normalization", "critic_input_normalization")
+  ):
+    parser.error(
+      "Resume cannot change input normalization; start a new run to enable or disable RunningNorm"
+    )
+  if saved and config.reference_dim != saved_config["reference_dim"]:
+    parser.error(
+      "Resume cannot change --reference-dim; use a new output directory for a new architecture"
+    )
   if saved and (
     saved_config != asdict(config) or saved["manifest_sha256"] != manifest_hash
   ):
@@ -269,7 +305,7 @@ def main():
       "manifest_sha256": manifest_hash,
       "runtime": runtime,
       "robot_signature": trainer.metadata["signature"],
-      "reference_schema": REFERENCE_SCHEMA,
+      "reference_schema": schema_for_dimension(config.reference_dim),
       "execution": {
         "compiled": trainer.kernels.enabled,
         "mlp_precision": config.amp if args.device.startswith("cuda") else "fp32",
@@ -277,6 +313,7 @@ def main():
       },
       "simulation": trainer.simulation_parameters,
       "evaluation_limit": args.evaluation_limit,
+      "evaluation_max_envs": args.eval_num_envs,
       "full_checkpoint_interval": args.full_checkpoint_interval,
       "resume": str(args.resume) if args.resume else None,
     }
@@ -325,6 +362,7 @@ def main():
     def validate():
       nonlocal best_return
       console.message(f"Evaluating policy at iteration {trainer.iteration:,}...")
+      evaluation_started = time.perf_counter()
       with simulator_output(sim_log, args.verbose_sim):
         report = evaluate_actor(
           trainer.actor,
@@ -332,7 +370,9 @@ def main():
           config,
           args.device,
           args.evaluation_limit,
+          max_envs=args.eval_num_envs,
         )
+      report["evaluation_wall_seconds"] = time.perf_counter() - evaluation_started
       report["iteration"] = trainer.iteration
       report["training_environment_steps"] = trainer.environment_steps
       report["evaluation_limit"] = args.evaluation_limit
@@ -345,6 +385,10 @@ def main():
         best_return = report["normalized_return"]
         save_checkpoint(output / "policy_best.pt", inference_checkpoint())
       console.evaluation(report)
+      console.message(
+        f"Evaluation: {report['evaluation_num_envs']} environments, "
+        f"{report['evaluation_wall_seconds']:.1f}s including initialization"
+      )
       if tracking:
         tracking.evaluation(report)
         tracking.diagnostics(diagnostics)
@@ -415,6 +459,9 @@ def main():
     completed = True
   except Exception as error:
     if output.exists():
+      context = getattr(trainer, "failure_context", None)
+      if context is not None:
+        save_checkpoint(output / "critic_failure.pt", context)
       write_json(
         output / "failure.json",
         {

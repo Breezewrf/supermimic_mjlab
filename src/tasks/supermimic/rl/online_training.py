@@ -11,8 +11,9 @@ import torch
 from ..config.rl_cfg import OnlineConfig
 from ..data.replay_buffer import ReplayBuffer
 from ..mdp.resets import RESET_NOISE
-from ..models.policy import REFERENCE_SCHEMA, MotionActor, MotionCritic
+from ..models.policy import MotionActor, MotionCritic, schema_for_dimension
 from ..models.world_model import WorldModel
+from .checkpoints import resolve_reference_schema, training_config
 from .diagnostics import replay_diagnostics, sampler_diagnostics
 from .execution import TrainingKernels
 from .imagination import frozen_parameters, imagine
@@ -60,11 +61,44 @@ def checked_step(
   loss, module, optimizer, *, element_clip: float | None = None
 ) -> float:
   if not torch.isfinite(loss):
-    raise FloatingPointError("Nonfinite training loss")
+    optimizer.zero_grad(set_to_none=True)
+    raise FloatingPointError(f"Nonfinite training loss in {type(module).__name__}")
   loss.backward()
-  norm = torch.nn.utils.clip_grad_norm_(
-    module.parameters(), 1.0, error_if_nonfinite=True
-  )
+  parameters = [p for p in module.parameters() if p.grad is not None]
+  try:
+    norm = torch.nn.utils.clip_grad_norm_(parameters, 1.0, error_if_nonfinite=True)
+  except RuntimeError as error:
+    if "non-finite" not in str(error):
+      raise
+    # A finite FP32 gradient can have an overflowing L2 norm (e.g. 1e20).
+    # clip_grad_norm_ raises before modifying gradients in that case. Recompute
+    # only this exceptional path in FP64, without changing the clipping order.
+    invalid = [
+      name
+      for name, parameter in module.named_parameters()
+      if parameter.grad is not None and not torch.isfinite(parameter.grad).all()
+    ]
+    if invalid:
+      optimizer.zero_grad(set_to_none=True)
+      raise FloatingPointError(
+        f"Nonfinite gradients in {type(module).__name__}: {', '.join(invalid)}. "
+        "Optimizer step was not applied. Use --detect-anomaly to locate the "
+        "backward operation; check world-model rollout and critic divergence."
+      ) from None
+    with torch.no_grad():
+      norm = torch.linalg.vector_norm(
+        torch.stack(
+          [torch.linalg.vector_norm(p.grad, dtype=torch.float64) for p in parameters]
+        )
+      )
+      if not torch.isfinite(norm):
+        optimizer.zero_grad(set_to_none=True)
+        raise FloatingPointError(
+          f"Nonfinite FP64 gradient norm in {type(module).__name__}"
+        ) from None
+      scale = (1.0 / (norm + 1e-6)).clamp(max=1.0)
+      for parameter in parameters:
+        parameter.grad.mul_(scale.to(parameter.grad.dtype))
   if element_clip is not None:
     for parameter in module.parameters():
       if parameter.grad is not None:
@@ -95,10 +129,19 @@ class OnlineTrainer:
       config.amp,
     ).to(self.device)
     self.actor = MotionActor(
-      metadata["default_q"], config.actor_dims, config.relative_orientation, config.amp
+      metadata["default_q"],
+      config.actor_dims,
+      config.relative_orientation,
+      config.amp,
+      reference_dim=config.reference_dim,
+      input_normalization=config.actor_input_normalization,
     ).to(self.device)
     self.critic = MotionCritic(
-      metadata["default_q"], config.critic_dims, config.amp
+      metadata["default_q"],
+      config.critic_dims,
+      config.amp,
+      reference_dim=config.reference_dim,
+      input_normalization=config.critic_input_normalization,
     ).to(self.device)
     self.kernels = TrainingKernels(
       self.actor,
@@ -141,6 +184,19 @@ class OnlineTrainer:
     timeouts, motion_ends = rewards.long(), rewards.long()
     for _ in range(steps):
       inputs = self.env.policy_input()
+      if (
+        self.config.actor_input_normalization or self.config.critic_input_normalization
+      ):
+        goal = self.actor.reference_features(
+          inputs["future_reference"], self.actor.default_q
+        )
+        # Count only the newest real observation, not overlapping history stacks.
+        self.actor.update_normalization(inputs["history"][:, -1], goal)
+        if self.config.critic_input_normalization:
+          features = self.critic.features(
+            self.env.read_state(), inputs["future_reference"], self.env.context, goal
+          )
+          self.critic.update_normalization(features)
       action = self.actor(inputs["history"], inputs["future_reference"])
       noise = torch.randn(action.shape, device=self.device, generator=self.noise_rng)
       _, reward, terminated, truncated, extras = self.env.step(
@@ -268,22 +324,53 @@ class OnlineTrainer:
     survival = float(trajectory["survival"].detach().mean())
     reward = float(trajectory["rewards"].detach()[mask].mean())
     # Release the 32-step actor graph before the twenty small critic updates.
+    critic_source = {
+      key: trajectory[key].detach() for key in ("rewards", "continuation", "values")
+    }
     del trajectory
     self.phase = "critic"
     losses, norms = [], []
-    for _ in range(cfg.critic_epochs):
+    for epoch in range(cfg.critic_epochs):
       # Shuffle complete trajectories so the time sum in Eq. (3) is preserved.
       order = torch.randperm(
         len(targets), device=self.device, generator=self.critic_rng
       )
-      for indices in order.tensor_split(cfg.critic_minibatches):
+      for minibatch, indices in enumerate(order.tensor_split(cfg.critic_minibatches)):
         self.critic_optimizer.zero_grad(set_to_none=True)
+        predictions = self.kernels.critic_value(inputs[indices]).squeeze(-1)
         loss = self.kernels.critic_loss(
-          self.kernels.critic_value(inputs[indices]).squeeze(-1),
+          predictions,
           targets[indices],
           mask[indices],
         )
-        norms.append(checked_step(loss, self.critic, self.critic_optimizer))
+        try:
+          norms.append(checked_step(loss, self.critic, self.critic_optimizer))
+        except FloatingPointError:
+          # This is a diagnostic artifact, not a resumable training checkpoint:
+          # the actor and earlier critic minibatches may already have updated.
+          tensors = {
+            "inputs": inputs[indices],
+            "targets": targets[indices],
+            "mask": mask[indices],
+            "predictions": predictions,
+            "loss": loss,
+            **{key: value[indices] for key, value in critic_source.items()},
+          }
+          self.failure_context = {
+            "kind": "supermimic_critic_failure",
+            "iteration": self.iteration,
+            "epoch": epoch,
+            "minibatch": minibatch,
+            "config": asdict(cfg),
+            "critic": {
+              key: value.detach().cpu().clone()
+              for key, value in self.critic.state_dict().items()
+            },
+            "tensors": {
+              key: value.detach().cpu().clone() for key, value in tensors.items()
+            },
+          }
+          raise
         losses.append(float(loss.detach()))
         self.critic_updates += 1
     self.critic_optimizer.zero_grad(set_to_none=True)
@@ -380,7 +467,7 @@ class OnlineTrainer:
     return {
       "schema_version": 1,
       "kind": "supermimic_actor",
-      "reference_schema": REFERENCE_SCHEMA,
+      "reference_schema": schema_for_dimension(self.config.reference_dim),
       "config": asdict(self.config),
       "robot_metadata": self.metadata,
       "simulation": self.simulation_parameters,
@@ -418,11 +505,14 @@ class OnlineTrainer:
   def load_state_dict(self, saved: dict):
     if saved.get("schema_version") != 1 or saved.get("kind") != "supermimic_online":
       raise ValueError("Not an online SuperMimic checkpoint")
-    if saved.get("reference_schema") != REFERENCE_SCHEMA:
+    if resolve_reference_schema(saved) != schema_for_dimension(
+      self.config.reference_dim
+    ):
       raise ValueError(
-        "Checkpoint reference features differ; the 730-dimensional policy requires a new run"
+        f"Checkpoint reference features differ from the {self.config.reference_dim}-dimensional policy; "
+        "use the checkpoint's reference dimension to resume"
       )
-    saved_config = {"wm_only_iters": 0, **saved["config"]}
+    saved_config = training_config(saved)
     if saved_config != asdict(self.config) or saved["clips"] != self.env.library.names:
       raise ValueError("Online checkpoint configuration or motion library mismatch")
     if saved["robot_metadata"]["signature"] != self.metadata["signature"]:

@@ -66,6 +66,12 @@ def make_starts(library, default_q, count=2, *, frame_id=0):
 
 
 class OnlineConfigTests(unittest.TestCase):
+  def test_reference_dimension_requires_a_supported_layout(self):
+    for width in (730, 2680):
+      self.assertEqual(OnlineConfig(reference_dim=width).reference_dim, width)
+    with self.assertRaisesRegex(ValueError, "reference_dim"):
+      OnlineConfig(reference_dim=73)
+
   def test_wm_only_iters_accepts_zero_and_positive_but_rejects_negative(self):
     self.assertEqual(OnlineConfig().wm_only_iters, 0)
     self.assertEqual(OnlineConfig(wm_only_iters=500).wm_only_iters, 500)
@@ -581,6 +587,101 @@ class OnlineIntegrationTests(unittest.TestCase):
       for episode, mask in zip(windows["episode_id"], windows["mask"]):
         self.assertEqual(len(episode[mask].unique()), 1)
 
+  def test_full_body_training_resumes_historical_checkpoint(self):
+    config = replace(self.config, reference_dim=2680, amp="none", compile=False)
+    trainer = self.trainer(config)
+    trainer.train_iteration()
+    saved = copy.deepcopy(trainer.state_dict())
+    self.assertEqual(saved["reference_schema"], "full_body_268")
+    self.assertEqual(trainer.critic.value[0].in_features, 2784)
+    # b050140 checkpoints predate schema, execution and dimension metadata.
+    del saved["reference_schema"]
+    for key in (
+      "reference_dim",
+      "amp",
+      "compile",
+      "wm_only_iters",
+      "actor_input_normalization",
+      "critic_input_normalization",
+    ):
+      del saved["config"][key]
+    resumed = OnlineTrainer(self.env, self.metadata, config)
+    resumed.load_state_dict(saved)
+    for name in ("actor", "critic", "world"):
+      for key, value in getattr(trainer, name).state_dict().items():
+        torch.testing.assert_close(getattr(resumed, name).state_dict()[key], value)
+    self.assertEqual(resumed.actor_updates, trainer.actor_updates)
+    row = resumed.train_iteration()
+    self.assertTrue(torch.isfinite(torch.tensor(row["actor_objective"])))
+    self.assertEqual(resumed.iteration, 2)
+
+  def test_running_norm_updates_only_from_new_real_collection_samples(self):
+    for actor_norm, critic_norm in ((True, False), (False, True), (True, True)):
+      with self.subTest(actor=actor_norm, critic=critic_norm):
+        config = replace(
+          self.config,
+          actor_input_normalization=actor_norm,
+          critic_input_normalization=critic_norm,
+        )
+        trainer = self.trainer(config)
+        norms = []
+        if actor_norm:
+          norms += [trainer.actor.obs_norm, trainer.actor.goal_norm]
+        if critic_norm:
+          norms += [trainer.critic.input_norm]
+        for norm in norms:
+          self.assertEqual(int(norm.count), config.num_envs * config.warmup_steps)
+        trainer.collect(2)
+        before = [
+          {key: value.clone() for key, value in norm.state_dict().items()}
+          for norm in norms
+        ]
+        for norm in norms:
+          self.assertEqual(int(norm.count), config.num_envs * (config.warmup_steps + 2))
+        trainer.update_policy()
+        for norm, saved in zip(norms, before):
+          for key, value in norm.state_dict().items():
+            torch.testing.assert_close(value, saved[key], rtol=0, atol=0)
+
+  def test_critic_failure_captures_reproducible_minibatch_without_stepping(self):
+    config = replace(self.config, reference_dim=2680, amp="none", compile=False)
+    trainer = self.trainer(config)
+    before = copy.deepcopy(trainer.critic.state_dict())
+    with (
+      patch.object(
+        trainer.kernels,
+        "critic_loss",
+        side_effect=lambda values, *_: values.sum() * float("nan"),
+      ),
+      self.assertRaisesRegex(
+        FloatingPointError, "Nonfinite training loss in MotionCritic"
+      ),
+    ):
+      trainer.update_policy()
+    context = trainer.failure_context
+    self.assertEqual(context["kind"], "supermimic_critic_failure")
+    self.assertEqual(context["epoch"], 0)
+    self.assertEqual(context["minibatch"], 0)
+    self.assertEqual(context["tensors"]["inputs"].shape[-1], 2784)
+    self.assertEqual(trainer.critic_updates, 0)
+    self.assertEqual(trainer.actor_updates, 1)
+    for key, value in trainer.critic.state_dict().items():
+      torch.testing.assert_close(value, before[key], rtol=0, atol=0)
+    self.assertTrue(all(p.grad is None for p in trainer.critic.parameters()))
+    self.assertTrue(
+      all(not value.requires_grad for value in context["tensors"].values())
+    )
+    with tempfile.TemporaryDirectory() as folder:
+      path = Path(folder) / "critic_failure.pt"
+      torch.save(context, path)
+      restored = torch.load(path, weights_only=True)
+      trainer.critic.load_state_dict(restored["critic"])
+      with torch.no_grad():
+        actual = trainer.critic.forward_features(restored["tensors"]["inputs"]).squeeze(
+          -1
+        )
+      torch.testing.assert_close(actual, restored["tensors"]["predictions"])
+
   def test_capacity_overflow_rejects_corrupted_physical_transitions(self):
     counter = self.env.sim.data.ncollision
     original = counter.clone()
@@ -594,6 +695,15 @@ class OnlineIntegrationTests(unittest.TestCase):
 
 class OnlineCliTests(unittest.TestCase):
   def test_cpu_train_resume_and_checkpoint_inference(self):
+    self.run_cli_training(730)
+
+  def test_full_body_cpu_train_resume_and_checkpoint_inference(self):
+    self.run_cli_training(2680)
+
+  def test_running_norm_cpu_train_resume_and_checkpoint_inference(self):
+    self.run_cli_training(2680, normalize=True)
+
+  def run_cli_training(self, reference_dim, normalize=False):
     with tempfile.TemporaryDirectory() as folder:
       output = Path(folder) / "training"
       manifest, _ = make_motions(Path(folder) / "motions", robot_metadata())
@@ -606,10 +716,14 @@ class OnlineCliTests(unittest.TestCase):
         "cpu",
         "--num-envs",
         "2",
+        "--reference-dim",
+        str(reference_dim),
         "--capacity",
         "32",
         "--warmup-steps",
         "8",
+        "--learning-rate",
+        "5e-5",
         "--wm-only-iters",
         "1",
         "--collect-steps",
@@ -649,6 +763,8 @@ class OnlineCliTests(unittest.TestCase):
         "1",
       ]
       has_wandb = importlib.util.find_spec("wandb") is not None
+      if normalize:
+        common += ["--actor-input-normalization", "--critic-input-normalization"]
       if has_wandb:
         common += ["--wandb", "--wandb-mode", "offline"]
       env = os.environ | {
@@ -661,6 +777,26 @@ class OnlineCliTests(unittest.TestCase):
       for iteration in (1, 2):
         command = common + ["--iterations", str(iteration)]
         if iteration == 2:
+          if normalize:
+            command.remove("--actor-input-normalization")
+            command.remove("--critic-input-normalization")
+          # Resume infers either layout without an explicit dimension argument.
+          offset = command.index("--reference-dim")
+          del command[offset : offset + 2]
+          if reference_dim == 2680 and not normalize:
+            historical = torch.load(
+              output / "last.pt", map_location="cpu", weights_only=True
+            )
+            del historical["reference_schema"]
+            for key in (
+              "reference_dim",
+              "amp",
+              "compile",
+              "actor_input_normalization",
+              "critic_input_normalization",
+            ):
+              del historical["config"][key]
+            torch.save(historical, output / "last.pt")
           command += [
             "--resume",
             str(output / "last.pt"),
@@ -682,6 +818,24 @@ class OnlineCliTests(unittest.TestCase):
         self.assertNotIn('"actor_objective":', result.stdout)
         saved = torch.load(output / "last.pt", map_location="cpu", weights_only=True)
         self.assertEqual(saved["config"]["wm_only_iters"], 1)
+        self.assertEqual(saved["config"]["learning_rate"], 5e-5)
+        self.assertEqual(saved["config"]["reference_dim"], reference_dim)
+        self.assertEqual(saved["config"]["actor_input_normalization"], normalize)
+        self.assertEqual(saved["config"]["critic_input_normalization"], normalize)
+        if normalize:
+          self.assertEqual(
+            int(saved["actor"]["obs_norm.count"]), saved["environment_steps"]
+          )
+          self.assertEqual(
+            int(saved["actor"]["goal_norm.count"]), saved["environment_steps"]
+          )
+          self.assertEqual(
+            int(saved["critic"]["input_norm.count"]), saved["environment_steps"]
+          )
+        self.assertEqual(saved["actor"]["encoder.0.weight"].shape[1], reference_dim)
+        self.assertEqual(
+          saved["critic"]["value.0.weight"].shape[1], reference_dim + 104
+        )
         self.assertEqual(saved["actor_updates"], iteration - 1)
         self.assertEqual(saved["critic_updates"], iteration - 1)
         weights = torch.load(

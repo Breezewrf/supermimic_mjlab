@@ -2,7 +2,6 @@
 
 import torch
 
-from ..models.policy import reference_features
 from .imagination import critic_loss, gae_targets, imagination_step, reward_terms
 from .world_model_training import rollout_states, world_model_loss
 
@@ -19,7 +18,7 @@ class TrainingKernels:
         function, backend=backend, fullgraph=True, dynamic=False, options=options
       )
 
-    self.goals = build(reference_features)
+    self.goals = build(actor.reference_features)
     self.world_rollout = build(
       lambda state, actions, context, mask: rollout_states(
         world, state, actions, context, mask

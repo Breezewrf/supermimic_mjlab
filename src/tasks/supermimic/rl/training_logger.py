@@ -151,9 +151,20 @@ class ConsoleReporter:
       )
     compiled = config.get("compile", True) and device.startswith("cuda")
     precision = config.get("amp", "bf16") if device.startswith("cuda") else "fp32"
+    reference_dim = config.get("reference_dim", 730)
+    if config.get("actor_input_normalization") or config.get(
+      "critic_input_normalization"
+    ):
+      self.message(
+        "RunningNorm: actor="
+        + str(config.get("actor_input_normalization", False))
+        + ", critic="
+        + str(config.get("critic_input_normalization", False))
+        + " | statistics: real collection only"
+      )
     self.message(
       f"Execution: {'torch.compile' if compiled else 'eager'} | MLP: {precision} | "
-      "reference: 10 x 73 = 730 features"
+      f"reference: 10 x {reference_dim // 10} = {reference_dim} features"
     )
     if compiled:
       self.message(
@@ -244,9 +255,7 @@ class ConsoleReporter:
     else:
       from .evaluation import evaluation_summary
 
-      self.message(
-        f"{evaluation_summary(report)} | iteration {report['iteration']:,}"
-      )
+      self.message(f"{evaluation_summary(report)} | iteration {report['iteration']:,}")
 
 
 class WandbReporter:
@@ -305,7 +314,7 @@ class WandbReporter:
     }
     self._persist(iteration)
     if console:
-      location = self.run.get_url() if mode == "online" else self.run.dir
+      location = (self.run.url or self.run.dir) if mode == "online" else self.run.dir
       console.message(f"W&B {mode}: {location}")
       if previous and not continuation:
         console.message(

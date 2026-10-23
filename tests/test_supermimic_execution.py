@@ -122,6 +122,59 @@ class ExecutionTests(unittest.TestCase):
       result, reference_features(altered, self.metadata["default_q"])
     )
 
+  def test_full_body_reference_retains_height_scaling_and_body_targets(self):
+    actor = MotionActor(self.metadata["default_q"], (16,), reference_dim=2680)
+    ref = self.library.get_future(torch.tensor([0, 1]), torch.tensor([0, 3]))
+    frames = actor.reference_features(ref, actor.default_q).reshape(2, 10, 268)
+    self.assertEqual(actor.encoder[0].in_features, 2680)
+    torch.testing.assert_close(
+      frames[..., :29], (ref["joint_pos"] - actor.default_q) / 0.3
+    )
+    torch.testing.assert_close(frames[..., 29:58], ref["joint_vel"] / 5)
+    root = frames[..., 58:100].reshape(2, 10, 14, 3)[..., 0, :]
+    torch.testing.assert_close(root[:, 0, :2], torch.zeros(2, 2), atol=1e-6, rtol=0)
+    torch.testing.assert_close(root[..., 2], ref["body_pos_w"][..., 0, 2] / 0.3)
+    shifted = {key: value.clone() for key, value in ref.items()}
+    shifted["body_pos_w"][..., 2] += 0.3
+    difference = (
+      actor.reference_features(shifted, actor.default_q).reshape(2, 10, 268) - frames
+    )
+    torch.testing.assert_close(
+      difference[..., 58:100].reshape(2, 10, 14, 3)[..., 2],
+      torch.ones(2, 10, 14),
+      atol=1e-6,
+      rtol=1e-6,
+    )
+
+  def test_full_body_compiled_imagination_matches_sequential_actor_gradients(self):
+    actor = MotionActor(self.metadata["default_q"], (16,), reference_dim=2680)
+    critic = MotionCritic(self.metadata["default_q"], (16,), reference_dim=2680)
+    world = WorldModel(self.metadata, (16,), "analytic")
+    torch.nn.init.normal_(world.dynamics[-1].weight, std=1e-4)
+    starts = self.starts(actor)
+    self.assertEqual(critic.value[0].in_features, 2784)
+    kernels = TrainingKernels(actor, world, critic, enabled=True, backend="aot_eager")
+    with frozen_parameters(world, critic):
+      expected = sequential_objective(actor, world, critic, self.library, starts)
+      expected["objective"].backward()
+      gradients = [p.grad.clone() for p in actor.parameters()]
+      actor.zero_grad(set_to_none=True)
+      actual = imagine(
+        actor,
+        world,
+        critic,
+        self.library,
+        starts,
+        horizon=4,
+        sensor_noise=False,
+        kernels=kernels,
+      )
+      actual["objective"].backward()
+      for key, value in expected.items():
+        torch.testing.assert_close(actual[key], value, atol=2e-6, rtol=2e-5)
+      for parameter, gradient in zip(actor.parameters(), gradients):
+        torch.testing.assert_close(parameter.grad, gradient, atol=2e-6, rtol=2e-4)
+
   def test_batched_rewards_values_and_actor_gradients_match_sequential(self):
     for mode, relative in (("learned", False), ("analytic", True)):
       actor, world, critic = self.models(mode, relative)
