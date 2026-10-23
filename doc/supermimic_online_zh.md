@@ -289,7 +289,7 @@ JSON 的 `world_model_comparison` 保存模式和逐动作误差。预测使用�
 无桌面环境可用 `MUJOCO_GL=egl python scripts/evaluate_supermimic.py --checkpoint <路径>
 --clips walk1_subject1 --video outputs/supermimic/walk.mp4` 导出视频，需要 `ffmpeg`。
 渲染使用独立 MuJoCo 缓冲区，显示 `transition.next_state`，不会改写评估仿真或将
-自动重置后的新姿态误当作失败终帧。详见 [README 实时验证说明](../README_zh.md#mujoco-实时动作验证)。
+自动重置后的新姿态误当作失败终帧。详见[播放与世界模型可视化](training_and_playback_zh.md#播放与世界模型可视化)。
 播放入口默认支持鼠标外力：双击实体机器人身体，按住 `Ctrl`＋右键拖拽施力，
 `Ctrl`＋左键拖拽施加力矩。外力通过原生查看器相同的 `qfrc_applied` 通道进入物理
 仿真，未将拖拽转换为姿态写入。松开、换动作或关窗口会清除外力；可用

@@ -38,8 +38,11 @@ uv pip install --no-deps -e .
 ```
 
 The package distribution is named `supermimic_mjlab`; Python imports use
-`src.tasks.supermimic`. Robot definitions and meshes are provided by the installed
-mjlab package. No local Unitree SDK2 deployment simulator is required.
+`src.tasks.supermimic`. The G1 XML and meshes are vendored under
+[`src/assets/robots/g1`](../src/assets/robots/g1/README.md); mjlab supplies the
+training PD actuators. No local Unitree SDK2 deployment simulator is required.
+Checkpoints from the earlier mjlab robot asset have a different model fingerprint
+and require training with the matching model.
 
 ## Verify the environment
 
@@ -68,7 +71,8 @@ retargeted G1 LAFAN CSV files under
 [data conversion instructions](lafan_conversion_zh.md). Conversion creates the NPZ
 clips and manifest used by training.
 
-See the [README](../README.md#online-training) for reduced and paper-scale training
-commands, resume, and policy evaluation. See the [tests section](../README.md#tests)
+See the [README](../README.md#online-training) for preview training and playback.
+Reduced and paper-scale workloads, checkpoints and evaluation are in the
+[operational guide](training_and_playback_en.md). See its [tests section](training_and_playback_en.md#tests)
 for regression checks. Tests generate small motion and replay fixtures in temporary
 directories; real-dataset checks additionally require the converted LAFAN dataset.

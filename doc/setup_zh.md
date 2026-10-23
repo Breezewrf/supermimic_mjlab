@@ -33,7 +33,9 @@ uv pip install --no-deps -e .
 ```
 
 发行包名为 `supermimic_mjlab`，Python 导入路径为 `src.tasks.supermimic`。
-机器人定义和网格资源来自已安装的 mjlab，无需本地 Unitree SDK2 部署模拟器。
+G1 XML 和网格资源保存在仓库的 [`src/assets/robots/g1`](../src/assets/robots/g1/README.md)，
+mjlab 提供训练使用的 PD 执行器，无需本地 Unitree SDK2 部署模拟器。
+早期 mjlab 机器人资源的 checkpoint 与当前模型指纹不同，训练和推理需匹配机器人模型。
 
 ## 验证环境
 
@@ -59,6 +61,7 @@ PYTHON
 `src/assets/motions/LAFAN1_Retargeting_Dataset/`，按[数据转换说明](lafan_conversion_zh.md)
 生成 NPZ 动作文件和 manifest。
 
-缩小规模、论文规模训练、断点恢复和评估命令见 [README](../README_zh.md#在线训练)，
-回归检查见[测试说明](../README_zh.md#测试)。测试在临时目录生成小型动作与 Replay；
+[README](../README_zh.md#在线训练) 提供预览模型的训练和播放入口，缩小规模、论文规模、
+checkpoint 和评估说明见[操作指南](training_and_playback_zh.md)，
+回归检查见其中的[测试说明](training_and_playback_zh.md#测试)。测试在临时目录生成小型动作与 Replay；
 真实数据集检查还需要准备转换后的 LAFAN 数据集。

@@ -314,7 +314,7 @@ class WandbReporter:
     }
     self._persist(iteration)
     if console:
-      location = self.run.get_url() if mode == "online" else self.run.dir
+      location = (self.run.url or self.run.dir) if mode == "online" else self.run.dir
       console.message(f"W&B {mode}: {location}")
       if previous and not continuation:
         console.message(

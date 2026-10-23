@@ -146,9 +146,23 @@ class WandbTests(unittest.TestCase):
     self.runs = []
 
     def init(**kwargs):
-      run = MagicMock()
+      run = MagicMock(
+        spec=[
+          "id",
+          "project",
+          "entity",
+          "name",
+          "url",
+          "dir",
+          "define_metric",
+          "log",
+          "finish",
+        ]
+      )
       run.id, run.project = kwargs["id"], kwargs["project"]
       run.entity, run.name = kwargs.get("entity") or "test-team", kwargs["name"]
+      run.url = f"https://wandb.example/{run.entity}/{run.project}/runs/{run.id}"
+      run.dir = str(self.output / "wandb" / run.id)
       self.runs.append((kwargs, run))
       return run
 
@@ -174,6 +188,25 @@ class WandbTests(unittest.TestCase):
     self.assertEqual(second["train/iteration"], 2)
     tracker.close(exit_code=1)
     tracker.run.finish.assert_called_once_with(exit_code=1)
+
+  def test_online_console_uses_url_property_without_get_url_method(self):
+    console = MagicMock()
+    tracker = WandbReporter(self.output, {}, 0, console=console)
+    self.assertFalse(hasattr(tracker.run, "get_url"))
+    console.message.assert_called_once_with(f"W&B online: {tracker.run.url}")
+
+  def test_offline_console_uses_local_run_directory(self):
+    console = MagicMock()
+    tracker = WandbReporter(self.output, {}, 0, console=console, mode="offline")
+    console.message.assert_called_once_with(f"W&B offline: {tracker.run.dir}")
+
+  def test_online_console_falls_back_to_directory_when_url_is_unavailable(self):
+    first = WandbReporter(self.output, {}, 0)
+    first.run.url = None
+    console = MagicMock()
+    with patch.object(first.sdk, "init", return_value=first.run):
+      tracker = WandbReporter(self.output, {}, 0, console=console)
+    console.message.assert_called_once_with(f"W&B online: {tracker.run.dir}")
 
   def test_wm_only_round_logs_world_metrics_without_policy_metrics(self):
     tracker = WandbReporter(self.output, {}, 0)
