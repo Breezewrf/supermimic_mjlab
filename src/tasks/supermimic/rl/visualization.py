@@ -1,4 +1,4 @@
-"""Display actual simulator transitions with a blue reference ghost.
+"""Display physics, a blue reference and an optional orange world-model prediction.
 
 Rendering uses independent CPU MuJoCo buffers. Optional mouse perturbations send
 only generalized forces back to the simulator, following mjlab's native viewer.
@@ -10,6 +10,7 @@ import math
 import subprocess
 import threading
 import time
+from itertools import pairwise
 from pathlib import Path
 from queue import Empty, SimpleQueue
 
@@ -28,10 +29,17 @@ class ViewerClosed(EvaluationInterrupted):
 class EvaluationScene:
   """CPU render buffers sharing the simulator's geometry and joint ordering."""
 
-  def __init__(self, env, *, ghost=True, global_ghost=False):
+  def __init__(self, env, *, ghost=True, global_ghost=False, world_model=None):
     self.model = copy.copy(env.sim.mj_model)
     self.data = mujoco.MjData(self.model)
     self.reference_data = mujoco.MjData(self.model)
+    self.prediction_data = (
+      mujoco.MjData(self.model) if world_model is not None else None
+    )
+    self.world_model = world_model
+    self.show_world_model = True
+    self.prediction_ready = False
+    self.prediction_path = None
     self.ghost = ghost
     self.global_ghost = global_ghost
     self.root_adr = env.robot.indexing.free_joint_q_adr.cpu().numpy()
@@ -61,6 +69,29 @@ class EvaluationScene:
     self.data.time = frame * env.step_dt
     mujoco.mj_forward(self.model, self.data)
     self.camera.lookat[:] = state[:3] + self.origin
+    self.prediction_ready = (
+      self.world_model is not None and self.world_model.state is not None
+    )
+    trajectory = getattr(self.world_model, "trajectory", None)
+    self.prediction_path = (
+      trajectory[:, 0, :3].detach().cpu().numpy() + self.origin
+      if trajectory is not None
+      else None
+    )
+    if self.prediction_ready:
+      prediction = self.world_model.state[0].detach().cpu()
+      data = self.prediction_data
+      data.qpos[:] = self.data.qpos
+      data.qpos[self.root_adr[:3]] = prediction[:3].numpy() + self.origin
+      data.qpos[self.root_adr[3:]] = prediction[3:7].numpy()
+      data.qpos[self.joint_adr] = prediction[7:36].numpy()
+      data.qvel[self.root_v_adr[:3]] = prediction[36:39].numpy()
+      data.qvel[self.root_v_adr[3:]] = quat_inverse_apply(
+        prediction[3:7], prediction[39:42]
+      ).numpy()
+      data.qvel[self.joint_v_adr] = prediction[42:71].numpy()
+      data.time = getattr(self.world_model, "target_frame", frame) * env.step_dt
+      mujoco.mj_forward(self.model, data)
     if self.ghost:
       motion = torch.tensor([clip], device=env.device, dtype=torch.long)
       frames = torch.tensor([frame], device=env.device, dtype=torch.long)
@@ -80,12 +111,35 @@ class EvaluationScene:
       mujoco.mj_forward(self.model, self.reference_data)
 
   def add_ghost(self, scene):
-    if not self.ghost:
-      return
+    if self.ghost:
+      self._add_ghost(scene, self.reference_data, (0.25, 0.6, 1.0, 0.3))
+    if self.prediction_ready and self.show_world_model:
+      self._add_ghost(scene, self.prediction_data, (1.0, 0.55, 0.1, 0.5))
+      if self.prediction_path is not None:
+        path = self.prediction_path[:: max(1, len(self.prediction_path) // 16)]
+        if not np.array_equal(path[-1], self.prediction_path[-1]):
+          path = np.concatenate((path, self.prediction_path[-1:]))
+        for start, end in pairwise(path):
+          if scene.ngeom >= scene.maxgeom:
+            break
+          geom = scene.geoms[scene.ngeom]
+          mujoco.mjv_initGeom(
+            geom,
+            mujoco.mjtGeom.mjGEOM_LINE,
+            np.zeros(3),
+            np.zeros(3),
+            np.eye(3).ravel(),
+            np.array([1.0, 0.55, 0.1, 0.8], dtype=np.float32),
+          )
+          mujoco.mjv_connector(geom, mujoco.mjtGeom.mjGEOM_LINE, 2.0, start, end)
+          geom.category = mujoco.mjtCatBit.mjCAT_DECOR
+          scene.ngeom += 1
+
+  def _add_ghost(self, scene, data, color):
     start = scene.ngeom
     mujoco.mjv_addGeoms(
       self.model,
-      self.reference_data,
+      data,
       self.option,
       self.perturb,
       mujoco.mjtCatBit.mjCAT_DYNAMIC,
@@ -93,7 +147,7 @@ class EvaluationScene:
     )
     for index in range(start, scene.ngeom):
       geom = scene.geoms[index]
-      geom.rgba[:] = (0.25, 0.6, 1.0, 0.3)
+      geom.rgba[:] = color
       geom.matid = -1
       geom.category = mujoco.mjtCatBit.mjCAT_DECOR
 
@@ -139,13 +193,23 @@ class LiveViewer:
   """Real-time passive viewer; key events only queue commands on the GUI thread."""
 
   def __init__(
-    self, env, *, speed=1.0, ghost=True, global_ghost=False, perturbations=False
+    self,
+    env,
+    *,
+    speed=1.0,
+    ghost=True,
+    global_ghost=False,
+    perturbations=False,
+    world_model=None,
   ):
     if not math.isfinite(speed) or speed <= 0:
       raise ValueError("Playback speed must be positive and finite")
     import mujoco.viewer
 
-    self.scene = EvaluationScene(env, ghost=ghost, global_ghost=global_ghost)
+    self.world_model = world_model
+    self.scene = EvaluationScene(
+      env, ghost=ghost, global_ghost=global_ghost, world_model=world_model
+    )
     self.mouse = (
       MousePerturbations(env, self.scene.model, self.scene.data)
       if perturbations
@@ -198,6 +262,8 @@ class LiveViewer:
         advance = True
       elif key == ord("G"):
         self.scene.ghost = not self.scene.ghost
+      elif key == ord("W") and self.world_model is not None:
+        self.scene.show_world_model = not self.scene.show_world_model
     return advance
 
   def __call__(self, env, clip, frame, state, reward_sum):
@@ -225,16 +291,22 @@ class LiveViewer:
           (
             mujoco.mjtFontScale.mjFONTSCALE_150.value,
             mujoco.mjtGridPos.mjGRID_TOPLEFT.value,
-            "Motion\nTime\nReturn so far\nState\nControls\nMouse forces",
+            "Motion\nTime\nReturn so far\nState\nControls\nMouse forces"
+            + ("\nWorld model (orange)" if self.world_model is not None else ""),
             (
               f"{env.library.names[clip]}\n{frame * env.step_dt:.2f}s\n"
               f"{reward_sum / (5 * env.step_dt * (int(env.library.lengths[clip]) - 1)):.3f}\n"
               f"{'PAUSED' if self.paused else 'RUNNING'} ({self.speed:g}x)\n"
-              "Space: pause | Right: step | G: ghost\n"
+              "Space: pause | Right: step | G: reference"
+              + (" | W: prediction" if self.world_model is not None else "")
+              + "\n"
               + (
                 f"ON ({self.mouse.applied_steps} perturbed steps); double-click body, Ctrl+drag"
                 if self.mouse
                 else "OFF"
+              )
+              + (
+                "\n" + self.world_model.status() if self.world_model is not None else ""
               )
             ),
           )
@@ -261,8 +333,12 @@ class LiveViewer:
 class VideoRecorder:
   """Optional headless MP4 export of exactly the frames used in evaluation."""
 
-  def __init__(self, env, path: Path, *, ghost=True, global_ghost=False):
-    self.scene = EvaluationScene(env, ghost=ghost, global_ghost=global_ghost)
+  def __init__(
+    self, env, path: Path, *, ghost=True, global_ghost=False, world_model=None
+  ):
+    self.scene = EvaluationScene(
+      env, ghost=ghost, global_ghost=global_ghost, world_model=world_model
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     self.scene.model.vis.global_.offwidth = 960
     self.scene.model.vis.global_.offheight = 540

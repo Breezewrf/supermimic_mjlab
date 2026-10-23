@@ -194,6 +194,11 @@ Replay 常规采样也改为对随机候选做窗口/历史检查；仅候选极
 
 已有完整断点可用 `scripts/export_supermimic_policy.py --checkpoint <完整断点>
 --output <轻量策略.pt>` 提取推理权重，内存映射读取，不复制 Replay，也不改写源文件。
+同一命令添加 `--component world-model --output <世界模型.pt>` 可单独提取完整
+`world` 状态（含归一化参数、运动学与终止预测头）及重建配置、机器人／物理签名。
+该文件格式为 `supermimic_world_model`，不含 Actor、Critic、Replay、优化器或 RNG，
+不能续训；轻量 policy 本身不含世界模型。若需同轮次的策略与世界模型，应从同一个
+完整断点分别导出。play 添加 `--world-model <世界模型.pt>` 可显示橙色预测机器人。
 续训旧目录时，如旧 `best.pt` 存在而 `policy_best.pt` 不存在，会自动导出最佳策略。
 现存历史文件不会自动删除；正在运行的进程须从 `last.pt` 重启后才会使用新的保存方式。
 缺少 `reference_schema` 时，导出和推理会按 Actor 编码器输入维度识别 730／2680
@@ -247,6 +252,15 @@ play、窗口和视频仍为单环境。评估 JSON 记录 `evaluation_num_envs`
 `python scripts/play_supermimic.py --checkpoint <路径> --clips walk1_subject1 --loop`
 提供真实仿真策略与蓝色半透明参考动作的 MuJoCo 实时对照。空格暂停，右方向键单步，
 `G` 切换参考动作；`--speed 0.5` 慢放，`--global-ghost` 查看绝对位移与朝向偏差。
+添加 `--world-model outputs/world_model_7000.pt --world-model-horizon 32` 可比较
+世界模型与真实仿真的状态。默认 `--world-model-mode future` 在模型内根据预测观测
+运行策略，显示未来 32 步（0.64 秒）后的姿态及根部路径；每
+`--world-model-refresh 4` 步刷新，其间沿缓存轨迹前进。`--world-model-mode compare`
+保留使用实际动作的同时刻误差对照，配合 `--world-model-horizon 1` 可做单步检查。
+`W` 显隐橙色机器人；未来模式仅在真实仿真到达预测目标帧后统计误差。
+JSON 的 `world_model_comparison` 保存模式和逐动作误差。预测使用独立渲染缓冲区，不改变
+策略动作、物理状态或真实评估得分。鼠标外力不属于世界模型输入。该选项也支持
+视频导出及无窗口诊断，固定单环境，并校验世界模型的动作库、机器人和物理配置。
 无桌面环境可用 `MUJOCO_GL=egl python scripts/evaluate_supermimic.py --checkpoint <路径>
 --clips walk1_subject1 --video outputs/supermimic/walk.mp4` 导出视频，需要 `ffmpeg`。
 渲染使用独立 MuJoCo 缓冲区，显示 `transition.next_state`，不会改写评估仿真或将

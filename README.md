@@ -86,7 +86,7 @@ scripts/
 ├── train_supermimic.py            # Online joint training
 ├── evaluate_supermimic.py         # Checkpoint policy evaluation
 ├── play_supermimic.py             # Live MuJoCo policy/reference comparison
-├── export_supermimic_policy.py    # Extract lightweight actor weights
+├── export_supermimic_policy.py    # Extract policy or world-model weights
 ├── data/
 │   └── convert_lafan_to_npz.py     # LAFAN CSV-to-NPZ conversion
 └── offline/
@@ -244,6 +244,24 @@ python scripts/export_supermimic_policy.py \
   --output outputs/supermimic/lafan_horizon_fixed/policy_best.pt
 ```
 
+Export the world model separately with the same script:
+
+```bash
+python scripts/export_supermimic_policy.py \
+  --component world-model \
+  --checkpoint outputs/supermimic/lafan_horizon_fixed/last.pt \
+  --output outputs/supermimic/lafan_horizon_fixed/world_model_last.pt
+```
+
+The default component is `policy`. World-model files use kind
+`supermimic_world_model` and retain the complete `world` state dict, including
+normalization buffers, kinematics and the termination head, plus model configuration,
+robot/physics signatures, motion provenance and iteration. They contain no Actor,
+Critic, replay, optimizers or RNG state and cannot resume training. Policy-only
+files have no world weights to extract. To compare a policy with its world model
+at the same iteration, export both components from the same full checkpoint.
+Pass the world-model file to `play --world-model <path>` for a prediction overlay.
+
 Run from the project root. Export preserves the source and memory-maps replay storage
 without reading it into RAM. Existing `last.pt` and `iteration_*.pt` can be exported
 the same way. Evaluation and playback accept either format with the same actor weights
@@ -356,6 +374,39 @@ python scripts/play_supermimic.py \
   --device cuda:0 --checkpoint outputs/supermimic/online_training/policy_best.pt \
   --clips walk1_subject1 run1_subject2 --loop
 ```
+
+Add a world-model comparison using the exported weights:
+
+```bash
+python scripts/play_supermimic.py \
+  --device cuda:0 --checkpoint outputs/policy_best.pt \
+  --world-model outputs/world_model_7000.pt \
+  --world-model-horizon 32 --clips walk1_subject1 run1_subject2 --loop
+```
+
+The default `--world-model-mode future` runs the policy on imagined observations
+inside the world model. The orange robot shows the predicted pose **32 steps
+(0.64 s) ahead** of real physics, with an orange root trajectory. The preview is
+recomputed from the current real state/history every `--world-model-refresh 4`
+steps; its cached trajectory advances between refreshes, keeping the same future
+lead. Reference features are encoded in a batch to reduce preview overhead. Increase
+the refresh interval if rendering slows. The lead shortens at the clip end.
+
+Use `--world-model-mode compare` for the original same-time dynamics comparison:
+the model consumes actual actions and resyncs every horizon steps. In this mode,
+`--world-model-horizon 1` measures single-step error. `W` toggles the orange robot;
+`G` toggles the blue reference. Prediction poses retain absolute position and heading.
+Future mode labels its time lead and compares each displayed forecast only when
+the real rollout reaches the matching target frame; it never scores a future pose
+against the current pose. JSON records the mode and per-clip errors under
+`world_model_comparison`. Nonfinite predictions are hidden until the next refresh.
+Model files are checked against the motion manifest, selected clips, robot signature
+and physics settings; prefer policy/world weights from the same iteration.
+
+The same options work with `--video` and with `--viewer none` for diagnostics. World
+comparisons use one environment and leave the physical rollout and evaluation return
+unchanged. Mouse forces affect physics; the world model has no external-force input,
+so dragging can cause its prediction to diverge from the real robot.
 
 The solid robot executes the policy in MuJoCo Warp; the translucent blue robot shows
 the current reference. Reference XY and heading are aligned as in the body tracking

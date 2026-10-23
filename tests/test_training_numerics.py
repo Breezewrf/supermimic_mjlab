@@ -7,7 +7,42 @@ from unittest.mock import patch
 import torch
 
 from src.tasks.supermimic.config.rl_cfg import OnlineConfig
+from src.tasks.supermimic.rl.imagination import critic_loss
 from src.tasks.supermimic.rl.online_training import checked_step
+
+
+class CriticReductionTests(unittest.TestCase):
+  def test_finite_mean_does_not_overflow_fp32_intermediate_reduction(self):
+    values = torch.full((4096, 32), 1e18, requires_grad=True)
+    targets = torch.zeros_like(values)
+    mask = torch.ones_like(values, dtype=torch.bool)
+    self.assertFalse(torch.isfinite(values.square().sum(1).mean()))
+    loss = critic_loss(values, targets, mask)
+    expected = values.detach().double().square().sum(1).mean().float()
+    self.assertTrue(torch.isfinite(loss))
+    torch.testing.assert_close(loss, expected)
+    loss.backward()
+    torch.testing.assert_close(values.grad, 2 * values.detach() / len(values))
+
+  def test_single_large_error_is_squared_before_casting_back_to_fp32(self):
+    values = torch.zeros(4096, 1, requires_grad=True)
+    targets = torch.zeros_like(values)
+    targets[0, 0] = 1e20
+    loss = critic_loss(values, targets, torch.ones_like(values, dtype=torch.bool))
+    self.assertTrue(torch.isfinite(loss))
+    loss.backward()
+    self.assertTrue(torch.isfinite(values.grad).all())
+    torch.testing.assert_close(values.grad[0, 0], torch.tensor(-2e20 / 4096))
+
+  def test_invalid_targets_and_unrepresentable_losses_are_not_hidden(self):
+    for target in (float("nan"), float("inf"), 1e30):
+      with self.subTest(target=target):
+        loss = critic_loss(
+          torch.zeros(1, 1),
+          torch.full((1, 1), target),
+          torch.ones(1, 1, dtype=torch.bool),
+        )
+        self.assertFalse(torch.isfinite(loss))
 
 
 class CheckedStepTests(unittest.TestCase):

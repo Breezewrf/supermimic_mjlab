@@ -1,4 +1,4 @@
-"""Separate resumable training snapshots from portable actor-only artifacts."""
+"""Separate resumable training snapshots from portable inference artifacts."""
 
 from pathlib import Path
 
@@ -9,6 +9,7 @@ from ..models.policy import GOAL_DIM, REFERENCE_SCHEMA
 
 TRAINING_KIND = "supermimic_online"
 POLICY_KIND = "supermimic_actor"
+WORLD_MODEL_KIND = "supermimic_world_model"
 POLICY_REQUIRED_FIELDS = (
   "schema_version",
   "reference_schema",
@@ -27,6 +28,20 @@ POLICY_OPTIONAL_FIELDS = (
   "evaluation_limit",
   "source_checkpoint",
   "reference_schema_inferred",
+)
+WORLD_MODEL_REQUIRED_FIELDS = (
+  "schema_version",
+  "config",
+  "robot_metadata",
+  "simulation",
+  "clips",
+  "world",
+  "manifest_sha256",
+)
+WORLD_MODEL_OPTIONAL_FIELDS = (
+  *POLICY_OPTIONAL_FIELDS,
+  "reference_schema",
+  "world_updates",
 )
 
 
@@ -110,6 +125,36 @@ def policy_checkpoint(saved: dict) -> dict:
   return policy
 
 
+def world_model_checkpoint(saved: dict) -> dict:
+  """Keep dynamics, normalization, task heads and reconstruction metadata only."""
+  if saved.get("kind") == POLICY_KIND:
+    raise ValueError(
+      "Policy-only checkpoints do not contain a world model; use a full training checkpoint"
+    )
+  if (
+    saved.get("kind") not in (TRAINING_KIND, WORLD_MODEL_KIND)
+    or saved.get("schema_version") != 1
+  ):
+    raise ValueError("Expected a SuperMimic training or world-model checkpoint")
+  missing = set(WORLD_MODEL_REQUIRED_FIELDS) - saved.keys()
+  if missing:
+    raise ValueError(
+      f"Checkpoint lacks world-model metadata: {', '.join(sorted(missing))}"
+    )
+  if "world_dims" not in saved["config"]:
+    raise ValueError("Checkpoint lacks world-model configuration: world_dims")
+  # The world model does not require Actor weights or a reference encoder schema.
+  # Copy only selected fields so replay/optimizer storage is never visited.
+  return {
+    "kind": WORLD_MODEL_KIND,
+    **{
+      key: _cpu_copy(saved[key])
+      for key in (*WORLD_MODEL_REQUIRED_FIELDS, *WORLD_MODEL_OPTIONAL_FIELDS)
+      if key in saved
+    },
+  }
+
+
 def save_checkpoint(path: Path, data: dict):
   """Replace a checkpoint only after its new file has been fully written."""
   path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,11 +163,19 @@ def save_checkpoint(path: Path, data: dict):
   temporary.replace(path)
 
 
-def export_policy(checkpoint: Path, output: Path) -> dict:
+def _export_inference(checkpoint: Path, output: Path, select, label: str) -> dict:
   if checkpoint.resolve() == output.resolve():
-    raise ValueError("Policy output must differ from the source training checkpoint")
+    raise ValueError(f"{label} output must differ from the source checkpoint")
   saved = torch.load(checkpoint, map_location="cpu", weights_only=True, mmap=True)
-  policy = policy_checkpoint(saved)
-  policy["source_checkpoint"] = str(checkpoint.resolve())
-  save_checkpoint(output, policy)
-  return policy
+  exported = select(saved)
+  exported["source_checkpoint"] = str(checkpoint.resolve())
+  save_checkpoint(output, exported)
+  return exported
+
+
+def export_policy(checkpoint: Path, output: Path) -> dict:
+  return _export_inference(checkpoint, output, policy_checkpoint, "Policy")
+
+
+def export_world_model(checkpoint: Path, output: Path) -> dict:
+  return _export_inference(checkpoint, output, world_model_checkpoint, "World-model")
