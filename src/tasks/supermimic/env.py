@@ -6,8 +6,8 @@ import torch
 from mjlab.envs import ManagerBasedRlEnv
 from torch import Tensor
 
-from .config.task_cfg import TRACKED_BODIES, FoundationConfig
 from .config.robot_cfg import FOOT_COLLISION_EXPR
+from .config.task_cfg import TRACKED_BODIES, FoundationConfig
 from .data.motion_library import MotionLibrary
 from .env_cfg import make_env_cfg
 from .mdp.reset_sampler import ResetSampler
@@ -264,6 +264,8 @@ class SuperMimicEnv(ManagerBasedRlEnv):
     )
     failure = failure_terms(next_state, reference)
     terminated = failure["height_failure"] | failure["tilt_failure"]
+    if not self.foundation_config.terminate_on_failure:
+      terminated = torch.zeros_like(terminated)
     self.episode_length_buf += 1
     self.common_step_counter += 1
     time_out = self.episode_length_buf >= math.ceil(

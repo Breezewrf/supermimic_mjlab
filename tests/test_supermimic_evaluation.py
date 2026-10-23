@@ -165,6 +165,38 @@ class EvaluationProtocolTests(unittest.TestCase):
       self.assertEqual(json.loads(rows[0]["clips"]), ["short", "long"])
       self.assertEqual(json.loads(rows[0]["failed"]), ["long"])
 
+  def test_existing_csv_is_upgraded_without_losing_interaction_provenance(self):
+    report = evaluate(FakeEnv())
+    with tempfile.TemporaryDirectory() as folder:
+      output, scores = Path(folder) / "eval.json", Path(folder) / "eval.csv"
+      with scores.open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=["policy", "normalized_return"])
+        writer.writeheader()
+        writer.writerow({"policy": "old.pt", "normalized_return": "0.8"})
+      interactive = report | {
+        "evaluation_mode": "interactive",
+        "mouse_perturbation_steps": 3,
+      }
+      save_report(interactive, output, scores)
+      with scores.open(newline="") as stream:
+        rows = list(csv.DictReader(stream))
+      self.assertEqual(rows[0]["policy"], "old.pt")
+      self.assertEqual(rows[0]["evaluation_mode"], "standard")
+      self.assertEqual(rows[1]["evaluation_mode"], "interactive")
+      self.assertEqual(rows[1]["mouse_perturbation_steps"], "3")
+      self.assertIn("INTERACTIVE", evaluation_summary(interactive))
+
+  def test_before_step_runs_after_initial_render_and_once_per_transition(self):
+    frames, steps = [], []
+    env = FakeEnv()
+    evaluate(
+      env,
+      on_frame=lambda e, c, f, s, r: frames.append((c, f)),
+      before_step=lambda e: steps.append((e.clip, e.time)),
+    )
+    self.assertEqual(steps, [(0, frame) for frame in range(5)] + [(1, 0), (1, 1)])
+    self.assertEqual(len(frames), len(steps) + 2)
+
 
 class CheckpointInferenceTests(unittest.TestCase):
   def test_actor_loads_in_eval_mode_and_rejects_incompatible_data(self):
@@ -233,6 +265,8 @@ class RenderSceneTests(unittest.TestCase):
         indexing=SimpleNamespace(
           free_joint_q_adr=torch.arange(7),
           joint_q_adr=order,
+          free_joint_v_adr=torch.arange(6),
+          joint_v_adr=torch.arange(34, 5, -1),
         )
       ),
       scene=SimpleNamespace(env_origins=torch.zeros(1, 3)),
@@ -242,11 +276,16 @@ class RenderSceneTests(unittest.TestCase):
     state[0, :3] = torch.tensor([1.0, 2.0, 0.7])
     state[0, 3:7] = torch.tensor([2**-0.5, 0, 0, 2**-0.5])
     state[0, 7:36] = torch.linspace(0.1, 0.3, 29)
+    state[0, 36:42] = torch.tensor([0.3, 0.2, 0.1, 1.0, 0.0, 0.0])
+    state[0, 42:] = torch.linspace(-0.2, 0.2, 29)
     original_qpos, original_colors = model.qpos0.copy(), model.geom_rgba.copy()
     for global_ghost in (False, True):
       scene = EvaluationScene(env, global_ghost=global_ghost)
       scene.update(env, 0, 1, state)
       np.testing.assert_allclose(scene.data.qpos[order], state[0, 7:36])
+      np.testing.assert_allclose(scene.data.qvel[:3], state[0, 36:39])
+      np.testing.assert_allclose(scene.data.qvel[3:6], [0, -1, 0], atol=1e-6)
+      np.testing.assert_allclose(scene.data.qvel[np.arange(34, 5, -1)], state[0, 42:])
       np.testing.assert_allclose(
         scene.reference_data.qpos[order], reference["joint_pos"][0]
       )

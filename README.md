@@ -344,9 +344,29 @@ reward by default; `--global-ghost` reveals absolute position and heading errors
 Space pauses, Right steps once, and `G` toggles the reference. Close the window to exit.
 Use `--speed 0.5` for slow motion or `--no-ghost` to hide the reference. `--loop` repeats
 selected clips, saving a report after each complete pass. Closing the window midway
-does not save the interrupted pass. The final pose before automatic reset is displayed,
-including falls. `evaluate_supermimic.py --viewer native` also enables live viewing;
+does not save the interrupted pass. Playback disables height/tilt failure termination
+by default, so falls continue until the clip ends for recovery inspection. Clip ends
+still switch to the next motion. Add `--termination` to restore failure resets and
+display their final pre-reset poses. `evaluate_supermimic.py --viewer native` also enables live viewing;
 evaluation is headless by default.
+
+Playback enables mouse forces by default, following the same native viewer path as
+`AMP_mjlab`. Double-click a body on the solid robot, then hold Ctrl while dragging:
+Ctrl + right drag applies a translational force; add Shift for the horizontal plane.
+Ctrl + left drag applies torque. Dragging without Ctrl controls the camera.
+Releasing clears the mouse force on the next control step; motion changes and window
+shutdown also clear it. Pausing stops physics; Right steps once with the current drag.
+See the [MuJoCo mouse controls](https://mujoco.readthedocs.io/en/stable/programming/samples.html#mouse).
+
+Use `--no-perturbations` to disable mouse forces. The evaluator disables them by
+default; opt in with `--viewer native --perturbations` for interactive testing.
+Passes with applied mouse forces show `INTERACTIVE` and record
+`evaluation_mode: interactive` plus `mouse_perturbation_steps` in JSON/CSV. Passes
+without applied forces are `playback` when failure termination is disabled, and
+`standard` when it is enabled. JSON/CSV also record `termination_enabled`; first
+failure steps and reasons remain diagnostic, so reaching a clip's end after falling
+does not count as tracking success. Evaluation retains failure termination by default;
+use `--no-termination` explicitly for diagnostic playback.
 
 On a server without a desktop, export the same evaluation to MP4 (requires `ffmpeg`):
 

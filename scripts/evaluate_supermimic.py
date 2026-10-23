@@ -26,7 +26,16 @@ from src.tasks.supermimic.rl.inference import load_actor, validate_environment
 
 
 def print_motion(row: dict):
-  status = "success" if row["success"] else row["failure_reason"] or "incomplete"
+  status = (
+    "success"
+    if row["success"]
+    else row["failure_reason"]
+    or (
+      "completed with failure thresholds crossed"
+      if row.get("failure_detected")
+      else "incomplete"
+    )
+  )
   print(
     f"  {row['motion']}: return {row['normalized_return']:.3f}"
     f" | {row['steps']}/{row['expected_steps']} steps | {status}",
@@ -65,6 +74,18 @@ def main(*, playback=False):
     help="Open a real-time MuJoCo window with the reference ghost",
   )
   parser.add_argument("--speed", type=float, default=1.0, help="Viewer playback speed")
+  parser.add_argument(
+    "--perturbations",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="Allow mouse forces in the native viewer (play: on; evaluation: off)",
+  )
+  parser.add_argument(
+    "--termination",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="Reset on height/tilt failure (play: off; evaluation: on)",
+  )
   parser.add_argument("--no-ghost", action="store_true")
   parser.add_argument(
     "--global-ghost",
@@ -80,6 +101,14 @@ def main(*, playback=False):
     help="Export evaluation as MP4 (requires ffmpeg; headless: MUJOCO_GL=egl)",
   )
   args = parser.parse_args()
+  termination = args.termination if args.termination is not None else not playback
+  perturbations = (
+    args.perturbations
+    if args.perturbations is not None
+    else playback and args.viewer == "native"
+  )
+  if perturbations and args.viewer != "native":
+    parser.error("--perturbations requires --viewer native")
   if args.device.startswith("cuda") and not torch.cuda.is_available():
     parser.error("CUDA is not visible to this Python process")
   if args.policy and args.checkpoint:
@@ -124,12 +153,14 @@ def main(*, playback=False):
     num_envs=1,
     seed=args.seed,
     episode_length_s=1e9,
+    terminate_on_failure=termination,
     relative_orientation=bool(
       saved and saved["config"].get("relative_orientation", False)
     ),
   )
   env = SuperMimicEnv(config, device=args.device)
   displays = []
+  live_viewer = None
   try:
     if saved:
       validate_environment(env, saved)
@@ -138,11 +169,19 @@ def main(*, playback=False):
 
       visual_options = {"ghost": not args.no_ghost, "global_ghost": args.global_ghost}
       if args.viewer == "native":
-        displays.append(LiveViewer(env, speed=args.speed, **visual_options))
+        live_viewer = LiveViewer(
+          env, speed=args.speed, perturbations=perturbations, **visual_options
+        )
+        displays.append(live_viewer)
         print(
           "MuJoCo: solid = policy; blue ghost = reference. Space: pause; Right: step; G: ghost.",
           flush=True,
         )
+        if perturbations:
+          print(
+            "Mouse forces ON: double-click a robot body, then hold Ctrl and drag. Release to stop.",
+            flush=True,
+          )
       if args.video:
         displays.append(VideoRecorder(env, args.video, **visual_options))
 
@@ -156,7 +195,14 @@ def main(*, playback=False):
     )
     if saved:
       print(f"Reference schema: {saved['reference_schema']}", flush=True)
+    if not termination:
+      print(
+        "Failure termination OFF: height/tilt failures do not reset playback; clips still end normally.",
+        flush=True,
+      )
     while True:
+      if live_viewer:
+        live_viewer.begin_evaluation()
       try:
         report = evaluate(
           env,
@@ -164,6 +210,7 @@ def main(*, playback=False):
           args.max_steps_per_clip,
           on_frame=on_frame if displays else None,
           on_motion=print_motion,
+          before_step=live_viewer.before_step if live_viewer else None,
         )
       except EvaluationInterrupted:
         print("Viewer closed; the interrupted evaluation was not saved.", flush=True)
@@ -181,6 +228,15 @@ def main(*, playback=False):
           saved and saved.get("reference_schema_inferred")
         ),
       )
+      perturbed_steps = (
+        live_viewer.mouse.applied_steps if live_viewer and live_viewer.mouse else 0
+      )
+      report["mouse_perturbations_enabled"] = bool(perturbations)
+      report["mouse_perturbation_steps"] = perturbed_steps
+      if perturbed_steps:
+        report["evaluation_mode"] = "interactive"
+      if perturbed_steps:
+        report["protocol"] += "; interactive mouse forces applied"
       save_report(report, args.output, args.csv)
       print(evaluation_summary(report), flush=True)
       print(f"Report: {args.output}", flush=True)

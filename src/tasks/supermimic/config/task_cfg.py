@@ -44,6 +44,7 @@ class FoundationConfig:
   action_clip: float | None = None
   relative_orientation: bool = False
   reset_noise: bool = False
+  terminate_on_failure: bool = True
 
   @property
   def observation_dim(self) -> int:

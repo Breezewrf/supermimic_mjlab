@@ -308,9 +308,27 @@ python scripts/play_supermimic.py \
 的参考姿态。默认参考根部 XY 和朝向按 body tracking 奖励对齐；加 `--global-ghost`
 查看绝对位移与朝向偏差。空格暂停，右方向键单步，`G` 切换参考机器人，关闭窗口退出。
 `--speed 0.5` 可慢放，`--no-ghost` 可只看策略。`--loop` 反复播放所选动作，
-每轮完整评估后写报告；中途关闭窗口不会保存该轮的不完整成绩。失败时显示自动重置
-前的最后一帧，之后切换下一段动作。`evaluate_supermimic.py --viewer native` 也可
+每轮完整评估后写报告；中途关闭窗口不会保存该轮的不完整成绩。开启终止检测时，
+窗口显示重置前的最后一帧。播放默认关闭高度／倾斜失败终止，跌倒后
+继续运行直到当前动作结束，方便观察恢复过程；动作结束后仍正常切换下一段。
+加 `--termination` 可恢复失败时重置。`evaluate_supermimic.py --viewer native` 也可
 边评估边观看；不加 `--viewer` 的评估默认无窗口。
+
+播放入口默认开启鼠标外力，交互方式与 `AMP_mjlab` 的原生查看器一致：先左键双击
+实体机器人上的一个身体部位，再按住 `Ctrl` 拖拽。`Ctrl`＋右键拖拽施加平移外力，
+加 `Shift` 可在水平面拖拽；`Ctrl`＋左键拖拽施加旋转力矩。不按 `Ctrl` 时仍是相机操作。
+松开鼠标会在下一控制步清除拖拽外力；切换动作、关闭窗口也会清除。
+暂停时不会推进物理，按右方向键可单步观察受力响应。操作依据
+[MuJoCo 原生鼠标控制](https://mujoco.readthedocs.io/en/stable/programming/samples.html#mouse)。
+
+`--no-perturbations` 可关闭鼠标外力。标准 `evaluate_supermimic.py` 默认关闭外力；
+若要在评估窗口交互测试，使用 `--viewer native --perturbations`。实际施加过鼠标力的
+轮次会显示 `INTERACTIVE`，JSON／CSV 中记录 `evaluation_mode: interactive` 和
+`mouse_perturbation_steps`，方便与标准评估区分。关闭终止检测但未施力的轮次标为
+`playback`；只有保留终止检测且未施力时才标为 `standard`。JSON／CSV 另存
+`termination_enabled`；关闭终止后仍记录首次越过失败阈值的步数和原因，不会把跌倒
+后播放到结尾算作跟踪成功。标准评估默认保留失败终止，显式 `--no-termination`
+可用于诊断播放。
 
 无桌面服务器可导出同一评估过程的视频（需要 `ffmpeg`）：
 

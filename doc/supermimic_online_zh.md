@@ -230,6 +230,15 @@ episode。原有 `--policy module:function` 入口继续支持，与 `--checkpoi
 --clips walk1_subject1 --video outputs/supermimic/walk.mp4` 导出视频，需要 `ffmpeg`。
 渲染使用独立 MuJoCo 缓冲区，显示 `transition.next_state`，不会改写评估仿真或将
 自动重置后的新姿态误当作失败终帧。详见 [README 实时验证说明](../README_zh.md#mujoco-实时动作验证)。
+播放入口默认支持鼠标外力：双击实体机器人身体，按住 `Ctrl`＋右键拖拽施力，
+`Ctrl`＋左键拖拽施加力矩。外力通过原生查看器相同的 `qfrc_applied` 通道进入物理
+仿真，未将拖拽转换为姿态写入。松开、换动作或关窗口会清除外力；可用
+`--no-perturbations` 禁用。标准评估默认禁用鼠标力，受干预的播放轮次在终端及
+JSON／CSV 中明确标记为 `interactive`，不会混作标准评估成绩。
+播放默认关闭高度／倾斜失败终止，机器人跌倒后继续执行到当前动作结束；加
+`--termination` 可恢复失败重置。标准评估仍默认开启终止检测。关闭终止的无外力播放
+标为 `playback`，并记录 `termination_enabled: false`；失败阈值仍用于诊断首次失败
+步数和原因，完成播放不等于跟踪成功。动作结束及显式时限仍正常截断和重置。
 
 输出还包括 `config.json`、每轮 `metrics.jsonl`、最近评估 `evaluation.json` 和
 编号评估报告。训练日志记录真实奖励、失败次数、想象奖励、生存权重、三类更新计数、

@@ -37,8 +37,30 @@ def save_report(report: dict, output: Path, csv_path: Path | None = None):
       "evaluation_complete",
       "clips",
       "failed",
+      "evaluation_mode",
+      "mouse_perturbation_steps",
+      "termination_enabled",
     )
     header = not csv_path.exists() or csv_path.stat().st_size == 0
+    if not header:
+      with csv_path.open(newline="") as stream:
+        reader = csv.DictReader(stream)
+        previous_columns = reader.fieldnames
+        if previous_columns != list(columns):
+          if not previous_columns or set(previous_columns) - set(columns):
+            raise ValueError("Evaluation CSV has incompatible columns")
+          # Preserve older score files while adding the interaction provenance.
+          temporary_csv = csv_path.with_suffix(csv_path.suffix + ".tmp")
+          with temporary_csv.open("w", newline="") as upgraded:
+            writer = csv.DictWriter(upgraded, fieldnames=columns)
+            writer.writeheader()
+            for row in reader:
+              row.setdefault("evaluation_mode", "standard")
+              row.setdefault("mouse_perturbation_steps", 0)
+              row.setdefault("termination_enabled", True)
+              writer.writerow(row)
+      if previous_columns != list(columns):
+        temporary_csv.replace(csv_path)
     with csv_path.open("a", newline="") as stream:
       writer = csv.DictWriter(stream, fieldnames=columns)
       if header:
@@ -46,13 +68,18 @@ def save_report(report: dict, output: Path, csv_path: Path | None = None):
       row = {key: report.get(key) for key in columns}
       row["clips"] = json.dumps([motion["motion"] for motion in report["motions"]])
       row["failed"] = json.dumps(report["failed"])
+      row["evaluation_mode"] = report.get("evaluation_mode", "standard")
+      row["mouse_perturbation_steps"] = report.get("mouse_perturbation_steps", 0)
+      row["termination_enabled"] = report.get("termination_enabled", True)
       writer.writerow(row)
 
 
 def evaluation_summary(report: dict) -> str:
   """Use the same score label for training, headless evaluation and playback."""
   rows = report["motions"]
-  failures = sum(row.get("terminated", False) for row in rows)
+  failures = sum(
+    row.get("failure_detected", row.get("terminated", False)) for row in rows
+  )
   limited = any(row["evaluation_limited"] for row in rows)
   incomplete = limited or any(row.get("failure_reason") == "time_limit" for row in rows)
   return (
@@ -61,6 +88,16 @@ def evaluation_summary(report: dict) -> str:
     f" | failed {failures}/{len(rows)}"
     f" | completion {sum(row['completion'] for row in rows) / len(rows):.1%}"
     + (" | INCOMPLETE (debug limit or timeout)" if incomplete else "")
+    + (
+      " | PLAYBACK (failure termination disabled)"
+      if report.get("termination_enabled") is False
+      else ""
+    )
+    + (
+      " | INTERACTIVE (mouse forces)"
+      if report.get("evaluation_mode") == "interactive"
+      else ""
+    )
   )
 
 
@@ -77,6 +114,7 @@ def evaluate(
   *,
   on_frame: FrameCallback | None = None,
   on_motion: Callable[[dict], None] | None = None,
+  before_step: Callable[[object], None] | None = None,
 ) -> dict:
   if env.num_envs != 1:
     raise ValueError("Fixed-clip evaluation requires exactly one environment")
@@ -88,6 +126,7 @@ def evaluate(
   if not len(env.library.names):
     raise ValueError("Evaluation requires at least one motion")
   rows = []
+  termination_enabled = cfg.terminate_on_failure
   for clip, name in enumerate(env.library.names):
     inputs, _ = env.reset(seed=cfg.seed, options={"motion_id": clip, "frame_id": 0})
     expected = int(env.library.lengths[clip]) - 1
@@ -96,10 +135,14 @@ def evaluate(
     horizon = min(expected, max_steps_per_clip) if max_steps_per_clip else expected
     reward_sum, error_sums, reason = 0.0, {}, None
     terminated, truncated = False, False
+    detected_failures = set()
+    first_failure_step = None
     if on_frame:
       on_frame(env, clip, 0, env.read_state(), reward_sum)
     for step in range(horizon):
       action = policy(inputs["history"], inputs["future_reference"])
+      if before_step:
+        before_step(env)
       inputs, reward, terminal, cutoff, extras = env.step(action)
       if not torch.isfinite(reward).all():
         raise FloatingPointError(f"Nonfinite evaluation reward in {name}")
@@ -112,13 +155,18 @@ def evaluate(
       ):
         error_sums[key] = error_sums.get(key, 0.0) + float(extras["metrics"][key][0])
       terminated, truncated = bool(terminal[0]), bool(cutoff[0])
+      reasons = [
+        key
+        for key in ("height_failure", "tilt_failure")
+        if key in extras["metrics"] and bool(extras["metrics"][key][0])
+      ]
+      if terminated and not reasons:
+        reasons = ["physical_failure"]
+      if reasons and first_failure_step is None:
+        first_failure_step = step + 1
+      detected_failures.update(reasons)
       if terminated:
-        reasons = [
-          key
-          for key in ("height_failure", "tilt_failure")
-          if bool(extras["metrics"][key][0])
-        ]
-        reason = "+".join(reasons) or "physical_failure"
+        reason = "+".join(reasons)
       elif bool(extras["transition"]["time_out"][0]):
         reason = "time_limit"
       # step() automatically resets finished environments. Always display the
@@ -137,8 +185,11 @@ def evaluate(
         "steps": completed_steps,
         "expected_steps": expected,
         "completion": completed_steps / expected,
-        "success": completed_steps == expected and not terminated,
+        "success": completed_steps == expected and not detected_failures,
         "terminated": terminated,
+        "failure_detected": bool(detected_failures),
+        "first_failure_step": first_failure_step,
+        "detected_failure_reasons": sorted(detected_failures),
         "failure_reason": reason,
         "evaluation_limited": limited,
         "return": reward_sum,
@@ -150,13 +201,15 @@ def evaluate(
     )
     if on_motion:
       on_motion(rows[-1])
-  failed = [row["motion"] for row in rows if row["terminated"]]
+  failed = [row["motion"] for row in rows if row["failure_detected"]]
   successes = sum(row["success"] for row in rows)
   complete = not any(
     row["evaluation_limited"] or row["failure_reason"] == "time_limit" for row in rows
   )
   return {
     "seed": cfg.seed,
+    "termination_enabled": termination_enabled,
+    "evaluation_mode": "standard" if termination_enabled else "playback",
     "motions": rows,
     "successes": successes,
     "success_rate": successes / len(rows),
@@ -167,6 +220,16 @@ def evaluate(
     "normalized_return": sum(row["normalized_return"] for row in rows) / len(rows),
     "normalized_return_framew": sum(row["return"] for row in rows)
     / (5 * env.step_dt * sum(row["expected_steps"] for row in rows)),
-    "protocol": "first frame; full clip unless explicitly limited; deterministic policy; friction 1.0; no reset/sensor/action noise or domain randomization; self collisions disabled",
-    "normalization": "per-clip undiscounted reward / (5 * control_dt * (frames - 1)); arithmetic mean over clips; no reward after failure",
+    "protocol": "first frame; full clip unless explicitly limited; deterministic policy; friction 1.0; no reset/sensor/action noise or domain randomization; self collisions disabled; "
+    + (
+      "height/tilt failure termination enabled"
+      if termination_enabled
+      else "height/tilt failures diagnostic only; termination disabled for playback"
+    ),
+    "normalization": "per-clip undiscounted reward / (5 * control_dt * (frames - 1)); arithmetic mean over clips; "
+    + (
+      "no reward after failure"
+      if termination_enabled
+      else "playback reward continues after failure thresholds"
+    ),
   }
