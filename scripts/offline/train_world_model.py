@@ -45,6 +45,12 @@ def main():
   )
   parser.add_argument("--hidden-dims", nargs="+", type=int, default=[2048, 2048, 2048])
   parser.add_argument(
+    "--world-model-normalization",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="Enable SiLU + LayerNorm and input/output RunningNorm fitted to real training data",
+  )
+  parser.add_argument(
     "--world-prediction",
     choices=("state_delta", "velocity_residual"),
     help="New runs default to state_delta; checkpoints retain their saved mode",
@@ -148,7 +154,23 @@ def main():
     and args.world_prediction != prediction_mode
   ):
     parser.error("Checkpoint world prediction mode cannot be changed")
-  model = WorldModel(metadata, hidden, world_prediction=prediction_mode).to(args.device)
+  normalization = (
+    checkpoint["config"].get("world_model_normalization", False)
+    if checkpoint
+    else bool(args.world_model_normalization)
+  )
+  if (
+    checkpoint
+    and args.world_model_normalization is not None
+    and args.world_model_normalization != normalization
+  ):
+    parser.error("Checkpoint world-model normalization cannot be changed")
+  model = WorldModel(
+    metadata,
+    hidden,
+    world_prediction=prediction_mode,
+    world_model_normalization=normalization,
+  ).to(args.device)
   library = MotionLibrary(
     args.manifest,
     model.kinematics.joint_names,
@@ -193,6 +215,7 @@ def main():
   config = vars(args).copy()
   config["seed"] = split_seed
   config["world_prediction"] = prediction_mode
+  config["world_model_normalization"] = normalization
   runtime = {
     name: importlib.metadata.version(name)
     for name in ("torch", "mujoco", "mujoco-warp", "warp-lang")
@@ -249,6 +272,7 @@ def main():
         "batch_size": args.batch_size,
         "smoke": args.smoke,
         "world_prediction": prediction_mode,
+        "world_model_normalization": normalization,
       },
       "runtime": runtime,
     }

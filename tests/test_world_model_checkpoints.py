@@ -77,6 +77,7 @@ class WorldModelCheckpointTests(unittest.TestCase):
       config.get("relative_orientation", False),
       config.get("amp", "none"),
       world_prediction=config.get("world_prediction", "velocity_residual"),
+      world_model_normalization=config.get("world_model_normalization", False),
     )
     world.load_state_dict(exported["world"])
     return world.eval()

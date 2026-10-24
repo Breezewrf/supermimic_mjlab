@@ -344,6 +344,12 @@ class ReplayTrainingTests(unittest.TestCase):
       replay.gather_windows(indices, 8)
 
   def test_checkpoint_resume_matches_uninterrupted_training(self):
+    self.check_checkpoint_resume()
+
+  def test_normalized_checkpoint_resume_matches_uninterrupted_training(self):
+    self.check_checkpoint_resume(normalize=True)
+
+  def check_checkpoint_resume(self, normalize=False):
     with tempfile.TemporaryDirectory() as folder:
       root = Path(folder)
       common = [
@@ -388,6 +394,8 @@ class ReplayTrainingTests(unittest.TestCase):
         ]
         if resume:
           command += ["--resume", str(root / output / "last.pt")]
+        elif normalize:
+          command += ["--world-model-normalization"]
         completed = subprocess.run(
           command,
           cwd=ROOT,
@@ -402,6 +410,8 @@ class ReplayTrainingTests(unittest.TestCase):
       resumed = torch.load(root / "resumed/last.pt", weights_only=True)
       self.assertEqual(whole["config"]["world_prediction"], "state_delta")
       self.assertEqual(resumed["config"]["world_prediction"], "state_delta")
+      self.assertEqual(whole["config"]["world_model_normalization"], normalize)
+      self.assertEqual(resumed["config"]["world_model_normalization"], normalize)
       for key in whole["model"]:
         torch.testing.assert_close(
           whole["model"][key], resumed["model"][key], atol=0, rtol=0

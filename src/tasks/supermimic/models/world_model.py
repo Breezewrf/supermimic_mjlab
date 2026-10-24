@@ -20,6 +20,7 @@ from ..mdp.state import (
 from ..mdp.terminations import failure_terms, soft_termination
 from .execution import run_mlp
 from .kinematics import G1Kinematics
+from .normalization import RunningNorm
 
 GROUPS = (3, 3, 29, 3, 3, 29)
 GROUP_NAMES = (
@@ -151,6 +152,7 @@ class WorldModel(nn.Module):
     relative_orientation: bool = False,
     amp: str = "none",
     world_prediction: str = "state_delta",
+    world_model_normalization: bool = False,
   ):
     super().__init__()
     if not hidden_dims or any(width < 1 for width in hidden_dims):
@@ -159,6 +161,7 @@ class WorldModel(nn.Module):
     if world_prediction not in WORLD_PREDICTIONS:
       raise ValueError(f"world_prediction must be one of {WORLD_PREDICTIONS}")
     self.world_prediction = world_prediction
+    self.world_model_normalization = world_model_normalization
     if termination_mode not in ("learned", "analytic"):
       raise ValueError("termination_mode must be learned or analytic")
     self.termination_mode = termination_mode
@@ -170,7 +173,10 @@ class WorldModel(nn.Module):
     for index, (left, right) in enumerate(pairwise(widths)):
       layers.append(nn.Linear(left, right))
       if index < len(widths) - 2:
-        layers.append(nn.ELU())
+        if world_model_normalization:
+          layers.extend((nn.LayerNorm(right), nn.SiLU()))
+        else:
+          layers.append(nn.ELU())
     self.dynamics = nn.Sequential(*layers)
     nn.init.zeros_(self.dynamics[-1].weight)
     nn.init.zeros_(self.dynamics[-1].bias)
@@ -181,30 +187,53 @@ class WorldModel(nn.Module):
     self.register_buffer("input_std", torch.ones(130))
     # Retain the historical buffer name so legacy weights load without conversion.
     self.register_buffer("correction_scale", torch.ones(70))
+    self.in_norm = RunningNorm(130) if world_model_normalization else nn.Identity()
+    self.out_norm = (
+      RunningNorm(70, eps=1e-4) if world_model_normalization else nn.Identity()
+    )
 
   def features(self, state: Tensor, action: Tensor, context: Tensor) -> Tensor:
     return torch.cat((encode_state(state), action, context), dim=-1)
+
+  def targets(self, state: Tensor, next_state: Tensor) -> Tensor:
+    return (
+      state_delta_targets(state, next_state)
+      if self.world_prediction == "state_delta"
+      else correction_targets(state, next_state)
+    )
+
+  @torch.no_grad()
+  def update_normalization(
+    self, state: Tensor, action: Tensor, context: Tensor, next_state: Tensor
+  ) -> None:
+    """Count each newly collected real transition once; never update in forward."""
+    if self.world_model_normalization:
+      self.in_norm.update(self.features(state, action, context))
+      self.out_norm.update(self.targets(state, next_state))
 
   @torch.no_grad()
   def fit_normalization(
     self, state: Tensor, action: Tensor, context: Tensor, next_state: Tensor
   ) -> None:
+    if self.world_model_normalization:
+      # Offline data are fixed: fit once, without recounting replay minibatches.
+      self.update_normalization(state, action, context, next_state)
+      return
     features = self.features(state, action, context)
     self.input_mean.copy_(features.mean(0))
     self.input_std.copy_(features.std(0, unbiased=False).clamp_min(1e-3))
-    targets = (
-      state_delta_targets(state, next_state)
-      if self.world_prediction == "state_delta"
-      else correction_targets(state, next_state)
-    )
+    targets = self.targets(state, next_state)
     floor = targets.new_tensor([1e-3] * 35 + [1e-2] * 35)
     self.correction_scale.copy_(targets.std(0, unbiased=False).maximum(floor))
 
   def forward(self, state: Tensor, action: Tensor, context: Tensor) -> Tensor:
-    features = (
-      self.features(state, action, context) - self.input_mean
-    ) / self.input_std
-    delta = run_mlp(self.dynamics, features, self.amp) * self.correction_scale
+    features = self.features(state, action, context)
+    if self.world_model_normalization:
+      features = self.in_norm(features)
+      delta = self.out_norm.denormalize(run_mlp(self.dynamics, features, self.amp))
+    else:
+      features = (features - self.input_mean) / self.input_std
+      delta = run_mlp(self.dynamics, features, self.amp) * self.correction_scale
     if self.world_prediction == "state_delta":
       return apply_state_delta(state, delta)
     return integrate(state, delta)

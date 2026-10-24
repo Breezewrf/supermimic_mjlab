@@ -619,6 +619,7 @@ class OnlineIntegrationTests(unittest.TestCase):
       "actor_input_normalization",
       "critic_input_normalization",
       "world_prediction",
+      "world_model_normalization",
     ):
       del saved["config"][key]
     resumed = OnlineTrainer(self.env, self.metadata, config)
@@ -659,6 +660,35 @@ class OnlineIntegrationTests(unittest.TestCase):
         for norm, saved in zip(norms, before):
           for key, value in norm.state_dict().items():
             torch.testing.assert_close(value, saved[key], rtol=0, atol=0)
+
+  def test_world_statistics_count_real_samples_once_and_survive_resume(self):
+    config = replace(
+      self.config, world_model_normalization=True, compile=False, amp="none"
+    )
+    trainer = self.trainer(config)
+    norms = (trainer.world.in_norm, trainer.world.out_norm)
+    for norm in norms:
+      self.assertEqual(int(norm.count), trainer.environment_steps)
+    before = [
+      {key: value.clone() for key, value in norm.state_dict().items()} for norm in norms
+    ]
+    trainer.update_world()
+    trainer.update_policy()
+    trainer.diagnostics()
+    for norm, saved in zip(norms, before):
+      for key, value in norm.state_dict().items():
+        torch.testing.assert_close(value, saved[key], rtol=0, atol=0)
+    trainer.collect(2)
+    for norm in norms:
+      self.assertEqual(int(norm.count), config.num_envs * (config.warmup_steps + 2))
+    saved = copy.deepcopy(trainer.state_dict())
+    resumed = OnlineTrainer(self.env, self.metadata, config)
+    resumed.load_state_dict(saved)
+    for name in ("in_norm", "out_norm"):
+      for key, value in getattr(trainer.world, name).state_dict().items():
+        torch.testing.assert_close(
+          getattr(resumed.world, name).state_dict()[key], value, rtol=0, atol=0
+        )
 
   def test_critic_failure_captures_reproducible_minibatch_without_stepping(self):
     config = replace(self.config, reference_dim=2680, amp="none", compile=False)
@@ -788,7 +818,11 @@ class OnlineCliTests(unittest.TestCase):
       if prediction == "velocity_residual":
         common += ["--world-prediction", prediction]
       if normalize:
-        common += ["--actor-input-normalization", "--critic-input-normalization"]
+        common += [
+          "--actor-input-normalization",
+          "--critic-input-normalization",
+          "--world-model-normalization",
+        ]
       if has_wandb:
         common += ["--wandb", "--wandb-mode", "offline"]
       env = os.environ | {
@@ -807,6 +841,7 @@ class OnlineCliTests(unittest.TestCase):
           if normalize:
             command.remove("--actor-input-normalization")
             command.remove("--critic-input-normalization")
+            command.remove("--world-model-normalization")
           # Resume infers either layout without an explicit dimension argument.
           offset = command.index("--reference-dim")
           del command[offset : offset + 2]
@@ -822,6 +857,7 @@ class OnlineCliTests(unittest.TestCase):
               "actor_input_normalization",
               "critic_input_normalization",
               "world_prediction",
+              "world_model_normalization",
             ):
               del historical["config"][key]
             torch.save(historical, output / "last.pt")
@@ -849,9 +885,14 @@ class OnlineCliTests(unittest.TestCase):
         self.assertEqual(saved["config"]["learning_rate"], 5e-5)
         self.assertEqual(saved["config"]["reference_dim"], reference_dim)
         self.assertEqual(saved["config"]["world_prediction"], prediction)
+        self.assertEqual(saved["config"]["world_model_normalization"], normalize)
         self.assertEqual(saved["config"]["actor_input_normalization"], normalize)
         self.assertEqual(saved["config"]["critic_input_normalization"], normalize)
         if normalize:
+          for name in ("in_norm", "out_norm"):
+            self.assertEqual(
+              int(saved["world"][f"{name}.count"]), saved["environment_steps"]
+            )
           self.assertEqual(
             int(saved["actor"]["obs_norm.count"]), saved["environment_steps"]
           )

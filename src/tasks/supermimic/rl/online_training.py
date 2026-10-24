@@ -128,6 +128,7 @@ class OnlineTrainer:
       config.relative_orientation,
       config.amp,
       world_prediction=config.world_prediction,
+      world_model_normalization=config.world_model_normalization,
     ).to(self.device)
     self.actor = MotionActor(
       metadata["default_q"],
@@ -204,6 +205,13 @@ class OnlineTrainer:
         action + self.config.action_noise * noise
       )
       transition = dict(extras["transition"])
+      if self.config.world_model_normalization:
+        self.world.update_normalization(
+          **{
+            name: transition[name]
+            for name in ("state", "action", "context", "next_state")
+          }
+        )
       transition["policy_version"] = torch.full_like(
         transition["episode_id"], self.actor_updates
       )
@@ -243,12 +251,13 @@ class OnlineTrainer:
     self.collect(self.config.warmup_steps)
     if not len(self.replay.window_indices(8)):
       raise ValueError("Warmup produced no eight-step windows")
-    count = min(self.replay.steps, self.replay.capacity)
-    transitions = {
-      name: self.replay.data[name][:count].flatten(0, 1)
-      for name in ("state", "action", "context", "next_state")
-    }
-    self.world.fit_normalization(**transitions)
+    if not self.config.world_model_normalization:
+      count = min(self.replay.steps, self.replay.capacity)
+      transitions = {
+        name: self.replay.data[name][:count].flatten(0, 1)
+        for name in ("state", "action", "context", "next_state")
+      }
+      self.world.fit_normalization(**transitions)
     self.initialized = True
 
   def update_world(self) -> dict:

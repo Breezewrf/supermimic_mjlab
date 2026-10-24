@@ -130,6 +130,12 @@ def main():
   parser.add_argument("--termination-mode", choices=("learned", "analytic"))
   parser.add_argument("--amp", choices=("bf16", "none"))
   parser.add_argument(
+    "--world-model-normalization",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="Enable SiLU + LayerNorm and running world-model input/output normalization",
+  )
+  parser.add_argument(
     "--world-prediction",
     choices=("state_delta", "velocity_residual"),
     help="World-model targets (new runs: state_delta; resume: saved mode)",
@@ -267,6 +273,13 @@ def main():
     parser.error(
       "Resume cannot change --world-prediction; start a new run for state_delta training"
     )
+  if (
+    saved
+    and config.world_model_normalization != saved_config["world_model_normalization"]
+  ):
+    parser.error(
+      "Resume cannot change --world-model-normalization; start a new run for this ablation"
+    )
   if saved and (
     saved_config != asdict(config) or saved["manifest_sha256"] != manifest_hash
   ):
@@ -336,6 +349,10 @@ def main():
       asdict(config), args.device, len(env.library), output, trainer.iteration
     )
     console.message(f"World-model prediction: {config.world_prediction}")
+    if config.world_model_normalization:
+      console.message(
+        "World model: SiLU + LayerNorm | running input/output statistics from real collection"
+      )
     if args.wandb:
       state = rng_state()
       try:

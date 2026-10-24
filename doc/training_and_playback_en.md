@@ -63,7 +63,29 @@ world model. Resume restores the saved mode and cannot switch it. To train the n
 parameterization, start a new run; use `--world-prediction velocity_residual` for a legacy
 baseline. Input statistics, hidden activations and loss scales retain their existing rules.
 
-Optional input `RunningNorm` has independent switches, both off by default.
+For a combined world-model ablation, append **one flag** to a new training command:
+
+```bash
+--world-model-normalization
+```
+
+It switches the dynamics hidden layers to `Linear → LayerNorm → SiLU` and enables
+separate input/output `RunningNorm` modules. Each real collected transition updates
+the statistics once, including warmup; replay minibatches and imagined states do not.
+Statistics remain fixed throughout world-model fitting and policy BPTT. The input is
+standardized, and the predicted output is decoded as `y * (std + eps) + mean` before
+the state update. Moments use FP64; physics stays FP32. Input/output epsilons are
+`0.01`/`0.0001`; updates stop after 200 million real samples. State-loss weights retain
+their fixed physical scales, so this switch does not change the loss weighting.
+
+The flag defaults to off (ELU and fixed bootstrap statistics); use separate output
+directories and identical remaining settings for the two runs. Checkpoints, exports
+and playback preserve the selected architecture and statistics. Resume restores the
+flag automatically and rejects changing it. Older checkpoints default to off.
+The offline trainer accepts the same flag but fits statistics once from its fixed
+training data, excluding validation episodes.
+
+Actor/Critic input `RunningNorm` has independent switches, both off by default.
 Append these flags to a new training command to enable both:
 
 ```bash

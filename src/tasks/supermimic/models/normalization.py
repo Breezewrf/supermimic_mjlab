@@ -1,4 +1,4 @@
-"""Explicitly updated running input statistics, frozen during forward passes."""
+"""Explicitly updated running feature statistics, frozen during forward passes."""
 
 import torch
 from torch import Tensor, nn
@@ -50,4 +50,10 @@ class RunningNorm(nn.Module):
   def forward(self, inputs: Tensor) -> Tensor:
     return (inputs - self.mean.to(inputs.dtype)) / (
       self.std.to(inputs.dtype) + self.eps
+    )
+
+  def denormalize(self, outputs: Tensor) -> Tensor:
+    """Restore physical units without changing statistics or input gradients."""
+    return outputs * (self.std.to(outputs.dtype) + self.eps) + self.mean.to(
+      outputs.dtype
     )

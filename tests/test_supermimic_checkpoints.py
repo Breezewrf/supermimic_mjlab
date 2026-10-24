@@ -291,6 +291,40 @@ class CheckpointTests(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "simulation"):
       policy_checkpoint(self.saved)
 
+  def test_cli_resume_cannot_toggle_world_model_normalization(self):
+    source = self.directory / "last.pt"
+    for enabled in (False, True):
+      saved = {
+        **self.saved,
+        "config": {**self.saved["config"], "world_model_normalization": enabled},
+        "sampler": {"schema_version": 2},
+        "evaluation_limit": None,
+      }
+      save_checkpoint(source, saved)
+      flag = (
+        "--no-world-model-normalization" if enabled else "--world-model-normalization"
+      )
+      result = subprocess.run(
+        [
+          sys.executable,
+          "scripts/train_supermimic.py",
+          "--device",
+          "cpu",
+          "--manifest",
+          str(self.manifest),
+          "--resume",
+          str(source),
+          flag,
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+      )
+      self.assertNotEqual(result.returncode, 0)
+      self.assertIn("Resume cannot change --world-model-normalization", result.stderr)
+
   def test_cli_resume_cannot_reinterpret_world_prediction_targets(self):
     source = self.directory / "last.pt"
     for saved_mode, requested in (
@@ -373,6 +407,7 @@ class CheckpointTests(unittest.TestCase):
         self.assertFalse(config["compile"])
         self.assertEqual(config["wm_only_iters"], 0)
         self.assertEqual(config["world_prediction"], "velocity_residual")
+        self.assertFalse(config["world_model_normalization"])
 
   def test_training_config_rejects_mismatched_dimension_or_weights(self):
     self.saved["config"]["reference_dim"] = 2680
