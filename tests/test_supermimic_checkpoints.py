@@ -1,12 +1,13 @@
 """Training and inference formats, export isolation and identical actor actions."""
 
+import json
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import torch
 
@@ -19,10 +20,14 @@ from src.tasks.supermimic.models.legacy_policy import (
 from src.tasks.supermimic.models.policy import REFERENCE_SCHEMA, MotionActor
 from src.tasks.supermimic.rl.checkpoints import (
   POLICY_KIND,
+  evaluation_score,
   export_policy,
   policy_checkpoint,
+  restore_best_inference,
   save_checkpoint,
+  save_inference_pair,
   training_config,
+  world_model_checkpoint,
 )
 from src.tasks.supermimic.rl.inference import load_actor
 from src.tasks.supermimic.rl.online_training import OnlineTrainer
@@ -43,7 +48,7 @@ class CheckpointTests(unittest.TestCase):
       "schema_version": 1,
       "reference_schema": REFERENCE_SCHEMA,
       "manifest_sha256": file_sha256(self.manifest),
-      "config": {"actor_dims": [8], "amp": "none"},
+      "config": {"actor_dims": [8], "world_dims": [8], "amp": "none"},
       "robot_metadata": {"default_q": self.actor.default_q, "signature": "fixture"},
       "simulation": {"physics_protocol_version": 2},
       "clips": ["fixture"],
@@ -105,10 +110,115 @@ class CheckpointTests(unittest.TestCase):
     trainer.actor, trainer.iteration, trainer.environment_steps = self.actor, 1, 10
     trainer.replay = MagicMock()
     trainer.replay.state_dict.side_effect = AssertionError("Replay was serialized")
+    trainer.world = torch.nn.Linear(2, 2)
+    trainer.world_updates = 1
     policy = trainer.policy_state_dict()
     self.assertEqual(policy["kind"], POLICY_KIND)
     self.assertNotIn("replay", policy)
+    world = trainer.world_model_state_dict()
+    self.assertEqual(world["kind"], "supermimic_world_model")
+    self.assertNotIn("replay", world)
+    self.assertNotIn("actor", world)
     trainer.replay.state_dict.assert_not_called()
+
+  def save_pair(self, iteration, successes, reward, tag="last"):
+    report = {
+      "iteration": iteration,
+      "successes": successes,
+      "normalized_return": reward,
+      "motion_count": 40,
+    }
+    source = {
+      **self.saved,
+      "iteration": iteration,
+      "evaluation": report,
+      "best_evaluation": report if tag == "best" else None,
+      "world": {"marker": torch.tensor(iteration)},
+    }
+    save_inference_pair(
+      self.directory, policy_checkpoint(source), world_model_checkpoint(source), tag=tag
+    )
+    (self.directory / f"evaluation_{iteration:06d}.json").write_text(json.dumps(report))
+    return report
+
+  def test_best_prioritizes_successes_then_return_and_keeps_matching_world(self):
+    self.save_pair(10000, 40, 0.8, "best")
+    self.save_pair(11000, 40, 0.85)
+    self.save_pair(15000, 39, 0.95)
+    report, available = restore_best_inference(self.directory, 15000)
+    self.assertEqual(report["iteration"], 11000)
+    self.assertTrue(available)
+    record = json.loads((self.directory / "best_checkpoint.json").read_text())
+    for component in ("policy", "world_model"):
+      best = torch.load(self.directory / f"{component}_best.pt", weights_only=True)
+      historical = torch.load(self.directory / record[component], weights_only=True)
+      latest = torch.load(self.directory / f"{component}_last.pt", weights_only=True)
+      self.assertEqual(best["iteration"], 11000)
+      self.assertEqual(historical["evaluation"], report)
+      self.assertEqual(latest["iteration"], 15000)
+      self.assertNotIn("replay", historical)
+    world = torch.load(self.directory / "world_model_best.pt", weights_only=True)
+    self.assertEqual(int(world["world"]["marker"]), 11000)
+
+  def test_rollback_excludes_future_best_and_exact_ties_keep_earlier(self):
+    first = self.save_pair(10000, 40, 0.8)
+    self.save_pair(11000, 40, 0.8)
+    future = self.save_pair(15000, 40, 0.9, "best")
+    report, available = restore_best_inference(self.directory, 11000, future)
+    self.assertEqual(report, first)
+    self.assertTrue(available)
+
+  def test_legacy_actor_only_best_does_not_borrow_latest_world(self):
+    best = self.save_pair(10000, 40, 0.8)
+    (self.directory / "world_model_iteration_010000.pt").unlink()
+    self.save_pair(15000, 39, 0.95, "best")
+    save_checkpoint(self.directory / "last.pt", {**self.saved, "iteration": 15000})
+    report, available = restore_best_inference(self.directory, 15000)
+    self.assertEqual(report, best)
+    self.assertFalse(available)
+    self.assertFalse((self.directory / "world_model_best.pt").exists())
+    self.assertTrue((self.directory / "world_model_previous_best.pt").exists())
+    record = json.loads((self.directory / "best_checkpoint.json").read_text())
+    self.assertIsNone(record["world_model"])
+    self.assertEqual(record["policy"], "policy_iteration_010000.pt")
+
+  def test_resume_can_recover_pair_from_legacy_full_snapshot(self):
+    report = {"iteration": 7000, "successes": 40, "normalized_return": 0.8}
+    (self.directory / "evaluation_007000.json").write_text(json.dumps(report))
+    save_checkpoint(self.directory / "iteration_007000.pt", self.saved)
+    recovered, available = restore_best_inference(self.directory, 8000)
+    self.assertEqual(recovered["iteration"], 7000)
+    self.assertTrue(available)
+    self.assertTrue((self.directory / "world_model_iteration_007000.pt").exists())
+
+  def test_pair_rejects_different_iterations_before_writing(self):
+    policy, world = policy_checkpoint(self.saved), world_model_checkpoint(self.saved)
+    world["iteration"] += 1
+    with self.assertRaisesRegex(ValueError, "differs in iteration"):
+      save_inference_pair(self.directory, policy, world, tag="last")
+    self.assertFalse(list(self.directory.glob("*.pt")))
+
+  def test_incomplete_best_save_does_not_publish_new_best_record(self):
+    self.save_pair(10000, 39, 0.8, "best")
+    previous = (self.directory / "best_checkpoint.json").read_text()
+    real_save = save_checkpoint
+
+    def fail_world(path, data):
+      if path.name == "world_model_iteration_015000.pt":
+        raise OSError("disk full")
+      real_save(path, data)
+
+    with (
+      patch("src.tasks.supermimic.rl.checkpoints.save_checkpoint", fail_world),
+      self.assertRaisesRegex(OSError, "disk full"),
+    ):
+      self.save_pair(15000, 40, 0.9, "best")
+    self.assertEqual((self.directory / "best_checkpoint.json").read_text(), previous)
+
+  def test_nonfinite_evaluation_is_not_eligible_for_best(self):
+    for reward in (float("nan"), float("inf"), -float("inf")):
+      with self.subTest(reward=reward), self.assertRaisesRegex(ValueError, "finite"):
+        evaluation_score({"successes": 40, "normalized_return": reward})
 
   def test_cli_export_and_inference_resume_rejection(self):
     source, output = self.directory / "last.pt", self.directory / "policy.pt"

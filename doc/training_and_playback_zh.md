@@ -93,16 +93,25 @@ python scripts/train_supermimic.py \
 | `simulator.log` | 仿真器初始化和 kernel 输出 |
 | `wandb_run.json`、`wandb/` | 可选 W&B run 标识与本地日志 |
 | `last.pt` | 完整续训断点：三个网络、优化器、Replay、采样器和 RNG 状态 |
-| `policy_best.pt` | 真实仿真评估回报最高的轻量 Actor 权重及推理元数据 |
-| `policy_last.pt` | 最近保存的轻量 Actor 权重及推理元数据 |
-| `policy_iteration_*.pt` | 按 `--checkpoint-interval` 保存的轻量策略文件 |
+| `policy_best.pt`、`world_model_best.pt` | 配套的最佳 Actor 与世界模型：成功动作数优先，同分比较归一化回报 |
+| `policy_last.pt`、`world_model_last.pt` | 最近保存的配套推理权重及元数据 |
+| `policy_iteration_*.pt`、`world_model_iteration_*.pt` | 在 checkpoint 间隔、最终轮次及每次出现新最佳时保留的配套历史权重 |
+| `best_checkpoint.json` | 选择规则、评估成绩、轮次及最佳模型的历史文件路径 |
 | `iteration_*.pt` | 显式开启 `--full-checkpoint-interval N` 后保存的历史完整断点 |
 | `evaluation*.json` | 各动作回报、成功数与失败原因 |
 
 默认只更新一份完整的 `last.pt`，历史完整断点默认关闭，避免每次保存都复制数 GB
-Replay。轻量策略不含 Replay、World Model、Critic 或优化器，可直接用于评估和
+Replay，同时保留配套的轻量策略和世界模型历史。轻量策略不含 Replay、World Model、Critic 或优化器，可直接用于评估和
 MuJoCo 可视化，不能用于 `--resume`。若需保留每 10000 轮的完整历史，添加
 `--full-checkpoint-interval 10000`；该选项不会自动删除旧文件。
+长期训练保留世界模型历史会占用较多磁盘，可增大 `--checkpoint-interval` 降低保存频率。
+
+最佳模型按固定起点评估选择，初始化策略也参与比较。40/40 优先于之后回报更高的
+39/40；成功数相同时比较归一化回报，完全同分保留较早模型。`best_checkpoint.json`
+在两个文件均写完后更新，指向带轮次的历史文件；即使别名更新中断，也可据此确认配对。
+例如使用 `--checkpoint-interval 1000` 会保留 `policy_iteration_010000.pt` 和
+`world_model_iteration_010000.pt`，后续成绩回退不会覆盖这两个文件。轻量最佳／历史
+文件不包含 Critic、优化器和 Replay，不能用于恢复训练。
 
 已有完整断点无需重新训练即可导出。以下命令在项目根目录执行，源文件保持不变，
 导出不需要动作数据或 GPU，也不会把 Replay 整体读入内存：
@@ -126,12 +135,15 @@ python scripts/export_supermimic_policy.py \
 格式，保留完整 `world` 权重（包括归一化参数、运动学数据和终止预测头）、网络配置、
 机器人／物理签名、动作来源和轮次，不含 Actor、Critic、Replay、优化器或 RNG 状态，
 不能用于续训。`policy_best.pt` 等轻量策略不含世界模型，不能从中恢复对应权重。
-需要比较同一轮策略与世界模型时，应从同一个完整断点分别导出；不要把不同轮次的
+新训练会自动配套保存两者；旧训练需要同轮次权重时，应从同一个完整断点分别导出。不要把不同轮次的
 `policy_best.pt` 和 `last.pt` 当作同一轮模型。导出文件可通过 play 的 `--world-model` 加载。
 
 `last.pt` 和已有 `iteration_*.pt` 也可同样导出。评估和播放兼容完整断点及轻量策略，
-两种格式保留相同 Actor 权重和数据／机器人／物理配置校验。续训旧目录时，若存在
-旧 `best.pt` 且尚无 `policy_best.pt`，会自动导出最佳策略；已有完整历史文件不会删除。
+两种格式保留相同 Actor 权重和数据／机器人／物理配置校验。续训时，会用已保留策略及
+不晚于恢复轮次的评估报告，按新的成功数优先规则重选最佳；旧完整断点可用于补全组件。
+若最佳历史策略缺少同轮世界模型，`best_checkpoint.json` 会记录 `world_model: null`，
+终端也会提示，无法补回从未保存的权重。若存在其他轮次的世界模型最佳别名，会另存为
+`world_model_previous_best*.pt`，避免错误配对；已有完整历史文件不会删除。
 这只改变存储格式，不转换旧版参考特征或物理配置。
 缺少 `reference_schema` 的旧断点会从 `actor["encoder.0.weight"]` 的输入维度推断：
 730 对应 `root_joint_73_v1`，2680 对应 `full_body_268`；导出文件记录

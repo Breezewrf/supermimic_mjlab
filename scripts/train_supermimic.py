@@ -22,10 +22,14 @@ from src.tasks.supermimic.data.world_model_data import file_sha256
 from src.tasks.supermimic.models.kinematics import robot_metadata
 from src.tasks.supermimic.models.policy import schema_for_dimension
 from src.tasks.supermimic.rl.checkpoints import (
-  export_policy,
+  evaluation_score,
+  evaluation_summary,
   policy_checkpoint,
+  restore_best_inference,
   save_checkpoint,
+  save_inference_pair,
   training_config,
+  world_model_checkpoint,
 )
 from src.tasks.supermimic.rl.evaluation import evaluate, evaluation_env_count
 from src.tasks.supermimic.rl.online_training import (
@@ -94,7 +98,7 @@ def main():
     "--checkpoint-interval",
     type=int,
     default=100,
-    help="Save last.pt for resume and actor-only policy weights every N rounds",
+    help="Save last.pt for resume and retain paired policy/world-model weights every N rounds",
   )
   parser.add_argument(
     "--full-checkpoint-interval",
@@ -315,6 +319,7 @@ def main():
       "evaluation_limit": args.evaluation_limit,
       "evaluation_max_envs": args.eval_num_envs,
       "full_checkpoint_interval": args.full_checkpoint_interval,
+      "best_checkpoint_selection": "successes_then_normalized_return",
       "resume": str(args.resume) if args.resume else None,
     }
     write_json(output / "config.json", run_config)
@@ -336,31 +341,58 @@ def main():
         )
       finally:
         restore_rng(state)
-    best_return = saved["best_return"] if saved else -float("inf")
+    best_evaluation = None
+    current_evaluation = saved.get("evaluation") if saved else None
+    if saved:
+      best_evaluation, best_world_available = restore_best_inference(
+        output, trainer.iteration, saved.get("best_evaluation")
+      )
+      if best_evaluation is not None:
+        console.message(
+          f"Best retained policy: iteration {best_evaluation['iteration']:,}, "
+          f"success {best_evaluation['successes']}/{best_evaluation['motion_count']} "
+          "(success count first, then return)"
+        )
+        if not best_world_available:
+          console.message(
+            "Historical best world model is unavailable; see best_checkpoint.json. "
+            "Future best checkpoints will save both components."
+          )
+
+    def checkpoint_metadata():
+      return {
+        "manifest_sha256": manifest_hash,
+        "runtime": runtime,
+        "best_return": (
+          best_evaluation["normalized_return"] if best_evaluation else -float("inf")
+        ),
+        "best_evaluation": best_evaluation,
+        "evaluation": (
+          current_evaluation
+          if current_evaluation and current_evaluation["iteration"] == trainer.iteration
+          else None
+        ),
+        "evaluation_limit": args.evaluation_limit,
+      }
 
     def checkpoint():
       return {
         **trainer.state_dict(),
-        "manifest_sha256": manifest_hash,
-        "runtime": runtime,
-        "best_return": best_return,
-        "evaluation_limit": args.evaluation_limit,
+        **checkpoint_metadata(),
         "wandb_run": dict(tracking.state) if tracking else None,
       }
 
-    def inference_checkpoint():
-      return policy_checkpoint(
-        {
-          **trainer.policy_state_dict(),
-          "manifest_sha256": manifest_hash,
-          "runtime": runtime,
-          "best_return": best_return,
-          "evaluation_limit": args.evaluation_limit,
-        }
+    def save_weights(tag):
+      metadata = checkpoint_metadata()
+      save_inference_pair(
+        output,
+        policy_checkpoint({**trainer.policy_state_dict(), **metadata}),
+        world_model_checkpoint({**trainer.world_model_state_dict(), **metadata}),
+        tag=tag,
       )
 
     def validate():
-      nonlocal best_return
+      nonlocal best_evaluation, current_evaluation
       console.message(f"Evaluating policy at iteration {trainer.iteration:,}...")
       evaluation_started = time.perf_counter()
       with simulator_output(sim_log, args.verbose_sim):
@@ -381,9 +413,12 @@ def main():
       diagnostics = trainer.diagnostics()
       write_json(output / f"diagnostics_{trainer.iteration:06d}.json", diagnostics)
       write_json(output / "diagnostics.json", diagnostics)
-      if report["normalized_return"] > best_return:
-        best_return = report["normalized_return"]
-        save_checkpoint(output / "policy_best.pt", inference_checkpoint())
+      current_evaluation = evaluation_summary(report)
+      if best_evaluation is None or evaluation_score(report) > evaluation_score(
+        best_evaluation
+      ):
+        best_evaluation = current_evaluation
+        save_weights("best")
       console.evaluation(report)
       console.message(
         f"Evaluation: {report['evaluation_num_envs']} environments, "
@@ -408,9 +443,10 @@ def main():
     if not saved:
       validate()
       save_checkpoint(output / "last.pt", checkpoint())
-    elif not (output / "policy_best.pt").exists() and (output / "best.pt").exists():
-      export_policy(output / "best.pt", output / "policy_best.pt")
-    save_checkpoint(output / "policy_last.pt", inference_checkpoint())
+    elif best_evaluation is None:
+      # A checkpoint copied to a new directory may have no retained best weights.
+      validate()
+    save_weights("last")
     if args.device.startswith("cuda"):
       torch.cuda.reset_peak_memory_stats(args.device)
     window = MetricWindow()
@@ -447,12 +483,7 @@ def main():
           save_checkpoint(output / "last.pt", snapshot)
           if historical_full:
             save_checkpoint(output / f"iteration_{trainer.iteration:06d}.pt", snapshot)
-          weights = inference_checkpoint()
-          save_checkpoint(output / "policy_last.pt", weights)
-          if periodic:
-            save_checkpoint(
-              output / f"policy_iteration_{trainer.iteration:06d}.pt", weights
-            )
+          save_weights("last")
           console.message(
             f"Checkpoint saved at iteration {trainer.iteration:,}: {output / 'last.pt'}"
           )

@@ -760,7 +760,7 @@ class OnlineCliTests(unittest.TestCase):
         "--log-interval",
         "1",
         "--checkpoint-interval",
-        "1",
+        "2",
       ]
       has_wandb = importlib.util.find_spec("wandb") is not None
       if normalize:
@@ -848,6 +848,24 @@ class OnlineCliTests(unittest.TestCase):
         for key, value in saved["actor"].items():
           torch.testing.assert_close(weights["actor"][key], value, rtol=0, atol=0)
         self.assertTrue((output / f"policy_iteration_{iteration:06d}.pt").exists())
+        world = torch.load(
+          output / "world_model_last.pt", map_location="cpu", weights_only=True
+        )
+        self.assertEqual(world["kind"], "supermimic_world_model")
+        self.assertEqual(world["iteration"], iteration)
+        self.assertEqual(world["evaluation"], weights["evaluation"])
+        self.assertNotIn("replay", world)
+        for key, value in saved["world"].items():
+          torch.testing.assert_close(world["world"][key], value, rtol=0, atol=0)
+        self.assertTrue((output / f"world_model_iteration_{iteration:06d}.pt").exists())
+        record = json.loads((output / "best_checkpoint.json").read_text())
+        self.assertEqual(record["selection"], "successes_then_normalized_return")
+        for component in ("policy", "world_model"):
+          best = torch.load(
+            output / f"{component}_best.pt", map_location="cpu", weights_only=True
+          )
+          self.assertEqual(best["evaluation"], record["evaluation"])
+          self.assertTrue((output / record[component]).exists())
         self.assertFalse((output / "iteration_000001.pt").exists())
         self.assertTrue((output / "policy_best.pt").exists())
         self.assertFalse((output / "best.pt").exists())

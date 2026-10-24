@@ -111,17 +111,30 @@ New runs require a new output directory. Main outputs:
 | `simulator.log` | Simulator initialization and kernel output |
 | `wandb_run.json`, `wandb/` | Optional W&B run identity and local tracking data |
 | `last.pt` | Full resume state: networks, optimizers, replay, sampler, and RNG states |
-| `policy_best.pt` | Actor-only weights and metadata with the highest fixed-start evaluation return |
-| `policy_last.pt` | Latest saved actor-only weights and inference metadata |
-| `policy_iteration_*.pt` | Lightweight policies saved at `--checkpoint-interval` |
+| `policy_best.pt`, `world_model_best.pt` | Matching best Actor and world model: most successful motions, then highest normalized return |
+| `policy_last.pt`, `world_model_last.pt` | Latest saved matching inference weights and metadata |
+| `policy_iteration_*.pt`, `world_model_iteration_*.pt` | Paired inference history at checkpoint intervals, the final iteration, and every new best |
+| `best_checkpoint.json` | Selection rule, evaluation scores, iteration and paths to the retained best pair |
 | `iteration_*.pt` | Historical full snapshots, enabled with `--full-checkpoint-interval N` |
 | `evaluation*.json` | Per-motion returns, success counts, and failure reasons |
 
-By default, training updates one full `last.pt` and keeps lightweight policy history.
+By default, training updates one full `last.pt` and keeps paired inference history.
 Policy files contain the Actor and validation metadata, without replay, world model,
 Critic, or optimizers. Use them for evaluation and MuJoCo playback; resume requires a
 full training checkpoint. Add `--full-checkpoint-interval 10000` to retain full
 historical snapshots every 10000 iterations. No old files are automatically deleted.
+Inference history includes world-model weights and can consume substantial disk space
+over a long run; increase `--checkpoint-interval` to save less frequently.
+
+Best selection uses fixed-start evaluation, including the initial policy. A 40/40
+policy remains best over a later 39/40 policy even if the later return is higher.
+Equal success counts compare normalized return; an exact tie keeps the earlier model.
+`best_checkpoint.json` is published after both files are saved and points to the
+numbered history, so it identifies the pair even if an alias update is interrupted.
+For example, `--checkpoint-interval 1000` retains both
+`policy_iteration_010000.pt` and `world_model_iteration_010000.pt`; a later evaluation
+regression does not overwrite those files. Lightweight best/history files cannot
+resume training because they omit the Critic, optimizers and replay.
 
 Export an existing full checkpoint without retraining, a GPU, or motion data:
 
@@ -145,16 +158,20 @@ The default component is `policy`. World-model files use kind
 normalization buffers, kinematics and the termination head, plus model configuration,
 robot/physics signatures, motion provenance and iteration. They contain no Actor,
 Critic, replay, optimizers or RNG state and cannot resume training. Policy-only
-files have no world weights to extract. To compare a policy with its world model
-at the same iteration, export both components from the same full checkpoint.
+files have no world weights to extract. New runs save both components automatically;
+for older runs, export both from the same full checkpoint to obtain a matching pair.
 Pass the world-model file to `play --world-model <path>` for a prediction overlay.
 
 Run from the project root. Export preserves the source and memory-maps replay storage
 without reading it into RAM. Existing `last.pt` and `iteration_*.pt` can be exported
 the same way. Evaluation and playback accept either format with the same actor weights
-and data/robot/physics checks. When resuming an older run with `best.pt` and no
-`policy_best.pt`, the best policy is exported automatically; existing full snapshots
-are retained. Export does not migrate legacy feature schemas or physics settings.
+and data/robot/physics checks. On resume, retained policies and evaluation reports up
+to the resumed iteration are ranked by the new success-first rule. Older full snapshots
+can supply missing components. If the best retained policy has no matching world model,
+`best_checkpoint.json` records `world_model: null` and training prints a notice; it
+cannot reconstruct weights that were never saved. A stale world-model best alias is
+preserved as `world_model_previous_best*.pt`. Existing full snapshots are retained.
+Export does not migrate legacy feature schemas or physics settings.
 When `reference_schema` is missing, the Actor's `encoder.0.weight` input width
 identifies `root_joint_73_v1` (730) or `full_body_268` (2680). Export prints the
 inferred schema and records `reference_schema_inferred: true`. Evaluation and

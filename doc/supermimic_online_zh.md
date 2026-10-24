@@ -210,21 +210,26 @@ Replay 常规采样也改为对随机候选做窗口/历史检查；仅候选极
 ## 断点、推理与真实评估
 
 `last.pt` 是完整续训断点，包含三个网络、优化器、完整 Replay、重置采样器、训练计数
-和各随机数发生器状态。`policy_best.pt` 按固定起点真实仿真的平均归一化回报选择，
-包括初始化策略候选；它和 `policy_last.pt`、`policy_iteration_*.pt` 仅保存 Actor
+和各随机数发生器状态。最佳模型按固定起点真实仿真的成功动作数选择，同分时比较
+平均归一化回报，完全相同保留较早模型，包括初始化策略候选。
+`policy_best.pt` 与 `world_model_best.pt` 配套保存，并由 `best_checkpoint.json`
+记录成绩及历史文件路径。`policy_best.pt`、`policy_last.pt`、`policy_iteration_*.pt` 仅保存 Actor
 与推理所需的配置和签名，不包含 Replay、World Model、Critic 或优化器。
 两种格式都可评估并校验 manifest、动作名称、机器人签名和物理配置；只有完整断点
 能用于 `--resume`。默认不再保存历史完整断点；显式添加
 `--full-checkpoint-interval 10000` 才会生成 `iteration_010000.pt` 等文件。
+每次到达 `--checkpoint-interval`、最终轮次或刷新最佳时，自动配套保留
+`policy_iteration_*.pt` 与 `world_model_iteration_*.pt`，无需复制历史 Replay。
 
 已有完整断点可用 `scripts/export_supermimic_policy.py --checkpoint <完整断点>
 --output <轻量策略.pt>` 提取推理权重，内存映射读取，不复制 Replay，也不改写源文件。
 同一命令添加 `--component world-model --output <世界模型.pt>` 可单独提取完整
 `world` 状态（含归一化参数、运动学与终止预测头）及重建配置、机器人／物理签名。
 该文件格式为 `supermimic_world_model`，不含 Actor、Critic、Replay、优化器或 RNG，
-不能续训；轻量 policy 本身不含世界模型。若需同轮次的策略与世界模型，应从同一个
-完整断点分别导出。play 添加 `--world-model <世界模型.pt>` 可显示橙色预测机器人。
-续训旧目录时，如旧 `best.pt` 存在而 `policy_best.pt` 不存在，会自动导出最佳策略。
+不能续训；轻量 policy 本身不含世界模型。新训练自动保存配套文件；旧训练如需提取
+同轮模型，应从同一个完整断点分别导出。play 添加 `--world-model <世界模型.pt>` 可显示橙色预测机器人。
+续训旧目录会根据恢复轮次以内的评估报告和现存权重，按成功数优先规则重选最佳。
+若缺少对应的历史世界模型，记录 `world_model: null` 并提示，不会使用当前模型替代。
 现存历史文件不会自动删除；正在运行的进程须从 `last.pt` 重启后才会使用新的保存方式。
 缺少 `reference_schema` 时，导出和推理会按 Actor 编码器输入维度识别 730／2680
 格式，并标记 `reference_schema_inferred: true`；未知维度不会擅自补成新版格式。

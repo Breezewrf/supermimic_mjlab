@@ -462,19 +462,33 @@ class OnlineTrainer:
       "reset_sampler": sampler_diagnostics(self.env.sampler, self.env.library),
     }
 
-  def policy_state_dict(self) -> dict:
-    """Actor and simulator metadata only; never serialize replay for inference."""
+  def _inference_metadata(self) -> dict:
     return {
       "schema_version": 1,
-      "kind": "supermimic_actor",
       "reference_schema": schema_for_dimension(self.config.reference_dim),
       "config": asdict(self.config),
       "robot_metadata": self.metadata,
       "simulation": self.simulation_parameters,
       "clips": self.env.library.names,
-      "actor": self.actor.state_dict(),
       "iteration": self.iteration,
       "environment_steps": self.environment_steps,
+    }
+
+  def policy_state_dict(self) -> dict:
+    """Actor and simulator metadata only; never serialize replay for inference."""
+    return {
+      **self._inference_metadata(),
+      "kind": "supermimic_actor",
+      "actor": self.actor.state_dict(),
+    }
+
+  def world_model_state_dict(self) -> dict:
+    """Dynamics and simulator metadata without replay or optimizer state."""
+    return {
+      **self._inference_metadata(),
+      "kind": "supermimic_world_model",
+      "world": self.world.state_dict(),
+      "world_updates": self.world_updates,
     }
 
   def state_dict(self) -> dict:

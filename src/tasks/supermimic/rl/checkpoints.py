@@ -1,5 +1,7 @@
 """Separate resumable training snapshots from portable inference artifacts."""
 
+import json
+import math
 from pathlib import Path
 
 import torch
@@ -28,6 +30,8 @@ POLICY_OPTIONAL_FIELDS = (
   "evaluation_limit",
   "source_checkpoint",
   "reference_schema_inferred",
+  "evaluation",
+  "best_evaluation",
 )
 WORLD_MODEL_REQUIRED_FIELDS = (
   "schema_version",
@@ -181,3 +185,137 @@ def export_policy(checkpoint: Path, output: Path) -> dict:
 
 def export_world_model(checkpoint: Path, output: Path) -> dict:
   return _export_inference(checkpoint, output, world_model_checkpoint, "World-model")
+
+
+def evaluation_summary(report: dict) -> dict:
+  """Small, serializable selection record, separate from model weights."""
+  result = {key: report[key] for key in ("iteration", "successes", "normalized_return")}
+  result["motion_count"] = report.get("motion_count", len(report.get("motions", ())))
+  for key in ("mean_completion", "evaluation_limit", "evaluation_wall_seconds"):
+    if key in report:
+      result[key] = report[key]
+  return result
+
+
+def evaluation_score(report: dict) -> tuple[int, float]:
+  """Prefer successful tracking, then break ties with normalized return."""
+  value = float(report["normalized_return"])
+  if not math.isfinite(value):
+    raise ValueError("Checkpoint selection requires a finite evaluation return")
+  return int(report["successes"]), value
+
+
+def _write_best_record(output: Path, report: dict, world_available: bool):
+  suffix = f"iteration_{report['iteration']:06d}.pt"
+  record = {
+    "selection": "successes_then_normalized_return",
+    "evaluation": evaluation_summary(report),
+    "policy": "policy_" + suffix,
+    "world_model": "world_model_" + suffix if world_available else None,
+  }
+  temporary = output / "best_checkpoint.json.tmp"
+  temporary.write_text(json.dumps(record, indent=2, allow_nan=False) + "\n")
+  temporary.replace(output / "best_checkpoint.json")
+
+
+def save_inference_pair(output: Path, policy: dict, world: dict, *, tag: str):
+  """Retain both lightweight components; aliases never stand in for history."""
+  if tag not in ("best", "last"):
+    raise ValueError("Inference pair tag must be best or last")
+  if policy.get("kind") != POLICY_KIND or world.get("kind") != WORLD_MODEL_KIND:
+    raise ValueError("Expected policy-only and world-model-only checkpoints")
+  for key in (
+    "iteration",
+    "environment_steps",
+    "manifest_sha256",
+    "config",
+    "simulation",
+    "clips",
+    "evaluation",
+    "best_evaluation",
+  ):
+    if policy.get(key) != world.get(key):
+      raise ValueError(f"Policy/world checkpoint pair differs in {key}")
+  iteration = policy["iteration"]
+  if tag == "best":
+    report = policy.get("evaluation")
+    if report is None or report["iteration"] != iteration:
+      raise ValueError("Best checkpoint requires its own iteration's evaluation")
+    evaluation_score(report)
+  save_checkpoint(output / f"policy_iteration_{iteration:06d}.pt", policy)
+  save_checkpoint(output / f"world_model_iteration_{iteration:06d}.pt", world)
+  save_checkpoint(output / f"policy_{tag}.pt", policy)
+  save_checkpoint(output / f"world_model_{tag}.pt", world)
+  if tag == "best":
+    _write_best_record(output, policy["evaluation"], True)
+
+
+def restore_best_inference(
+  output: Path, iteration: int, saved_best: dict | None = None
+):
+  """Reconcile best aliases with retained history, including legacy runs/rollback.
+
+  Old runs may retain the best Actor but lack its world model. Record that absence
+  explicitly rather than exporting a world model from a different iteration.
+  """
+  reports = {}
+  if saved_best is not None and saved_best["iteration"] <= iteration:
+    reports[saved_best["iteration"]] = saved_best
+  for path in output.glob("evaluation_*.json"):
+    report = json.loads(path.read_text())
+    if report["iteration"] <= iteration:
+      reports[report["iteration"]] = evaluation_summary(report)
+
+  def find_component(step, component):
+    candidates = (
+      output / f"{component}_iteration_{step:06d}.pt",
+      output / f"{component}_best.pt",
+      output / f"iteration_{step:06d}.pt",
+      output / "best.pt",
+      output / "last.pt",
+    )
+    key = "actor" if component == "policy" else "world"
+    select = policy_checkpoint if component == "policy" else world_model_checkpoint
+    for path in candidates:
+      if not path.exists():
+        continue
+      saved = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+      if saved.get("iteration") == step and key in saved:
+        return select(saved)
+    return None
+
+  for report in sorted(
+    reports.values(),
+    key=lambda row: (*evaluation_score(row), -row["iteration"]),
+    reverse=True,
+  ):
+    step = report["iteration"]
+    policy = find_component(step, "policy")
+    if policy is None:
+      continue
+    world = find_component(step, "world_model")
+    policy.update(
+      evaluation=report, best_evaluation=report, best_return=report["normalized_return"]
+    )
+    if world is not None:
+      world.update(
+        evaluation=report,
+        best_evaluation=report,
+        best_return=report["normalized_return"],
+      )
+      save_inference_pair(output, policy, world, tag="best")
+    else:
+      save_checkpoint(output / f"policy_iteration_{step:06d}.pt", policy)
+      save_checkpoint(output / "policy_best.pt", policy)
+      # Preserve an alias from a later best when rolling back to legacy history.
+      stale = output / "world_model_best.pt"
+      if stale.exists():
+        backup = output / "world_model_previous_best.pt"
+        index = 0
+        while backup.exists():
+          index += 1
+          backup = output / f"world_model_previous_best_{index}.pt"
+        stale.replace(backup)
+      _write_best_record(output, report, False)
+    return report, world is not None
+  return None, False
