@@ -127,6 +127,7 @@ class OnlineTrainer:
       config.termination_mode,
       config.relative_orientation,
       config.amp,
+      world_prediction=config.world_prediction,
     ).to(self.device)
     self.actor = MotionActor(
       metadata["default_q"],

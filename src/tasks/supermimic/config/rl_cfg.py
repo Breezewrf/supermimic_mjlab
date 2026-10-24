@@ -36,8 +36,11 @@ class OnlineConfig:
   reference_dim: int = 730
   actor_input_normalization: bool = False
   critic_input_normalization: bool = False
+  world_prediction: str = "state_delta"
 
   def __post_init__(self):
+    if self.world_prediction not in ("state_delta", "velocity_residual"):
+      raise ValueError("world_prediction must be state_delta or velocity_residual")
     if self.reference_dim not in (730, 2680):
       raise ValueError("reference_dim must be 730 or 2680")
     counts = (

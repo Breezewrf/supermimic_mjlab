@@ -83,6 +83,7 @@ def load_world_model(
     config.get("termination_mode", "learned"),
     config.get("relative_orientation", False),
     config.get("amp", "none"),
+    world_prediction=config.get("world_prediction", "velocity_residual"),
   )
   try:
     model.load_state_dict(saved["world"])

@@ -301,6 +301,21 @@ class WorldModelPlaybackIntegrationTests(unittest.TestCase):
       save_checkpoint(path, world_model_checkpoint(saved))
       loaded, _ = load_world_model(path, manifest, "cpu", ("one",))
       self.assertFalse(loaded.training)
+      self.assertEqual(loaded.world_prediction, "state_delta")
+      state = physical_state()
+      state[:, 36] = 1.5
+      action, context = torch.zeros(1, 29), torch.zeros(1, 33)
+      torch.testing.assert_close(
+        loaded(state, action, context), world(state, action, context)
+      )
+      # Historical files have identical tensor layouts but different prediction semantics.
+      del saved["config"]["world_prediction"]
+      save_checkpoint(path, world_model_checkpoint(saved))
+      legacy, _ = load_world_model(path, manifest, "cpu")
+      self.assertEqual(legacy.world_prediction, "velocity_residual")
+      expected = state.clone()
+      expected[:, 0] += 1.5 * 0.02
+      torch.testing.assert_close(legacy(state, action, context), expected)
       for key, value in world.state_dict().items():
         torch.testing.assert_close(loaded.state_dict()[key], value, atol=0, rtol=0)
       with self.assertRaisesRegex(ValueError, "clips"):

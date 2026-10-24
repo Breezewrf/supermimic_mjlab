@@ -43,6 +43,12 @@ Actor、Critic、真实采集和想象训练统一使用所选特征。对照旧
 完整 checkpoint 续训自动识别参考维度，兼容缺少 schema 元数据的旧 2680 维断点；
 旧断点缺少执行配置时沿用非编译 FP32。续训不能切换参考维度，更换架构需新建输出目录。
 
+新训练默认 `--world-prediction state_delta`：世界模型预测完整单步状态增量，
+不额外加入恒速外推。Actor 仍输出归一化关节位置指令。缺少此配置的旧 checkpoint
+自动使用 `velocity_residual`，包括 preview 世界模型，保持原预测行为。
+续训自动恢复原模式，不能中途切换。训练新参数化需新建输出目录；如需旧版对照，
+指定 `--world-prediction velocity_residual`。输入统计、隐藏层激活和损失尺度沿用现有规则。
+
 Actor／Critic 输入可分别启用 `RunningNorm`，默认均关闭：
 
 ```bash

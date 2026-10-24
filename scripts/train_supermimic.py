@@ -129,6 +129,11 @@ def main():
   parser.add_argument("--wandb-mode", choices=("online", "offline"), default="online")
   parser.add_argument("--termination-mode", choices=("learned", "analytic"))
   parser.add_argument("--amp", choices=("bf16", "none"))
+  parser.add_argument(
+    "--world-prediction",
+    choices=("state_delta", "velocity_residual"),
+    help="World-model targets (new runs: state_delta; resume: saved mode)",
+  )
   for name in ("actor-input-normalization", "critic-input-normalization"):
     parser.add_argument(
       "--" + name,
@@ -258,6 +263,10 @@ def main():
     parser.error(
       "Resume cannot change --reference-dim; use a new output directory for a new architecture"
     )
+  if saved and config.world_prediction != saved_config["world_prediction"]:
+    parser.error(
+      "Resume cannot change --world-prediction; start a new run for state_delta training"
+    )
   if saved and (
     saved_config != asdict(config) or saved["manifest_sha256"] != manifest_hash
   ):
@@ -326,6 +335,7 @@ def main():
     console.start(
       asdict(config), args.device, len(env.library), output, trainer.iteration
     )
+    console.message(f"World-model prediction: {config.world_prediction}")
     if args.wandb:
       state = rng_state()
       try:

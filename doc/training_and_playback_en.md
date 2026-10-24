@@ -55,6 +55,14 @@ including old 2680-input checkpoints without schema metadata. Old checkpoints
 without execution settings resume in eager FP32. A resume cannot change the layout;
 use a new output directory to train a different architecture.
 
+New runs default to `--world-prediction state_delta`: the world model predicts complete
+one-step state increments, without adding a constant-velocity extrapolation. Actor
+outputs remain normalized joint-position commands. Old checkpoints without this setting
+load as `velocity_residual`, preserving their original predictions, including the preview
+world model. Resume restores the saved mode and cannot switch it. To train the new
+parameterization, start a new run; use `--world-prediction velocity_residual` for a legacy
+baseline. Input statistics, hidden activations and loss scales retain their existing rules.
+
 Optional input `RunningNorm` has independent switches, both off by default.
 Append these flags to a new training command to enable both:
 

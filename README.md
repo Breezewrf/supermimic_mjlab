@@ -134,6 +134,7 @@ Original training configuration, run from the repository root:
 python scripts/train_supermimic.py \
   --device cuda:0 \
   --reference-dim 2680 \
+  --world-prediction velocity_residual \
   --amp none --no-compile \
   --no-actor-input-normalization --no-critic-input-normalization \
   --seed 0 \

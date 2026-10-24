@@ -66,6 +66,15 @@ def make_starts(library, default_q, count=2, *, frame_id=0):
 
 
 class OnlineConfigTests(unittest.TestCase):
+  def test_world_prediction_defaults_to_deltas_and_validates_mode(self):
+    self.assertEqual(OnlineConfig().world_prediction, "state_delta")
+    self.assertEqual(
+      OnlineConfig(world_prediction="velocity_residual").world_prediction,
+      "velocity_residual",
+    )
+    with self.assertRaisesRegex(ValueError, "world_prediction"):
+      OnlineConfig(world_prediction="unknown")
+
   def test_reference_dimension_requires_a_supported_layout(self):
     for width in (730, 2680):
       self.assertEqual(OnlineConfig(reference_dim=width).reference_dim, width)
@@ -588,7 +597,13 @@ class OnlineIntegrationTests(unittest.TestCase):
         self.assertEqual(len(episode[mask].unique()), 1)
 
   def test_full_body_training_resumes_historical_checkpoint(self):
-    config = replace(self.config, reference_dim=2680, amp="none", compile=False)
+    config = replace(
+      self.config,
+      reference_dim=2680,
+      amp="none",
+      compile=False,
+      world_prediction="velocity_residual",
+    )
     trainer = self.trainer(config)
     trainer.train_iteration()
     saved = copy.deepcopy(trainer.state_dict())
@@ -603,10 +618,12 @@ class OnlineIntegrationTests(unittest.TestCase):
       "wm_only_iters",
       "actor_input_normalization",
       "critic_input_normalization",
+      "world_prediction",
     ):
       del saved["config"][key]
     resumed = OnlineTrainer(self.env, self.metadata, config)
     resumed.load_state_dict(saved)
+    self.assertEqual(resumed.world.world_prediction, "velocity_residual")
     for name in ("actor", "critic", "world"):
       for key, value in getattr(trainer, name).state_dict().items():
         torch.testing.assert_close(getattr(resumed, name).state_dict()[key], value)
@@ -763,6 +780,13 @@ class OnlineCliTests(unittest.TestCase):
         "2",
       ]
       has_wandb = importlib.util.find_spec("wandb") is not None
+      prediction = (
+        "velocity_residual"
+        if reference_dim == 2680 and not normalize
+        else "state_delta"
+      )
+      if prediction == "velocity_residual":
+        common += ["--world-prediction", prediction]
       if normalize:
         common += ["--actor-input-normalization", "--critic-input-normalization"]
       if has_wandb:
@@ -777,6 +801,9 @@ class OnlineCliTests(unittest.TestCase):
       for iteration in (1, 2):
         command = common + ["--iterations", str(iteration)]
         if iteration == 2:
+          if prediction == "velocity_residual":
+            offset = command.index("--world-prediction")
+            del command[offset : offset + 2]
           if normalize:
             command.remove("--actor-input-normalization")
             command.remove("--critic-input-normalization")
@@ -794,6 +821,7 @@ class OnlineCliTests(unittest.TestCase):
               "compile",
               "actor_input_normalization",
               "critic_input_normalization",
+              "world_prediction",
             ):
               del historical["config"][key]
             torch.save(historical, output / "last.pt")
@@ -820,6 +848,7 @@ class OnlineCliTests(unittest.TestCase):
         self.assertEqual(saved["config"]["wm_only_iters"], 1)
         self.assertEqual(saved["config"]["learning_rate"], 5e-5)
         self.assertEqual(saved["config"]["reference_dim"], reference_dim)
+        self.assertEqual(saved["config"]["world_prediction"], prediction)
         self.assertEqual(saved["config"]["actor_input_normalization"], normalize)
         self.assertEqual(saved["config"]["critic_input_normalization"], normalize)
         if normalize:

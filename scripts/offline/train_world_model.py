@@ -45,6 +45,11 @@ def main():
   )
   parser.add_argument("--hidden-dims", nargs="+", type=int, default=[2048, 2048, 2048])
   parser.add_argument(
+    "--world-prediction",
+    choices=("state_delta", "velocity_residual"),
+    help="New runs default to state_delta; checkpoints retain their saved mode",
+  )
+  parser.add_argument(
     "--steps",
     type=int,
     default=5000,
@@ -132,7 +137,18 @@ def main():
     if checkpoint["config"]["smoke"] != args.smoke:
       raise ValueError("Keep the original checkpoint's --smoke setting")
   hidden = tuple(checkpoint["hidden_dims"] if checkpoint else args.hidden_dims)
-  model = WorldModel(metadata, hidden).to(args.device)
+  prediction_mode = (
+    checkpoint["config"].get("world_prediction", "velocity_residual")
+    if checkpoint
+    else args.world_prediction or "state_delta"
+  )
+  if (
+    checkpoint
+    and args.world_prediction is not None
+    and args.world_prediction != prediction_mode
+  ):
+    parser.error("Checkpoint world prediction mode cannot be changed")
+  model = WorldModel(metadata, hidden, world_prediction=prediction_mode).to(args.device)
   library = MotionLibrary(
     args.manifest,
     model.kinematics.joint_names,
@@ -176,6 +192,7 @@ def main():
   args.output.mkdir(parents=True, exist_ok=bool(args.resume))
   config = vars(args).copy()
   config["seed"] = split_seed
+  config["world_prediction"] = prediction_mode
   runtime = {
     name: importlib.metadata.version(name)
     for name in ("torch", "mujoco", "mujoco-warp", "warp-lang")
@@ -231,6 +248,7 @@ def main():
         "seed": split_seed,
         "batch_size": args.batch_size,
         "smoke": args.smoke,
+        "world_prediction": prediction_mode,
       },
       "runtime": runtime,
     }
