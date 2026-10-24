@@ -8,7 +8,6 @@ from torch import Tensor, nn
 from ..config.task_cfg import STEP_DT
 from ..mdp.rewards import tracking_reward
 from ..mdp.state import (
-  observe,
   quat_apply,
   quat_conjugate,
   quat_inverse_apply,
@@ -153,6 +152,7 @@ class WorldModel(nn.Module):
     amp: str = "none",
     world_prediction: str = "state_delta",
     world_model_normalization: bool = False,
+    motion_anchor_ori_b: bool = False,
   ):
     super().__init__()
     if not hidden_dims or any(width < 1 for width in hidden_dims):
@@ -166,6 +166,7 @@ class WorldModel(nn.Module):
       raise ValueError("termination_mode must be learned or analytic")
     self.termination_mode = termination_mode
     self.relative_orientation = relative_orientation
+    self.motion_anchor_ori_b = motion_anchor_ori_b
     self.amp = amp
     self.kinematics = G1Kinematics(metadata)
     widths = (130, *hidden_dims, 70)
@@ -275,12 +276,14 @@ class WorldModel(nn.Module):
       "next_state": next_state,
       "bodies": bodies,
       "reward": reward,
-      "clean_observation": observe(
+      "clean_observation": self.kinematics.observation(
         next_state,
         action,
-        self.kinematics.default_q,
         context,
-        reference_next["body_quat_w"][..., 0, :] if self.relative_orientation else None,
+        reference_next["body_quat_w"],
+        relative_orientation=self.relative_orientation,
+        motion_anchor_orientation=self.motion_anchor_ori_b,
+        bodies=bodies,
       ),
       **self.termination(next_state, reference_next),
     }

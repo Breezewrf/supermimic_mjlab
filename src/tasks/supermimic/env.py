@@ -7,13 +7,18 @@ from mjlab.envs import ManagerBasedRlEnv
 from torch import Tensor
 
 from .config.robot_cfg import FOOT_COLLISION_EXPR
-from .config.task_cfg import TRACKED_BODIES, FoundationConfig
+from .config.task_cfg import MOTION_ANCHOR_INDEX, TRACKED_BODIES, FoundationConfig
 from .data.motion_library import MotionLibrary
 from .env_cfg import make_env_cfg
 from .mdp.reset_sampler import ResetSampler
 from .mdp.resets import reference_reset_state
 from .mdp.rewards import tracking_reward
-from .mdp.state import ObservationHistory, add_sensor_noise, observe
+from .mdp.state import (
+  ObservationHistory,
+  add_sensor_noise,
+  motion_anchor_ori_b,
+  observe,
+)
 from .mdp.terminations import failure_terms
 
 
@@ -108,17 +113,26 @@ class SuperMimicEnv(ManagerBasedRlEnv):
   def _observations(
     self, state: Tensor, reference: dict | None = None
   ) -> tuple[Tensor, Tensor]:
-    reference_quat = None
+    reference_quat = anchor_orientation = None
+    if reference is None and (
+      self.foundation_config.relative_orientation
+      or self.foundation_config.motion_anchor_ori_b
+    ):
+      reference = self.library.get_frame(self.motion_id, self.frame_id)
     if self.foundation_config.relative_orientation:
-      if reference is None:
-        reference = self.library.get_frame(self.motion_id, self.frame_id)
       reference_quat = reference["body_quat_w"][..., 0, :]
+    if self.foundation_config.motion_anchor_ori_b:
+      anchor_orientation = motion_anchor_ori_b(
+        self.robot.data.body_link_quat_w[:, self.body_ids[MOTION_ANCHOR_INDEX]],
+        reference["body_quat_w"][..., MOTION_ANCHOR_INDEX, :],
+      )
     clean = observe(
       state,
       self.previous_action,
       self.robot.data.default_joint_pos,
       self.context,
       reference_quat,
+      anchor_orientation,
     )
     noisy = (
       add_sensor_noise(clean, self.generator)

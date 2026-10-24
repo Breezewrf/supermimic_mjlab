@@ -94,6 +94,9 @@ python scripts/data/convert_lafan_to_npz.py \
 
 ## 在线训练
 
+`motion_anchor_ori_b` 是可选消融变量，默认关闭，可在训练命令中添加
+`--motion-anchor-ori-b` 开启。
+
 ### 复现当前预览模型（第 10000 轮）
 
 当前预览使用以下配套权重，均从

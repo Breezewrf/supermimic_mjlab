@@ -119,7 +119,10 @@ class OnlineTrainer:
       and not torch.cuda.is_bf16_supported()
     ):
       raise ValueError("This GPU does not support BF16; use --amp none")
-    if env.foundation_config.relative_orientation != config.relative_orientation:
+    if (
+      env.foundation_config.relative_orientation != config.relative_orientation
+      or env.foundation_config.motion_anchor_ori_b != config.motion_anchor_ori_b
+    ):
       raise ValueError("Environment and policy observation settings differ")
     self.world = WorldModel(
       metadata,
@@ -129,6 +132,7 @@ class OnlineTrainer:
       config.amp,
       world_prediction=config.world_prediction,
       world_model_normalization=config.world_model_normalization,
+      motion_anchor_ori_b=config.motion_anchor_ori_b,
     ).to(self.device)
     self.actor = MotionActor(
       metadata["default_q"],
@@ -137,6 +141,7 @@ class OnlineTrainer:
       config.amp,
       reference_dim=config.reference_dim,
       input_normalization=config.actor_input_normalization,
+      motion_anchor_ori_b=config.motion_anchor_ori_b,
     ).to(self.device)
     self.critic = MotionCritic(
       metadata["default_q"],

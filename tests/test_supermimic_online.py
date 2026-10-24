@@ -794,6 +794,7 @@ class OnlineCliTests(unittest.TestCase):
         "--critic-minibatches",
         "1",
         "--relative-orientation",
+        "--motion-anchor-ori-b",
         "--termination-mode",
         "analytic",
         "--diagnostics-batch-size",
@@ -965,6 +966,8 @@ class OnlineCliTests(unittest.TestCase):
       self.assertEqual(checkpoint["iteration"], 2)
       self.assertEqual(checkpoint["world_updates"], 2)
       self.assertTrue(checkpoint["config"]["relative_orientation"])
+      self.assertTrue(checkpoint["config"]["motion_anchor_ori_b"])
+      self.assertEqual(checkpoint["replay"]["data"]["observation"].shape[-1], 105)
       self.assertEqual(checkpoint["config"]["termination_mode"], "analytic")
       diagnostics = json.loads((output / "diagnostics.json").read_text())
       self.assertEqual(diagnostics["iteration"], 2)

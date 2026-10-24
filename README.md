@@ -101,6 +101,9 @@ conversion; if these files already exist, this step can be skipped. See the
 
 ## Online training
 
+`motion_anchor_ori_b` is an optional ablation, disabled by default; enable it with
+`--motion-anchor-ori-b` in the training command.
+
 ### Reproduce the preview checkpoint (iteration 10000)
 
 The current preview uses the following pair, both exported at **iteration 10000**

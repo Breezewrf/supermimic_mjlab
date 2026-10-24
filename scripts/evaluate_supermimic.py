@@ -218,6 +218,9 @@ def main(*, playback=False):
     relative_orientation=bool(
       saved and saved["config"].get("relative_orientation", False)
     ),
+    motion_anchor_ori_b=bool(
+      saved and saved["config"].get("motion_anchor_ori_b", False)
+    ),
   )
   env = SuperMimicEnv(config, device=args.device)
   displays = []

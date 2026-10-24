@@ -25,6 +25,7 @@ class LegacyMotionActor(MotionActor):
     relative_orientation: bool = False,
     amp: str = "none",
     input_normalization: bool = False,
+    motion_anchor_ori_b: bool = False,
   ):
     super().__init__(
       default_q,
@@ -33,4 +34,5 @@ class LegacyMotionActor(MotionActor):
       amp,
       reference_dim=LEGACY_GOAL_DIM,
       input_normalization=input_normalization,
+      motion_anchor_ori_b=motion_anchor_ori_b,
     )

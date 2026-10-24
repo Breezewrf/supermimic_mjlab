@@ -72,12 +72,29 @@ def rotation_error_squared(a: Tensor, b: Tensor) -> Tensor:
   return angle.square()
 
 
+def motion_anchor_ori_b(
+  robot_anchor_quat: Tensor, motion_anchor_quat: Tensor
+) -> Tensor:
+  """Reference anchor in robot anchor frame, matching whole_body_tracking.
+
+  Flatten the first two rotation-matrix columns in row-major order:
+  [R00, R01, R10, R11, R20, R21]. G1 uses torso_link as its anchor.
+  """
+  rotation = quat_normalize(
+    quat_mul(quat_conjugate(robot_anchor_quat), motion_anchor_quat)
+  )
+  x_axis = quat_apply(rotation, rotation.new_tensor([1, 0, 0]))
+  y_axis = quat_apply(rotation, rotation.new_tensor([0, 1, 0]))
+  return torch.stack((x_axis, y_axis), dim=-1).flatten(-2)
+
+
 def observe(
   state: Tensor,
   previous_action: Tensor,
   default_q: Tensor,
   context: Tensor,
   reference_quat: Tensor | None = None,
+  anchor_orientation: Tensor | None = None,
 ) -> Tensor:
   gravity = state.new_tensor([0, 0, -1])
   relative = []
@@ -94,7 +111,8 @@ def observe(
       quat_inverse_apply(state[..., 3:7], state[..., 39:42]),
       quat_inverse_apply(state[..., 3:7], gravity),
       *relative,
-      # Keep previous actions last in both the 93- and 99-dimensional layouts.
+      *([] if anchor_orientation is None else [anchor_orientation]),
+      # Keep previous actions last in every observation layout.
       previous_action,
     ),
     dim=-1,

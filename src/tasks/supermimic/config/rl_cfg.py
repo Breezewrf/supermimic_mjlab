@@ -30,6 +30,7 @@ class OnlineConfig:
   clips: tuple[str, ...] = ()
   termination_mode: str = "learned"
   relative_orientation: bool = False
+  motion_anchor_ori_b: bool = False
   diagnostics_batch_size: int = 64
   compile: bool = True
   amp: str = "bf16"

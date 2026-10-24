@@ -6,14 +6,22 @@ import json
 import torch
 from torch import Tensor, nn
 
-from ..config.task_cfg import TRACKED_BODIES
-from ..mdp.state import quat_apply, quat_mul, quat_normalize, rotvec_to_quat
+from ..config.task_cfg import MOTION_ANCHOR_BODY, MOTION_ANCHOR_INDEX, TRACKED_BODIES
+from ..mdp.state import (
+  motion_anchor_ori_b,
+  observe,
+  quat_apply,
+  quat_mul,
+  quat_normalize,
+  rotvec_to_quat,
+)
 
 
 def robot_metadata() -> dict:
   import mujoco
   import numpy as np
   from mjlab.entity import Entity
+
   from ..config.robot_cfg import get_supermimic_robot_cfg
 
   cfg = get_supermimic_robot_cfg()
@@ -117,6 +125,12 @@ class G1Kinematics(nn.Module):
     self.body_names = tuple(body_names)
     self.joint_names = tuple(metadata["joint_names"])
     self.signature = metadata["signature"]
+    anchor = metadata["body_names"].index(MOTION_ANCHOR_BODY)
+    chain = []
+    while anchor > 0:
+      chain.append(anchor)
+      anchor = self.parents[anchor]
+    self.anchor_chain = tuple(reversed(chain))
     self.register_buffer(
       "selected",
       torch.tensor([metadata["body_names"].index(name) for name in body_names]),
@@ -131,6 +145,50 @@ class G1Kinematics(nn.Module):
       "joint_limits",
     ):
       self.register_buffer(name, metadata[name].detach().clone().float())
+
+  def anchor_quaternion(self, state: Tensor) -> Tensor:
+    """Differentiable torso orientation without computing unrelated link poses."""
+    quaternion = quat_normalize(state[..., 3:7])
+    for body in self.anchor_chain:
+      quaternion = quat_mul(quaternion, self.body_quat[body].expand_as(quaternion))
+      joint = self.body_joints[body]
+      if joint >= 0:
+        angle = state[..., 7 + joint] - self.joint_reference[joint]
+        quaternion = quat_mul(
+          quaternion,
+          rotvec_to_quat(angle[..., None] * self.joint_axis[joint]),
+        )
+    return quaternion
+
+  def observation(
+    self,
+    state: Tensor,
+    action: Tensor,
+    context: Tensor,
+    reference_quats: Tensor,
+    *,
+    relative_orientation: bool = False,
+    motion_anchor_orientation: bool = False,
+    bodies: dict[str, Tensor] | None = None,
+  ) -> Tensor:
+    anchor_orientation = None
+    if motion_anchor_orientation:
+      quaternion = (
+        self.anchor_quaternion(state)
+        if bodies is None
+        else bodies["body_quat_w"][..., MOTION_ANCHOR_INDEX, :]
+      )
+      anchor_orientation = motion_anchor_ori_b(
+        quaternion, reference_quats[..., MOTION_ANCHOR_INDEX, :]
+      )
+    return observe(
+      state,
+      action,
+      self.default_q,
+      context,
+      reference_quats[..., 0, :] if relative_orientation else None,
+      anchor_orientation,
+    )
 
   def forward(self, state: Tensor) -> dict[str, Tensor]:
     if state.shape[-1] != 71:

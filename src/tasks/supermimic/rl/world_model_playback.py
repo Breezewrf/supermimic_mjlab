@@ -4,7 +4,6 @@ import math
 
 import torch
 
-from ..mdp.state import observe
 from ..models.execution import run_mlp
 from ..models.world_model import state_errors
 
@@ -206,14 +205,13 @@ class WorldModelFuturePreview(WorldModelPlayback):
         )
       )
       state = self.model(state, action, self.context)
-      observation = observe(
+      observation = self.model.kinematics.observation(
         state,
         action,
-        self.actor.default_q,
         self.context,
-        future["body_quat_w"][:, step + 1, 0]
-        if self.actor.relative_orientation
-        else None,
+        future["body_quat_w"][:, step + 1],
+        relative_orientation=self.actor.relative_orientation,
+        motion_anchor_orientation=self.actor.motion_anchor_ori_b,
       )
       history = torch.cat((history[:, 1:], observation[:, None]), 1)
       states.append(state)
@@ -232,12 +230,13 @@ class WorldModelFuturePreview(WorldModelPlayback):
       motion = torch.tensor([clip], device=env.device, dtype=torch.long)
       frames = torch.tensor([frame], device=env.device, dtype=torch.long)
       reference = env.library.get_frame(motion, frames)
-      observation = observe(
+      observation = self.model.kinematics.observation(
         self.actual,
         self.previous_action,
-        self.actor.default_q,
         self.context,
-        reference["body_quat_w"][:, 0] if self.actor.relative_orientation else None,
+        reference["body_quat_w"],
+        relative_orientation=self.actor.relative_orientation,
+        motion_anchor_orientation=self.actor.motion_anchor_ori_b,
       )
       self.history = torch.cat((self.history[:, 1:], observation[:, None]), 1)
       # Only compare a forecast when the matching physical timestamp arrives.

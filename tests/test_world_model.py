@@ -216,6 +216,30 @@ class ReplayTrainingTests(unittest.TestCase):
     cls.addClassCleanup(folder.cleanup)
     cls.manifest, cls.snapshot, cls.names = make_replay(Path(folder.name), cls.metadata)
 
+  def test_replay_accepts_anchor_observations_and_rejects_mixed_widths(self):
+    with tempfile.TemporaryDirectory() as directory:
+      path = Path(directory) / "anchor_replay.pt"
+      for width in (99, 105):
+        saved = torch.load(self.snapshot, weights_only=True)
+        for name in (
+          "observation", "next_observation", "clean_observation", "next_clean_observation"
+        ):
+          value = saved["replay"]["data"][name]
+          extra = value.new_zeros(*value.shape[:-1], width - 93)
+          saved["replay"]["data"][name] = torch.cat(
+            (value[..., :64], extra, value[..., 64:]), -1
+          )
+        torch.save(saved, path)
+        corpus = ReplayCorpus([path], self.names)
+        batch = corpus.batch(corpus.indices(8, "train")[:2], 8)
+        self.assertEqual(batch["observation"].shape[-1], width)
+        with self.assertRaisesRegex(ValueError, "Replay schemas"):
+          ReplayCorpus([self.snapshot, path], self.names)
+        saved["replay"]["data"]["next_observation"] = value
+        torch.save(saved, path)
+        with self.assertRaisesRegex(ValueError, "next_observation"):
+          ReplayCorpus([path], self.names)
+
   def test_group_split_and_multiple_file_deduplication(self):
     corpus = ReplayCorpus([self.snapshot, self.snapshot], self.names)
     self.assertEqual(len(corpus.sources), 1)

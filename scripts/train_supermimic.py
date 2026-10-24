@@ -64,6 +64,7 @@ def evaluate_actor(actor, manifest, config, device, limit=None, max_envs=64):
         seed=config.seed,
         episode_length_s=1e9,
         relative_orientation=config.relative_orientation,
+        motion_anchor_ori_b=config.motion_anchor_ori_b,
       ),
       device=device,
     )
@@ -168,6 +169,12 @@ def main():
     "--relative-orientation",
     action=argparse.BooleanOptionalAction,
     default=None,
+  )
+  parser.add_argument(
+    "--motion-anchor-ori-b",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="Observe reference torso orientation in the robot torso frame (default: disabled)",
   )
   parser.add_argument(
     "--evaluation-limit",
@@ -312,6 +319,7 @@ def main():
           seed=config.seed,
           episode_length_s=config.episode_length_s,
           relative_orientation=config.relative_orientation,
+          motion_anchor_ori_b=config.motion_anchor_ori_b,
         ),
         device=args.device,
       )
