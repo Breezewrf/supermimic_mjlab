@@ -13,6 +13,21 @@ windows, and the Actor and Critic train through 32-step imagined rollouts.
 The current dataset contains 40 G1-retargeted LAFAN clips, approximately 2.45 hours
 of motion, at a control rate of 50 Hz.
 
+Full-scale training uses a single **NVIDIA RTX A6000 with 48 GB of GPU memory**;
+**15000 iterations take approximately 4 hours** with 4096 environments and FP32
+networks. GPUs with less memory can use fewer environments and smaller batches;
+see the [reduced-workload configuration](doc/training_and_playback_en.md#reduced-training-workload), but performance not verified.
+
+<p align="center">
+  <img src="doc/assets/evaluation.png" alt="Evaluation result">
+</p>
+
+The best model achieves **40/40 successful motions (100%)**, **100% mean
+completion**, and **0.8528 normalized return** in standard fixed-start, full-clip
+evaluation over all 40 LAFAN motions. See [ablation results and released
+checkpoint](#ablation-results-and-released-checkpoint) for configuration comparisons
+and checkpoint usage.
+
 The robot uses the vendored [RoboJuDo-Plus G1 assets](src/assets/robots/g1/README.md),
 loading `g1_29dof_rev_1_0.xml` with collision meshes, shoulder cylinders, and four
 5 mm radius spheres per foot. Training retains the mjlab PD control setup and
@@ -101,41 +116,48 @@ conversion; if these files already exist, this step can be skipped. See the
 
 ## Online training
 
-### Reproduce the preview checkpoint (iteration 10000)
+`motion_anchor_ori_b` is an optional ablation, disabled by default; enable it with
+`--motion-anchor-ori-b` in the training command.
 
-The current preview uses the following pair, both exported at **iteration 10000**
-from `outputs/supermimic/lafan_2680_fp32/last.pt`:
+### Ablation results and released checkpoint
+
+The ablation uses the `full_body_268` reference, FP32 networks, 4096 environments,
+and a complete deterministic evaluation over all 40 LAFAN motions. The table reports
+the mean at iteration 15000 across the completed reruns available for each setting:
+
+| Setting | Successful motions | Normalized return |
+| --- | ---: | ---: |
+| Actor/Critic input normalization | 38–40/40 | 0.6016 |
+| + torso-frame motion orientation anchor | 38–40/40 | 0.8130 |
+| + world-model normalization | 40/40 | 0.8504 |
+| + corrected 15000-step cosine LR schedule | **40/40** | **0.8526** |
+
+The orientation anchor produces the largest policy improvement, while world-model
+normalization is essential for stable training. Gains are concentrated in walking
+clips, with trade-offs on some get-up, jump, and run clips.
 
 | File | Contents |
 | --- | --- |
-| `checkpoints/preview/policy_10000.pt` | Actor weights for real-physics playback; `full_body_268` reference schema |
-| `checkpoints/preview/world_model_10000.pt` | Matching learned world model for prediction overlays |
+| `checkpoints/best/policy_best.pt` | Best Actor weights for real-physics playback; iteration 15000 |
+| `checkpoints/best/world_model_best.pt` | Matching world model for prediction overlays |
 
-**Training is ongoing. The current preview is the iteration-10000 snapshot.**
-Recorded evaluation on all 40 LAFAN motions:
+The selected policy achieved **40/40 successful motions**, **1.0 mean completion**,
+and **0.8528 normalized return** in the full standard evaluation.
 
-| Metric | Iteration 10000 |
-| --- | --- |
-| Normalized return | 0.498 |
-| Successful motions | 35/40 (87.5%) |
-| Failed motions | 5/40 |
-| Mean completion | 94.0% |
-| Parallel evaluation environments | 40 |
-| Evaluation time, including initialization | 125.5 s |
+Training uses a single **NVIDIA RTX A6000 with 48 GB of GPU memory**. With the
+4096-environment FP32 configuration below, **15000 training iterations take
+approximately 4 hours**.
 
-**Observed training GPU memory usage: approximately 30 GB** for the 4096-environment
-FP32 configuration below. Actor and Critic RunningNorm were **disabled** for this
-preview. The two files under `checkpoints/preview/` are inference exports; training
-resume requires the full `last.pt`.
-
-Original training configuration, run from the repository root:
+Run the selected training configuration from the repository root:
 
 ```bash
 python scripts/train_supermimic.py \
   --device cuda:0 \
   --reference-dim 2680 \
+  --world-prediction state_delta \
+  --actor-input-normalization --critic-input-normalization \
+  --world-model-normalization --motion-anchor-ori-b \
   --amp none --no-compile \
-  --no-actor-input-normalization --no-critic-input-normalization \
   --seed 0 \
   --num-envs 4096 --capacity 1000 \
   --warmup-steps 32 --wm-only-iters 0 \
@@ -147,31 +169,19 @@ python scripts/train_supermimic.py \
   --world-dims 2048 2048 2048 \
   --actor-dims 2048 1024 512 256 \
   --critic-dims 256 128 \
-  --iterations 32000 \
-  --eval-interval 2000 --checkpoint-interval 2000 \
-  --output outputs/supermimic/lafan_2680_fp32
+  --iterations 15000 \
+  --eval-interval 1000 --checkpoint-interval 1000 \
+  --output outputs/supermimic/run
 ```
 
-To reproduce the preview training length, set `--iterations 10000`. Export both
-components from the same iteration-10000 full checkpoint; `last.pt` advances if
-training continues, so exporting the final 32000-iteration run would produce newer weights:
-
-```bash
-python scripts/export_supermimic_policy.py \
-  --checkpoint outputs/supermimic/lafan_2680_fp32/last.pt \
-  --output checkpoints/preview/policy_10000.pt
-
-python scripts/export_supermimic_policy.py \
-  --component world-model \
-  --checkpoint outputs/supermimic/lafan_2680_fp32/last.pt \
-  --output checkpoints/preview/world_model_10000.pt
-```
+The trainer writes a paired `policy_best.pt` and `world_model_best.pt`, selected by
+successful motion count first and normalized return second.
 
 Play selected motions in real physics:
 
 ```bash
 python scripts/play_supermimic.py \
-  --device cuda:0 --checkpoint checkpoints/preview/policy_10000.pt \
+  --device cuda:0 --checkpoint checkpoints/best/policy_best.pt \
   --clips walk1_subject1 run1_subject2 --loop
 ```
 
@@ -179,8 +189,8 @@ Add the matching world model to preview the policy 32 control steps (0.64 s) ahe
 
 ```bash
 python scripts/play_supermimic.py \
-  --device cuda:0 --checkpoint checkpoints/preview/policy_10000.pt \
-  --world-model checkpoints/preview/world_model_10000.pt \
+  --device cuda:0 --checkpoint checkpoints/best/policy_best.pt \
+  --world-model checkpoints/best/world_model_best.pt \
   --world-model-mode future --world-model-horizon 32 \
   --clips walk1_subject1 run1_subject2 --loop
 ```
@@ -191,8 +201,8 @@ for playback with failure resets. For standard headless evaluation of all motion
 
 ```bash
 python scripts/evaluate_supermimic.py \
-  --device cuda:0 --checkpoint checkpoints/preview/policy_10000.pt \
-  --output outputs/supermimic/evaluation_policy_10000.json
+  --device cuda:0 --checkpoint checkpoints/best/policy_best.pt \
+  --output outputs/supermimic/evaluation_best.json
 ```
 
 Domain randomization, observation noise, and return-based reset sampling are enabled
@@ -214,7 +224,7 @@ the total number of iterations, including those already completed:
 
 ```bash
 python scripts/train_supermimic.py \
-  --device cuda:0 --resume outputs/supermimic/lafan_2680_fp32/last.pt \
+  --device cuda:0 --resume outputs/supermimic/run/last.pt \
   --iterations 32000
 ```
 

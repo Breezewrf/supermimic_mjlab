@@ -20,9 +20,11 @@ from src.tasks.supermimic.mdp.state import quat_apply, quat_mul, rotvec_to_quat
 from src.tasks.supermimic.models.kinematics import G1Kinematics, robot_metadata
 from src.tasks.supermimic.models.world_model import (
   WorldModel,
+  apply_state_delta,
   correction_targets,
   integrate,
   normalized_state_error,
+  state_delta_targets,
 )
 from src.tasks.supermimic.rl.world_model_training import rollout, world_model_loss
 from tests.supermimic_fixtures import make_replay
@@ -103,9 +105,38 @@ class DynamicsTests(unittest.TestCase):
   def setUpClass(cls):
     cls.metadata = robot_metadata()
 
-  def test_zero_head_is_baseline_and_residual_targets_invert(self):
+  def test_zero_head_preserves_state_and_complete_deltas_invert(self):
     state = poses()
     model = WorldModel(self.metadata, (16,))
+    action, context = torch.randn(3, 29), torch.randn(3, 33)
+    torch.testing.assert_close(model(state, action, context), state)
+    delta = torch.randn(3, 70) * 0.02
+    next_state = apply_state_delta(state, delta)
+    torch.testing.assert_close(
+      state_delta_targets(state, next_state), delta, atol=2e-7, rtol=1e-5
+    )
+    # Known nonzero velocities must not be added to the learned displacement.
+    with torch.no_grad():
+      model.dynamics[-1].bias.copy_(delta[0])
+    torch.testing.assert_close(
+      model(state, action, context), apply_state_delta(state, delta[0].expand(3, -1))
+    )
+
+  def test_normalization_fits_complete_increments_instead_of_velocity_residuals(self):
+    state = poses(128)
+    target = integrate(state)
+    model = WorldModel(self.metadata, (16,))
+    model.fit_normalization(state, torch.zeros(128, 29), torch.zeros(128, 33), target)
+    targets = state_delta_targets(state, target)
+    floor = targets.new_tensor([1e-3] * 35 + [1e-2] * 35)
+    torch.testing.assert_close(
+      model.correction_scale, targets.std(0, unbiased=False).maximum(floor)
+    )
+    self.assertTrue((model.correction_scale[6:35] > 1e-3).any())
+
+  def test_legacy_zero_head_is_baseline_and_residual_targets_invert(self):
+    state = poses()
+    model = WorldModel(self.metadata, (16,), world_prediction="velocity_residual")
     action, context = torch.randn(3, 29), torch.randn(3, 33)
     torch.testing.assert_close(model(state, action, context), integrate(state))
     correction = torch.randn(3, 70) * 0.01
@@ -184,6 +215,30 @@ class ReplayTrainingTests(unittest.TestCase):
     folder = tempfile.TemporaryDirectory()
     cls.addClassCleanup(folder.cleanup)
     cls.manifest, cls.snapshot, cls.names = make_replay(Path(folder.name), cls.metadata)
+
+  def test_replay_accepts_anchor_observations_and_rejects_mixed_widths(self):
+    with tempfile.TemporaryDirectory() as directory:
+      path = Path(directory) / "anchor_replay.pt"
+      for width in (99, 105):
+        saved = torch.load(self.snapshot, weights_only=True)
+        for name in (
+          "observation", "next_observation", "clean_observation", "next_clean_observation"
+        ):
+          value = saved["replay"]["data"][name]
+          extra = value.new_zeros(*value.shape[:-1], width - 93)
+          saved["replay"]["data"][name] = torch.cat(
+            (value[..., :64], extra, value[..., 64:]), -1
+          )
+        torch.save(saved, path)
+        corpus = ReplayCorpus([path], self.names)
+        batch = corpus.batch(corpus.indices(8, "train")[:2], 8)
+        self.assertEqual(batch["observation"].shape[-1], width)
+        with self.assertRaisesRegex(ValueError, "Replay schemas"):
+          ReplayCorpus([self.snapshot, path], self.names)
+        saved["replay"]["data"]["next_observation"] = value
+        torch.save(saved, path)
+        with self.assertRaisesRegex(ValueError, "next_observation"):
+          ReplayCorpus([path], self.names)
 
   def test_group_split_and_multiple_file_deduplication(self):
     corpus = ReplayCorpus([self.snapshot, self.snapshot], self.names)
@@ -313,6 +368,12 @@ class ReplayTrainingTests(unittest.TestCase):
       replay.gather_windows(indices, 8)
 
   def test_checkpoint_resume_matches_uninterrupted_training(self):
+    self.check_checkpoint_resume()
+
+  def test_normalized_checkpoint_resume_matches_uninterrupted_training(self):
+    self.check_checkpoint_resume(normalize=True)
+
+  def check_checkpoint_resume(self, normalize=False):
     with tempfile.TemporaryDirectory() as folder:
       root = Path(folder)
       common = [
@@ -357,6 +418,8 @@ class ReplayTrainingTests(unittest.TestCase):
         ]
         if resume:
           command += ["--resume", str(root / output / "last.pt")]
+        elif normalize:
+          command += ["--world-model-normalization"]
         completed = subprocess.run(
           command,
           cwd=ROOT,
@@ -369,6 +432,10 @@ class ReplayTrainingTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
       whole = torch.load(root / "whole/last.pt", weights_only=True)
       resumed = torch.load(root / "resumed/last.pt", weights_only=True)
+      self.assertEqual(whole["config"]["world_prediction"], "state_delta")
+      self.assertEqual(resumed["config"]["world_prediction"], "state_delta")
+      self.assertEqual(whole["config"]["world_model_normalization"], normalize)
+      self.assertEqual(resumed["config"]["world_model_normalization"], normalize)
       for key in whole["model"]:
         torch.testing.assert_close(
           whole["model"][key], resumed["model"][key], atol=0, rtol=0

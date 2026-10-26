@@ -82,9 +82,13 @@ class ExecutionTests(unittest.TestCase):
       torch.load(snapshot, weights_only=True)["replay"]
     )
 
-  def models(self, mode="analytic", relative=True, device="cpu", amp="none"):
+  def models(
+    self, mode="analytic", relative=True, device="cpu", amp="none", world_norm=False
+  ):
     actor = MotionActor(self.metadata["default_q"], (16,), relative, amp).to(device)
-    world = WorldModel(self.metadata, (16,), mode, relative, amp).to(device)
+    world = WorldModel(
+      self.metadata, (16,), mode, relative, amp, world_model_normalization=world_norm
+    ).to(device)
     critic = MotionCritic(self.metadata["default_q"], (16,), amp).to(device)
     torch.nn.init.normal_(world.dynamics[-1].weight, std=1e-4)
     return actor, world, critic
@@ -199,7 +203,19 @@ class ExecutionTests(unittest.TestCase):
           torch.testing.assert_close(parameter.grad, gradient, atol=2e-6, rtol=2e-4)
 
   def test_fullgraph_aot_kernels_preserve_outputs_gradients_and_checkpoint_keys(self):
-    actor, world, critic = self.models()
+    actor, world, critic = self.models(world_norm=True)
+    batch = self.replay.sample_windows(4, 8)
+    world.fit_normalization(
+      **{
+        name: batch[name][batch["mask"]]
+        for name in ("state", "action", "context", "next_state")
+      }
+    )
+    moments = {
+      key: value.clone()
+      for key, value in world.state_dict().items()
+      if key.startswith(("in_norm.", "out_norm."))
+    }
     starts = self.starts(actor)
     keys = list(actor.state_dict())
     compiled = TrainingKernels(actor, world, critic, enabled=True, backend="aot_eager")
@@ -260,16 +276,32 @@ class ExecutionTests(unittest.TestCase):
     )
     value_loss.backward()
     self.assertTrue(any(p.grad is not None for p in critic.parameters()))
+    for key, value in moments.items():
+      torch.testing.assert_close(world.state_dict()[key], value, rtol=0, atol=0)
+    # Compiled rollouts must read statistics updated between collection rounds.
+    world.update_normalization(
+      **{
+        name: batch[name][batch["mask"]]
+        for name in ("state", "action", "context", "next_state")
+      }
+    )
+    with torch.no_grad():
+      expected = rollout(world, batch, self.library, diagnostics=False)
+      actual = rollout(
+        world, batch, self.library, diagnostics=False, dynamics=compiled.world_rollout
+      )
+    torch.testing.assert_close(actual["next_state"], expected["next_state"])
 
   def test_execution_defaults_and_amp_validation(self):
     self.assertTrue(OnlineConfig().compile)
+    self.assertFalse(OnlineConfig().world_model_normalization)
     self.assertEqual(OnlineConfig().amp, "bf16")
     with self.assertRaisesRegex(ValueError, "amp"):
       OnlineConfig(amp="fp16")
 
   @unittest.skipUnless(torch.cuda.is_available(), "CUDA unavailable")
   def test_cuda_bf16_mlp_keeps_physics_and_gradients_fp32(self):
-    actor, world, _ = self.models(device="cuda", amp="bf16")
+    actor, world, _ = self.models(device="cuda", amp="bf16", world_norm=True)
     if not torch.cuda.is_bf16_supported():
       self.skipTest("GPU does not support BF16")
     state = torch.zeros(2, 71, device="cuda")
@@ -301,7 +333,7 @@ class ExecutionTests(unittest.TestCase):
   def test_cuda_inductor_bf16_training_kernels(self):
     if not torch.cuda.is_bf16_supported():
       self.skipTest("GPU does not support BF16")
-    actor, world, critic = self.models(device="cuda", amp="bf16")
+    actor, world, critic = self.models(device="cuda", amp="bf16", world_norm=True)
     library = copy.copy(self.library)
     library.device = "cuda"
     library.lengths = library.lengths.cuda()

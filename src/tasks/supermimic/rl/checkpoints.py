@@ -84,6 +84,9 @@ def training_config(saved: dict) -> dict:
     "reference_dim": dimensions[schema],
     "actor_input_normalization": False,
     "critic_input_normalization": False,
+    "world_prediction": "velocity_residual",
+    "world_model_normalization": False,
+    "motion_anchor_ori_b": False,
     **saved["config"],
   }
   if config["reference_dim"] != dimensions[schema]:

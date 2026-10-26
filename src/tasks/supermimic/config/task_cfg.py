@@ -22,6 +22,8 @@ TRACKED_BODIES = (
   "right_elbow_link",
   "right_wrist_yaw_link",
 )
+MOTION_ANCHOR_BODY = "torso_link"
+MOTION_ANCHOR_INDEX = TRACKED_BODIES.index(MOTION_ANCHOR_BODY)
 STATE_DIM = 71
 OBS_DIM = 93
 ACTION_DIM = 29
@@ -43,12 +45,13 @@ class FoundationConfig:
   sampling: str = "uniform"
   action_clip: float | None = None
   relative_orientation: bool = False
+  motion_anchor_ori_b: bool = False
   reset_noise: bool = False
   terminate_on_failure: bool = True
 
   @property
   def observation_dim(self) -> int:
-    return OBS_DIM + 6 * self.relative_orientation
+    return OBS_DIM + 6 * (self.relative_orientation + self.motion_anchor_ori_b)
 
   def __post_init__(self):
     if self.num_envs < 1 or self.history_length < 1 or self.future_length < 1:

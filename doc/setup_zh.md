@@ -61,7 +61,7 @@ PYTHON
 `src/assets/motions/LAFAN1_Retargeting_Dataset/`，按[数据转换说明](lafan_conversion_zh.md)
 生成 NPZ 动作文件和 manifest。
 
-[README](../README_zh.md#在线训练) 提供预览模型的训练和播放入口，缩小规模、论文规模、
+[README](../README_zh.md#在线训练) 提供发布模型的训练配置和播放入口，缩小规模、论文规模、
 checkpoint 和评估说明见[操作指南](training_and_playback_zh.md)，
 回归检查见其中的[测试说明](training_and_playback_zh.md#测试)。测试在临时目录生成小型动作与 Replay；
 真实数据集检查还需要准备转换后的 LAFAN 数据集。

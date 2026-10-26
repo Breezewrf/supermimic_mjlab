@@ -71,7 +71,7 @@ retargeted G1 LAFAN CSV files under
 [data conversion instructions](lafan_conversion_zh.md). Conversion creates the NPZ
 clips and manifest used by training.
 
-See the [README](../README.md#online-training) for preview training and playback.
+See the [README](../README.md#online-training) for the released checkpoint, its training configuration and playback.
 Reduced and paper-scale workloads, checkpoints and evaluation are in the
 [operational guide](training_and_playback_en.md). See its [tests section](training_and_playback_en.md#tests)
 for regression checks. Tests generate small motion and replay fixtures in temporary

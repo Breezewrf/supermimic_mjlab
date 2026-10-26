@@ -5,7 +5,7 @@ from contextlib import contextmanager
 import torch
 from torch import Tensor
 
-from ..mdp.state import add_sensor_noise, observe
+from ..mdp.state import add_sensor_noise
 
 
 @contextmanager
@@ -48,15 +48,16 @@ def critic_loss(values: Tensor, targets: Tensor, mask: Tensor) -> Tensor:
   return error.double().square().sum(dim=1).mean().to(values.dtype)
 
 
-def imagination_step(actor, world, state, history, goal, context, reference_quat):
+def imagination_step(actor, world, state, history, goal, context, reference_quats):
   action = actor.forward_features(history, goal)
   next_state = world(state, action, context)
-  observation = observe(
+  observation = world.kinematics.observation(
     next_state,
     action,
-    actor.default_q,
     context,
-    reference_quat if world.relative_orientation else None,
+    reference_quats,
+    relative_orientation=actor.relative_orientation,
+    motion_anchor_orientation=actor.motion_anchor_ori_b,
   )
   return next_state, action, observation
 
@@ -111,7 +112,7 @@ def imagine(
       history,
       goals[:, t],
       context,
-      future["body_quat_w"][:, t + 1, 0],
+      future["body_quat_w"][:, t + 1],
     )
     if kernels is None:
       next_state, action, observation = imagination_step(actor, world, *step_args)

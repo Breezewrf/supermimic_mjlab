@@ -12,6 +12,18 @@ Actor 和 Critic。
 
 当前数据集包含 40 段 G1 重定向 LAFAN 动作，约 2.45 小时，控制频率为 50 Hz。
 
+完整规模训练使用单张 **NVIDIA RTX A6000（48 GB 显存）**，在 4096 环境、FP32
+配置下训练 **15000 轮约需 4 小时**。显存较小的 GPU 可通过减少环境数和 batch size
+缩小训练规模，具体配置见[训练操作指南](doc/training_and_playback_zh.md#缩小训练规模)，性能未经验证。
+
+<p align="center">
+  <img src="doc/assets/evaluation.png" alt="Evaluation result">
+</p>
+
+最佳模型在全部 40 段 LAFAN 动作的固定起点、完整动作标准评估中取得 **40/40
+成功动作（100%）**、**100% 平均完成率**和 **0.8528 归一化回报**。
+配置对比与权重使用方法见[消融结果与发布模型](#消融结果与发布模型)。
+
 机器人使用本地复制的 [RoboJuDo-Plus G1 资源](src/assets/robots/g1/README.md)，
 加载 `g1_29dof_rev_1_0.xml`，碰撞体包含网格、肩部圆柱体及每脚 4 个半径 5 mm 的
 球体。训练沿用 mjlab 的 PD 控制配置，关闭自碰撞。
@@ -94,40 +106,45 @@ python scripts/data/convert_lafan_to_npz.py \
 
 ## 在线训练
 
-### 复现当前预览模型（第 10000 轮）
+`motion_anchor_ori_b` 是可选消融变量，默认关闭，可在训练命令中添加
+`--motion-anchor-ori-b` 开启。
 
-当前预览使用以下配套权重，均从
-`outputs/supermimic/lafan_2680_fp32/last.pt` 的**第 10000 轮**导出：
+### 消融结果与发布模型
+
+消融实验统一使用 `full_body_268` 参考特征、FP32 网络、4096 个环境，并在全部 40
+段 LAFAN 动作上进行完整确定性评估。下表是各配置已完成重跑在第 15000 轮的均值：
+
+| 配置 | 成功动作 | 归一化回报 |
+| --- | ---: | ---: |
+| Actor／Critic 输入归一化 | 38-40/40 | 0.6016 |
+| + torso 坐标系动作朝向 anchor | 38–40/40 | 0.8130 |
+| + 世界模型归一化 | 40/40 | 0.8504 |
+| + 修正后的 15000 轮余弦学习率 | **40/40** | **0.8526** |
+
+朝向 anchor 带来了最大的策略性能提升，世界模型归一化则是保证其稳定训练的关键；
+收益主要集中在 walk 动作，部分 get-up、jump 和 run 动作仍有取舍。
 
 | 文件 | 内容 |
 | --- | --- |
-| `checkpoints/preview/policy_10000.pt` | 真实物理播放使用的 Actor 权重，参考 schema 为 `full_body_268` |
-| `checkpoints/preview/world_model_10000.pt` | 同轮世界模型，用于叠加预测姿态 |
+| `checkpoints/best/policy_best.pt` | 第 15000 轮最佳 Actor 权重，用于真实物理播放 |
+| `checkpoints/best/world_model_best.pt` | 同轮配套世界模型，用于叠加预测姿态 |
 
-**模型仍在训练中，目前提供的是第 10000 轮的 preview 版本。** 全部 40 段 LAFAN
-动作的评估记录：
+选中策略在完整标准评估中取得 **40/40 成功动作**、**1.0 平均完成率**和
+**0.8528 归一化回报**。
 
-| 指标 | 第 10000 轮 |
-| --- | --- |
-| 归一化回报 | 0.498 |
-| 成功动作 | 35/40（87.5%） |
-| 失败动作 | 5/40 |
-| 平均完成率 | 94.0% |
-| 并行评估环境 | 40 |
-| 评估耗时（含初始化） | 125.5 秒 |
+训练硬件为单张 **NVIDIA RTX A6000（48 GB 显存）**。使用下述 4096 环境、FP32
+配置，完成 **15000 轮训练约需 4 小时**。
 
-**下述 4096 环境、FP32 配置的训练显存占用约 30 GB。** 此预览权重未启用
-Actor／Critic RunningNorm。`checkpoints/preview/` 中的两个文件均为推理导出文件，
-续训需要完整的 `last.pt`。
-
-在仓库根目录运行以下训练配置：
+在仓库根目录运行以下配置可复现所选训练设置：
 
 ```bash
 python scripts/train_supermimic.py \
   --device cuda:0 \
   --reference-dim 2680 \
+  --world-prediction state_delta \
+  --actor-input-normalization --critic-input-normalization \
+  --world-model-normalization --motion-anchor-ori-b \
   --amp none --no-compile \
-  --no-actor-input-normalization --no-critic-input-normalization \
   --seed 0 \
   --num-envs 4096 --capacity 1000 \
   --warmup-steps 32 --wm-only-iters 0 \
@@ -139,31 +156,19 @@ python scripts/train_supermimic.py \
   --world-dims 2048 2048 2048 \
   --actor-dims 2048 1024 512 256 \
   --critic-dims 256 128 \
-  --iterations 32000 \
-  --eval-interval 2000 --checkpoint-interval 2000 \
-  --output outputs/supermimic/lafan_2680_fp32
+  --iterations 15000 \
+  --eval-interval 1000 --checkpoint-interval 1000 \
+  --output outputs/supermimic/run
 ```
 
-若只复现预览的训练长度，将总轮数改为 `--iterations 10000`。从同一个第 10000 轮
-完整 checkpoint 导出两份权重；继续训练时 `last.pt` 会更新，不能将最终 32000 轮的
-权重误标为 10000 轮：
-
-```bash
-python scripts/export_supermimic_policy.py \
-  --checkpoint outputs/supermimic/lafan_2680_fp32/last.pt \
-  --output checkpoints/preview/policy_10000.pt
-
-python scripts/export_supermimic_policy.py \
-  --component world-model \
-  --checkpoint outputs/supermimic/lafan_2680_fp32/last.pt \
-  --output checkpoints/preview/world_model_10000.pt
-```
+训练器按照成功动作数优先、归一化回报次优的规则，配套输出 `policy_best.pt` 和
+`world_model_best.pt`。
 
 在真实物理中播放指定动作：
 
 ```bash
 python scripts/play_supermimic.py \
-  --device cuda:0 --checkpoint checkpoints/preview/policy_10000.pt \
+  --device cuda:0 --checkpoint checkpoints/best/policy_best.pt \
   --clips walk1_subject1 run1_subject2 --loop
 ```
 
@@ -171,8 +176,8 @@ python scripts/play_supermimic.py \
 
 ```bash
 python scripts/play_supermimic.py \
-  --device cuda:0 --checkpoint checkpoints/preview/policy_10000.pt \
-  --world-model checkpoints/preview/world_model_10000.pt \
+  --device cuda:0 --checkpoint checkpoints/best/policy_best.pt \
+  --world-model checkpoints/best/world_model_best.pt \
   --world-model-mode future --world-model-horizon 32 \
   --clips walk1_subject1 run1_subject2 --loop
 ```
@@ -183,8 +188,8 @@ python scripts/play_supermimic.py \
 
 ```bash
 python scripts/evaluate_supermimic.py \
-  --device cuda:0 --checkpoint checkpoints/preview/policy_10000.pt \
-  --output outputs/supermimic/evaluation_policy_10000.json
+  --device cuda:0 --checkpoint checkpoints/best/policy_best.pt \
+  --output outputs/supermimic/evaluation_best.json
 ```
 
 训练默认启用域随机化、观测噪声和按回报采样的重置；不指定 `--clips` 时使用全部
@@ -201,7 +206,7 @@ checkpoint 格式和查看器操作见[操作指南](doc/training_and_playback_z
 
 ```bash
 python scripts/train_supermimic.py \
-  --device cuda:0 --resume outputs/supermimic/lafan_2680_fp32/last.pt \
+  --device cuda:0 --resume outputs/supermimic/run/last.pt \
   --iterations 32000
 ```
 

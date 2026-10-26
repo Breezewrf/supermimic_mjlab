@@ -66,6 +66,15 @@ def make_starts(library, default_q, count=2, *, frame_id=0):
 
 
 class OnlineConfigTests(unittest.TestCase):
+  def test_world_prediction_defaults_to_deltas_and_validates_mode(self):
+    self.assertEqual(OnlineConfig().world_prediction, "state_delta")
+    self.assertEqual(
+      OnlineConfig(world_prediction="velocity_residual").world_prediction,
+      "velocity_residual",
+    )
+    with self.assertRaisesRegex(ValueError, "world_prediction"):
+      OnlineConfig(world_prediction="unknown")
+
   def test_reference_dimension_requires_a_supported_layout(self):
     for width in (730, 2680):
       self.assertEqual(OnlineConfig(reference_dim=width).reference_dim, width)
@@ -480,11 +489,53 @@ class OnlineIntegrationTests(unittest.TestCase):
   def tearDownClass(cls):
     cls.env.close()
 
-  def trainer(self, config=None):
+  def trainer(self, config=None, *, total_iterations=1000):
     self.env.reset()
-    trainer = OnlineTrainer(self.env, self.metadata, config or self.config)
+    trainer = OnlineTrainer(
+      self.env, self.metadata, config or self.config, total_iterations=total_iterations
+    )
     trainer.bootstrap()
     return trainer
+
+  def test_cosine_decay_uses_requested_total_for_all_optimizers(self):
+    for total in (1, 3, 15_000):
+      with self.subTest(total_iterations=total):
+        trainer = self.trainer(total_iterations=total)
+        checkpoints = [(0, 1.0)]
+        if total == 3:
+          checkpoints.append((1, 0.515))
+        if total > 1:
+          checkpoints += [(total - 1, 0.03), (total, 0.03)]
+        for iteration, multiplier in checkpoints:
+          trainer.iteration = iteration
+          record = trainer.train_iteration()
+          expected = self.config.learning_rate * multiplier
+          self.assertAlmostEqual(record["learning_rate"], expected)
+          for optimizer in (
+            trainer.world_optimizer,
+            trainer.actor_optimizer,
+            trainer.critic_optimizer,
+          ):
+            for group in optimizer.param_groups:
+              self.assertAlmostEqual(group["lr"], expected)
+
+  def test_cosine_decay_resumes_at_saved_iteration_and_allows_extension(self):
+    trainer = self.trainer(total_iterations=5)
+    trainer.train_iteration()
+    trainer.train_iteration()
+    saved = copy.deepcopy(trainer.state_dict())
+    self.assertEqual(saved["total_iterations"], 5)
+    expected = trainer.train_iteration()["learning_rate"]
+    resumed = OnlineTrainer(self.env, self.metadata, self.config, total_iterations=5)
+    resumed.load_state_dict(saved)
+    self.assertAlmostEqual(resumed.train_iteration()["learning_rate"], expected)
+    # Historical checkpoints have no schedule horizon; the current total wins.
+    del saved["total_iterations"]
+    extended = OnlineTrainer(self.env, self.metadata, self.config, total_iterations=9)
+    extended.load_state_dict(saved)
+    self.assertEqual(extended.iteration, 2)
+    self.assertEqual(extended.total_iterations, 9)
+    self.assertGreater(extended.train_iteration()["learning_rate"], expected)
 
   def test_wm_only_warmup_preserves_policy_and_resumes_at_phase_boundary(self):
     config = replace(self.config, wm_only_iters=3)
@@ -588,7 +639,13 @@ class OnlineIntegrationTests(unittest.TestCase):
         self.assertEqual(len(episode[mask].unique()), 1)
 
   def test_full_body_training_resumes_historical_checkpoint(self):
-    config = replace(self.config, reference_dim=2680, amp="none", compile=False)
+    config = replace(
+      self.config,
+      reference_dim=2680,
+      amp="none",
+      compile=False,
+      world_prediction="velocity_residual",
+    )
     trainer = self.trainer(config)
     trainer.train_iteration()
     saved = copy.deepcopy(trainer.state_dict())
@@ -603,10 +660,13 @@ class OnlineIntegrationTests(unittest.TestCase):
       "wm_only_iters",
       "actor_input_normalization",
       "critic_input_normalization",
+      "world_prediction",
+      "world_model_normalization",
     ):
       del saved["config"][key]
     resumed = OnlineTrainer(self.env, self.metadata, config)
     resumed.load_state_dict(saved)
+    self.assertEqual(resumed.world.world_prediction, "velocity_residual")
     for name in ("actor", "critic", "world"):
       for key, value in getattr(trainer, name).state_dict().items():
         torch.testing.assert_close(getattr(resumed, name).state_dict()[key], value)
@@ -642,6 +702,35 @@ class OnlineIntegrationTests(unittest.TestCase):
         for norm, saved in zip(norms, before):
           for key, value in norm.state_dict().items():
             torch.testing.assert_close(value, saved[key], rtol=0, atol=0)
+
+  def test_world_statistics_count_real_samples_once_and_survive_resume(self):
+    config = replace(
+      self.config, world_model_normalization=True, compile=False, amp="none"
+    )
+    trainer = self.trainer(config)
+    norms = (trainer.world.in_norm, trainer.world.out_norm)
+    for norm in norms:
+      self.assertEqual(int(norm.count), trainer.environment_steps)
+    before = [
+      {key: value.clone() for key, value in norm.state_dict().items()} for norm in norms
+    ]
+    trainer.update_world()
+    trainer.update_policy()
+    trainer.diagnostics()
+    for norm, saved in zip(norms, before):
+      for key, value in norm.state_dict().items():
+        torch.testing.assert_close(value, saved[key], rtol=0, atol=0)
+    trainer.collect(2)
+    for norm in norms:
+      self.assertEqual(int(norm.count), config.num_envs * (config.warmup_steps + 2))
+    saved = copy.deepcopy(trainer.state_dict())
+    resumed = OnlineTrainer(self.env, self.metadata, config)
+    resumed.load_state_dict(saved)
+    for name in ("in_norm", "out_norm"):
+      for key, value in getattr(trainer.world, name).state_dict().items():
+        torch.testing.assert_close(
+          getattr(resumed.world, name).state_dict()[key], value, rtol=0, atol=0
+        )
 
   def test_critic_failure_captures_reproducible_minibatch_without_stepping(self):
     config = replace(self.config, reference_dim=2680, amp="none", compile=False)
@@ -747,6 +836,7 @@ class OnlineCliTests(unittest.TestCase):
         "--critic-minibatches",
         "1",
         "--relative-orientation",
+        "--motion-anchor-ori-b",
         "--termination-mode",
         "analytic",
         "--diagnostics-batch-size",
@@ -763,8 +853,19 @@ class OnlineCliTests(unittest.TestCase):
         "2",
       ]
       has_wandb = importlib.util.find_spec("wandb") is not None
+      prediction = (
+        "velocity_residual"
+        if reference_dim == 2680 and not normalize
+        else "state_delta"
+      )
+      if prediction == "velocity_residual":
+        common += ["--world-prediction", prediction]
       if normalize:
-        common += ["--actor-input-normalization", "--critic-input-normalization"]
+        common += [
+          "--actor-input-normalization",
+          "--critic-input-normalization",
+          "--world-model-normalization",
+        ]
       if has_wandb:
         common += ["--wandb", "--wandb-mode", "offline"]
       env = os.environ | {
@@ -777,9 +878,13 @@ class OnlineCliTests(unittest.TestCase):
       for iteration in (1, 2):
         command = common + ["--iterations", str(iteration)]
         if iteration == 2:
+          if prediction == "velocity_residual":
+            offset = command.index("--world-prediction")
+            del command[offset : offset + 2]
           if normalize:
             command.remove("--actor-input-normalization")
             command.remove("--critic-input-normalization")
+            command.remove("--world-model-normalization")
           # Resume infers either layout without an explicit dimension argument.
           offset = command.index("--reference-dim")
           del command[offset : offset + 2]
@@ -794,6 +899,8 @@ class OnlineCliTests(unittest.TestCase):
               "compile",
               "actor_input_normalization",
               "critic_input_normalization",
+              "world_prediction",
+              "world_model_normalization",
             ):
               del historical["config"][key]
             torch.save(historical, output / "last.pt")
@@ -817,12 +924,31 @@ class OnlineCliTests(unittest.TestCase):
         self.assertIn("WM-only warmup:", result.stdout)
         self.assertNotIn('"actor_objective":', result.stdout)
         saved = torch.load(output / "last.pt", map_location="cpu", weights_only=True)
+        expected_lr = 5e-5 * (1.0 if iteration == 1 else 0.03)
+        self.assertEqual(saved["total_iterations"], iteration)
+        self.assertEqual(
+          json.loads((output / "config.json").read_text())["total_iterations"],
+          iteration,
+        )
+        for name in ("world_optimizer", "actor_optimizer", "critic_optimizer"):
+          self.assertAlmostEqual(saved[name]["param_groups"][0]["lr"], expected_lr)
+        metrics = [
+          json.loads(line)
+          for line in (output / "metrics.jsonl").read_text().splitlines()
+        ]
+        self.assertAlmostEqual(metrics[-1]["learning_rate"], expected_lr)
         self.assertEqual(saved["config"]["wm_only_iters"], 1)
         self.assertEqual(saved["config"]["learning_rate"], 5e-5)
         self.assertEqual(saved["config"]["reference_dim"], reference_dim)
+        self.assertEqual(saved["config"]["world_prediction"], prediction)
+        self.assertEqual(saved["config"]["world_model_normalization"], normalize)
         self.assertEqual(saved["config"]["actor_input_normalization"], normalize)
         self.assertEqual(saved["config"]["critic_input_normalization"], normalize)
         if normalize:
+          for name in ("in_norm", "out_norm"):
+            self.assertEqual(
+              int(saved["world"][f"{name}.count"]), saved["environment_steps"]
+            )
           self.assertEqual(
             int(saved["actor"]["obs_norm.count"]), saved["environment_steps"]
           )
@@ -895,6 +1021,8 @@ class OnlineCliTests(unittest.TestCase):
       self.assertEqual(checkpoint["iteration"], 2)
       self.assertEqual(checkpoint["world_updates"], 2)
       self.assertTrue(checkpoint["config"]["relative_orientation"])
+      self.assertTrue(checkpoint["config"]["motion_anchor_ori_b"])
+      self.assertEqual(checkpoint["replay"]["data"]["observation"].shape[-1], 105)
       self.assertEqual(checkpoint["config"]["termination_mode"], "analytic")
       diagnostics = json.loads((output / "diagnostics.json").read_text())
       self.assertEqual(diagnostics["iteration"], 2)

@@ -48,6 +48,7 @@ def load_actor(
     saved["config"].get("relative_orientation", False),
     saved["config"].get("amp", "none"),
     input_normalization=saved["config"].get("actor_input_normalization", False),
+    motion_anchor_ori_b=saved["config"].get("motion_anchor_ori_b", False),
   )
   policy.load_state_dict(saved["actor"])
   return policy.to(device).eval(), saved, clips or tuple(saved["clips"])
@@ -83,6 +84,9 @@ def load_world_model(
     config.get("termination_mode", "learned"),
     config.get("relative_orientation", False),
     config.get("amp", "none"),
+    world_prediction=config.get("world_prediction", "velocity_residual"),
+    world_model_normalization=config.get("world_model_normalization", False),
+    motion_anchor_ori_b=config.get("motion_anchor_ori_b", False),
   )
   try:
     model.load_state_dict(saved["world"])

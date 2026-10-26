@@ -2,7 +2,7 @@
 
 [English](training_and_playback_en.md) | [返回 README](../README_zh.md)
 
-先完成[安装](setup_zh.md)和动作转换，以下命令均在仓库根目录运行。[README 预览模型介绍](../README_zh.md#复现当前预览模型第-10000-轮)记录当前快照、实测评估结果及其训练命令。
+先完成[安装](setup_zh.md)和动作转换，以下命令均在仓库根目录运行。[README 消融与发布模型说明](../README_zh.md#消融结果与发布模型)记录实测对比、选中 checkpoint 及其训练命令。
 
 ## 训练变体
 
@@ -43,6 +43,30 @@ Actor、Critic、真实采集和想象训练统一使用所选特征。对照旧
 完整 checkpoint 续训自动识别参考维度，兼容缺少 schema 元数据的旧 2680 维断点；
 旧断点缺少执行配置时沿用非编译 FP32。续训不能切换参考维度，更换架构需新建输出目录。
 
+新训练默认 `--world-prediction state_delta`：世界模型预测完整单步状态增量，
+不额外加入恒速外推。Actor 仍输出归一化关节位置指令。缺少此配置的旧 checkpoint
+自动使用 `velocity_residual`，包括旧版 preview 权重，保持原预测行为。
+续训自动恢复原模式，不能中途切换。训练新参数化需新建输出目录；如需旧版对照，
+指定 `--world-prediction velocity_residual`。输入统计、隐藏层激活和损失尺度沿用现有规则。
+
+为这组世界模型改动做消融，新训练只需增加**一个开关**：
+
+```bash
+--world-model-normalization
+```
+
+同时启用动力学隐藏层 `Linear → LayerNorm → SiLU` 和独立的输入／输出 RunningNorm。
+统计量仅由每条新采集的真实转移更新一次，包含初始预热；Replay 拟合批次和想象状态
+不更新统计，世界模型拟合及策略 BPTT 期间保持冻结。输入标准化后进入网络，输出通过
+`y * (std + eps) + mean` 恢复物理量，再更新状态。统计量使用 FP64，物理运算保留 FP32；
+输入／输出 epsilon 分别为 `0.01`／`0.0001`，累计达到 2 亿真实样本后停止更新。
+状态损失仍使用现有固定物理标度，便于比较这一组改动。
+
+默认关闭，即 ELU 加固定的初始采集统计。两组实验应使用不同输出目录，其余设置保持
+一致。完整断点、推理导出及播放保留所选结构与统计，续训自动恢复开关且不能中途切换；
+旧 checkpoint 缺少此字段时视为关闭。离线世界模型入口也支持同一开关，但因数据固定，
+只用训练 episode 拟合一次统计，不计入验证数据。
+
 Actor／Critic 输入可分别启用 `RunningNorm`，默认均关闭：
 
 ```bash
@@ -73,8 +97,11 @@ python scripts/train_supermimic.py \
 
 每采集 5 个向量步执行 2 轮更新，对应 update-to-data ratio `0.4`。
 世界模型窗口长度固定为 8；默认学习率 `2e-4`、折扣 `0.99`、GAE λ `0.95`、
-探索动作噪声标准差 `0.1`，学习率在 250,000 轮内余弦下降至初值的 `0.03` 倍，
-之后保持。评估和保存间隔是本命令的运行安排，并非论文超参数；脚本仍会在初始化
+探索动作噪声标准差 `0.1`。三个优化器的学习率按 `--iterations` 总轮数余弦衰减，
+从首轮的初始学习率下降至末轮的 `0.03` 倍；仅训练一轮时使用初始学习率。
+世界模型预热计入调度。续训使用已保存的累计轮数和当前 `--iterations` 总数；
+增大总数会延长衰减周期，因此续训学习率可能回升。
+评估和保存间隔是本命令的运行安排，并非论文超参数；脚本仍会在初始化
 及训练结束时评估。输出目录必须不存在。
 
 此命令对齐训练规模，不代表所有实现细节均已严格复现论文：当前仍保留 10 秒
@@ -246,8 +273,8 @@ python scripts/play_supermimic.py \
 
 ```bash
 python scripts/play_supermimic.py \
-  --device cuda:0 --checkpoint checkpoints/preview/policy_10000.pt \
-  --world-model checkpoints/preview/world_model_10000.pt \
+  --device cuda:0 --checkpoint checkpoints/best/policy_best.pt \
+  --world-model checkpoints/best/world_model_best.pt \
   --world-model-horizon 32 --clips walk1_subject1 run1_subject2 --loop
 ```
 

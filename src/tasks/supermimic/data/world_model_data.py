@@ -50,16 +50,19 @@ class ReplayCorpus:
         raise ValueError(f"Replay clip names do not match manifest: {path}")
       count = min(buffer.steps, buffer.capacity)
       data = {name: value[:count] for name, value in buffer.data.items()}
+      observation_shape = data["observation"].shape[2:]
+      if observation_shape not in ((93,), (99,), (105,)):
+        raise ValueError(f"Wrong replay shape for observation in {path}")
       expected = {
         "state": (71,),
         "next_state": (71,),
         "action": (29,),
         "previous_action": (29,),
         "context": (33,),
-        "observation": (93,),
-        "next_observation": (93,),
-        "clean_observation": (93,),
-        "next_clean_observation": (93,),
+        "observation": observation_shape,
+        "next_observation": observation_shape,
+        "clean_observation": observation_shape,
+        "next_clean_observation": observation_shape,
       }
       for name in REQUIRED_FIELDS:
         value = data[name]

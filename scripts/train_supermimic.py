@@ -64,6 +64,7 @@ def evaluate_actor(actor, manifest, config, device, limit=None, max_envs=64):
         seed=config.seed,
         episode_length_s=1e9,
         relative_orientation=config.relative_orientation,
+        motion_anchor_ori_b=config.motion_anchor_ori_b,
       ),
       device=device,
     )
@@ -85,7 +86,7 @@ def main():
     "--iterations",
     type=int,
     default=1000,
-    help="Total update rounds, including WM-only warmup and saved rounds",
+    help="Total update rounds and cosine LR decay horizon, including WM-only warmup and saved rounds",
   )
   parser.add_argument("--eval-interval", type=int, default=100)
   parser.add_argument(
@@ -129,6 +130,17 @@ def main():
   parser.add_argument("--wandb-mode", choices=("online", "offline"), default="online")
   parser.add_argument("--termination-mode", choices=("learned", "analytic"))
   parser.add_argument("--amp", choices=("bf16", "none"))
+  parser.add_argument(
+    "--world-model-normalization",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="Enable SiLU + LayerNorm and running world-model input/output normalization",
+  )
+  parser.add_argument(
+    "--world-prediction",
+    choices=("state_delta", "velocity_residual"),
+    help="World-model targets (new runs: state_delta; resume: saved mode)",
+  )
   for name in ("actor-input-normalization", "critic-input-normalization"):
     parser.add_argument(
       "--" + name,
@@ -157,6 +169,12 @@ def main():
     "--relative-orientation",
     action=argparse.BooleanOptionalAction,
     default=None,
+  )
+  parser.add_argument(
+    "--motion-anchor-ori-b",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="Observe reference torso orientation in the robot torso frame (default: disabled)",
   )
   parser.add_argument(
     "--evaluation-limit",
@@ -258,6 +276,17 @@ def main():
     parser.error(
       "Resume cannot change --reference-dim; use a new output directory for a new architecture"
     )
+  if saved and config.world_prediction != saved_config["world_prediction"]:
+    parser.error(
+      "Resume cannot change --world-prediction; start a new run for state_delta training"
+    )
+  if (
+    saved
+    and config.world_model_normalization != saved_config["world_model_normalization"]
+  ):
+    parser.error(
+      "Resume cannot change --world-model-normalization; start a new run for this ablation"
+    )
   if saved and (
     saved_config != asdict(config) or saved["manifest_sha256"] != manifest_hash
   ):
@@ -290,10 +319,13 @@ def main():
           seed=config.seed,
           episode_length_s=config.episode_length_s,
           relative_orientation=config.relative_orientation,
+          motion_anchor_ori_b=config.motion_anchor_ori_b,
         ),
         device=args.device,
       )
-      trainer = OnlineTrainer(env, robot_metadata(), config)
+      trainer = OnlineTrainer(
+        env, robot_metadata(), config, total_iterations=args.iterations
+      )
       if saved:
         trainer.load_state_dict(saved)
       else:
@@ -304,6 +336,7 @@ def main():
     }
     run_config = {
       "config": asdict(config),
+      "total_iterations": args.iterations,
       "device": args.device,
       "manifest": str(args.manifest.resolve()),
       "manifest_sha256": manifest_hash,
@@ -326,6 +359,11 @@ def main():
     console.start(
       asdict(config), args.device, len(env.library), output, trainer.iteration
     )
+    console.message(f"World-model prediction: {config.world_prediction}")
+    if config.world_model_normalization:
+      console.message(
+        "World model: SiLU + LayerNorm | running input/output statistics from real collection"
+      )
     if args.wandb:
       state = rng_state()
       try:

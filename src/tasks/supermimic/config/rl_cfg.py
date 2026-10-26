@@ -30,14 +30,19 @@ class OnlineConfig:
   clips: tuple[str, ...] = ()
   termination_mode: str = "learned"
   relative_orientation: bool = False
+  motion_anchor_ori_b: bool = False
   diagnostics_batch_size: int = 64
   compile: bool = True
   amp: str = "bf16"
   reference_dim: int = 730
   actor_input_normalization: bool = False
   critic_input_normalization: bool = False
+  world_prediction: str = "state_delta"
+  world_model_normalization: bool = False
 
   def __post_init__(self):
+    if self.world_prediction not in ("state_delta", "velocity_residual"):
+      raise ValueError("world_prediction must be state_delta or velocity_residual")
     if self.reference_dim not in (730, 2680):
       raise ValueError("reference_dim must be 730 or 2680")
     counts = (

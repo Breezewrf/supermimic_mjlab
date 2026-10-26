@@ -108,7 +108,12 @@ def checked_step(
 
 
 class OnlineTrainer:
-  def __init__(self, env, metadata: dict, config: OnlineConfig):
+  def __init__(
+    self, env, metadata: dict, config: OnlineConfig, *, total_iterations: int = 1000
+  ):
+    if total_iterations < 1:
+      raise ValueError("total_iterations must be positive")
+    self.total_iterations = total_iterations
     if env.num_envs != config.num_envs:
       raise ValueError("Environment count differs from online configuration")
     self.env, self.metadata, self.config = env, metadata, config
@@ -119,7 +124,10 @@ class OnlineTrainer:
       and not torch.cuda.is_bf16_supported()
     ):
       raise ValueError("This GPU does not support BF16; use --amp none")
-    if env.foundation_config.relative_orientation != config.relative_orientation:
+    if (
+      env.foundation_config.relative_orientation != config.relative_orientation
+      or env.foundation_config.motion_anchor_ori_b != config.motion_anchor_ori_b
+    ):
       raise ValueError("Environment and policy observation settings differ")
     self.world = WorldModel(
       metadata,
@@ -127,6 +135,9 @@ class OnlineTrainer:
       config.termination_mode,
       config.relative_orientation,
       config.amp,
+      world_prediction=config.world_prediction,
+      world_model_normalization=config.world_model_normalization,
+      motion_anchor_ori_b=config.motion_anchor_ori_b,
     ).to(self.device)
     self.actor = MotionActor(
       metadata["default_q"],
@@ -135,6 +146,7 @@ class OnlineTrainer:
       config.amp,
       reference_dim=config.reference_dim,
       input_normalization=config.actor_input_normalization,
+      motion_anchor_ori_b=config.motion_anchor_ori_b,
     ).to(self.device)
     self.critic = MotionCritic(
       metadata["default_q"],
@@ -203,6 +215,13 @@ class OnlineTrainer:
         action + self.config.action_noise * noise
       )
       transition = dict(extras["transition"])
+      if self.config.world_model_normalization:
+        self.world.update_normalization(
+          **{
+            name: transition[name]
+            for name in ("state", "action", "context", "next_state")
+          }
+        )
       transition["policy_version"] = torch.full_like(
         transition["episode_id"], self.actor_updates
       )
@@ -242,12 +261,13 @@ class OnlineTrainer:
     self.collect(self.config.warmup_steps)
     if not len(self.replay.window_indices(8)):
       raise ValueError("Warmup produced no eight-step windows")
-    count = min(self.replay.steps, self.replay.capacity)
-    transitions = {
-      name: self.replay.data[name][:count].flatten(0, 1)
-      for name in ("state", "action", "context", "next_state")
-    }
-    self.world.fit_normalization(**transitions)
+    if not self.config.world_model_normalization:
+      count = min(self.replay.steps, self.replay.capacity)
+      transitions = {
+        name: self.replay.data[name][:count].flatten(0, 1)
+        for name in ("state", "action", "context", "next_state")
+      }
+      self.world.fit_normalization(**transitions)
     self.initialized = True
 
   def update_world(self) -> dict:
@@ -392,8 +412,10 @@ class OnlineTrainer:
     collected = self.iteration % self.config.updates_per_collect == 0
     if collected:
       self.collect(self.config.collect_steps)
-    # Paper schedule: cosine to 0.03x over 250k updates, then constant.
-    fraction = min(self.iteration / 250_000, 1.0)
+    # Span the requested run: initial LR on the first round, 0.03x on the last.
+    # A one-round run uses the initial LR. Resume keeps the absolute iteration
+    # and uses the current run's total, so extending --iterations extends decay.
+    fraction = min(self.iteration / max(self.total_iterations - 1, 1), 1.0)
     lr = self.config.learning_rate * (
       0.03 + 0.97 * (1 + math.cos(math.pi * fraction)) / 2
     )
@@ -495,6 +517,7 @@ class OnlineTrainer:
     return {
       **self.policy_state_dict(),
       "kind": "supermimic_online",
+      "total_iterations": self.total_iterations,
       "device_type": torch.device(self.device).type,
       "world": self.world.state_dict(),
       "critic": self.critic.state_dict(),

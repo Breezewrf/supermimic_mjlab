@@ -2,7 +2,7 @@
 
 [简体中文](training_and_playback_zh.md) | [Back to README](../README.md)
 
-Run all commands from the repository root after [installation](setup_en.md) and motion conversion. The [preview checkpoint section](../README.md#reproduce-the-preview-checkpoint-iteration-10000) records the current snapshot, measured evaluation and its training command.
+Run all commands from the repository root after [installation](setup_en.md) and motion conversion. The [ablation and released-checkpoint section](../README.md#ablation-results-and-released-checkpoint) records the measured comparison, selected checkpoint and its training command.
 
 ## Training variants
 
@@ -55,7 +55,37 @@ including old 2680-input checkpoints without schema metadata. Old checkpoints
 without execution settings resume in eager FP32. A resume cannot change the layout;
 use a new output directory to train a different architecture.
 
-Optional input `RunningNorm` has independent switches, both off by default.
+New runs default to `--world-prediction state_delta`: the world model predicts complete
+one-step state increments, without adding a constant-velocity extrapolation. Actor
+outputs remain normalized joint-position commands. Old checkpoints without this setting
+load as `velocity_residual`, preserving their original predictions, including legacy
+preview weights. Resume restores the saved mode and cannot switch it. To train the new
+parameterization, start a new run; use `--world-prediction velocity_residual` for a legacy
+baseline. Input statistics, hidden activations and loss scales retain their existing rules.
+
+For a combined world-model ablation, append **one flag** to a new training command:
+
+```bash
+--world-model-normalization
+```
+
+It switches the dynamics hidden layers to `Linear → LayerNorm → SiLU` and enables
+separate input/output `RunningNorm` modules. Each real collected transition updates
+the statistics once, including warmup; replay minibatches and imagined states do not.
+Statistics remain fixed throughout world-model fitting and policy BPTT. The input is
+standardized, and the predicted output is decoded as `y * (std + eps) + mean` before
+the state update. Moments use FP64; physics stays FP32. Input/output epsilons are
+`0.01`/`0.0001`; updates stop after 200 million real samples. State-loss weights retain
+their fixed physical scales, so this switch does not change the loss weighting.
+
+The flag defaults to off (ELU and fixed bootstrap statistics); use separate output
+directories and identical remaining settings for the two runs. Checkpoints, exports
+and playback preserve the selected architecture and statistics. Resume restores the
+flag automatically and rejects changing it. Older checkpoints default to off.
+The offline trainer accepts the same flag but fits statistics once from its fixed
+training data, excluding validation episodes.
+
+Actor/Critic input `RunningNorm` has independent switches, both off by default.
 Append these flags to a new training command to enable both:
 
 ```bash
@@ -88,8 +118,12 @@ python scripts/train_supermimic.py \
 Two updates per five vector collection steps give an update-to-data ratio of `0.4`.
 The world-model window is fixed at 8 steps. Defaults are a learning rate of `2e-4`,
 discount `0.99`, GAE lambda `0.95`, and action exploration noise standard deviation
-`0.1`. The learning rate follows a cosine decay to `0.03` times its initial value over
-250,000 iterations, then stays constant. Evaluation and checkpoint intervals are
+`0.1`. All three optimizers use cosine learning-rate decay over `--iterations`,
+from the initial rate on the first round to `0.03` times that rate on the last.
+A one-round run uses the initial rate. WM-only warmup counts toward the schedule.
+Resume uses the saved iteration and the current `--iterations` total; increasing
+the total extends the schedule and can raise the resumed learning rate.
+Evaluation and checkpoint intervals are
 operational choices for this command, rather than paper hyperparameters. The script
 also evaluates at initialization and at the end. The output directory must not exist.
 
@@ -283,8 +317,8 @@ Add a world-model comparison using the exported weights:
 
 ```bash
 python scripts/play_supermimic.py \
-  --device cuda:0 --checkpoint checkpoints/preview/policy_10000.pt \
-  --world-model checkpoints/preview/world_model_10000.pt \
+  --device cuda:0 --checkpoint checkpoints/best/policy_best.pt \
+  --world-model checkpoints/best/world_model_best.pt \
   --world-model-horizon 32 --clips walk1_subject1 run1_subject2 --loop
 ```
 

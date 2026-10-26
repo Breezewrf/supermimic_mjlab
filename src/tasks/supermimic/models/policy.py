@@ -122,16 +122,18 @@ class MotionActor(nn.Module):
     amp: str = "none",
     reference_dim: int = GOAL_DIM,
     input_normalization: bool = False,
+    motion_anchor_ori_b: bool = False,
   ):
     super().__init__()
     self.hidden_dims = tuple(hidden_dims)
     self.relative_orientation = relative_orientation
+    self.motion_anchor_ori_b = motion_anchor_ori_b
     self.amp = amp
     self.reference_dim = reference_dim
     self.reference_schema = schema_for_dimension(reference_dim)
     self.reference_features = reference_feature_function(reference_dim)
     self.input_normalization = input_normalization
-    self.observation_dim = 99 if relative_orientation else 93
+    self.observation_dim = 93 + 6 * (relative_orientation + motion_anchor_ori_b)
     self.obs_norm = (
       RunningNorm(self.observation_dim) if input_normalization else nn.Identity()
     )

@@ -46,6 +46,15 @@ class RunningNormTests(unittest.TestCase):
     for key, value in norm.state_dict().items():
       torch.testing.assert_close(value, before[key], rtol=0, atol=0)
 
+  def test_denormalization_inverts_normalization_and_preserves_gradients(self):
+    norm = RunningNorm(2, eps=1e-4)
+    norm.update(torch.tensor([[1.0, 2.0], [3.0, 6.0]]))
+    value = torch.tensor([[0.3, -0.2]], requires_grad=True)
+    restored = norm.denormalize(value)
+    torch.testing.assert_close(norm(restored), value)
+    restored.sum().backward()
+    torch.testing.assert_close(value.grad, (norm.std + norm.eps)[None])
+
   def test_eval_mode_and_sample_limit_freeze_updates(self):
     norm = RunningNorm(2, max_count=2)
     data = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
