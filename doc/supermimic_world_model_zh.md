@@ -75,7 +75,7 @@ python scripts/offline/train_world_model.py \
 
 新训练默认 `--world-prediction state_delta`，在线和离线入口均支持。
 旧 checkpoint 缺少 `world_prediction` 时自动使用 `velocity_residual`，保留原来的
-恒速积分加残差行为，包括现有 preview 权重。续训不能切换预测模式；采用新模式需新建训练。
+恒速积分加残差行为，包括旧版 preview 权重。续训不能切换预测模式；采用新模式需新建训练。
 恒速积分仍用于独立验证的无学习基线。
 
 输入均值和标准差只从训练 episode 拟合。完整输出增量按训练集标准差缩放，不减均值；

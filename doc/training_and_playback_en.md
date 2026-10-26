@@ -2,7 +2,7 @@
 
 [简体中文](training_and_playback_zh.md) | [Back to README](../README.md)
 
-Run all commands from the repository root after [installation](setup_en.md) and motion conversion. The [preview checkpoint section](../README.md#reproduce-the-preview-checkpoint-iteration-10000) records the current snapshot, measured evaluation and its training command.
+Run all commands from the repository root after [installation](setup_en.md) and motion conversion. The [ablation and released-checkpoint section](../README.md#ablation-results-and-released-checkpoint) records the measured comparison, selected checkpoint and its training command.
 
 ## Training variants
 
@@ -58,8 +58,8 @@ use a new output directory to train a different architecture.
 New runs default to `--world-prediction state_delta`: the world model predicts complete
 one-step state increments, without adding a constant-velocity extrapolation. Actor
 outputs remain normalized joint-position commands. Old checkpoints without this setting
-load as `velocity_residual`, preserving their original predictions, including the preview
-world model. Resume restores the saved mode and cannot switch it. To train the new
+load as `velocity_residual`, preserving their original predictions, including legacy
+preview weights. Resume restores the saved mode and cannot switch it. To train the new
 parameterization, start a new run; use `--world-prediction velocity_residual` for a legacy
 baseline. Input statistics, hidden activations and loss scales retain their existing rules.
 
@@ -317,8 +317,8 @@ Add a world-model comparison using the exported weights:
 
 ```bash
 python scripts/play_supermimic.py \
-  --device cuda:0 --checkpoint checkpoints/preview/policy_10000.pt \
-  --world-model checkpoints/preview/world_model_10000.pt \
+  --device cuda:0 --checkpoint checkpoints/best/policy.pt \
+  --world-model checkpoints/best/world_model.pt \
   --world-model-horizon 32 --clips walk1_subject1 run1_subject2 --loop
 ```
 

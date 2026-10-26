@@ -2,7 +2,7 @@
 
 [English](training_and_playback_en.md) | [返回 README](../README_zh.md)
 
-先完成[安装](setup_zh.md)和动作转换，以下命令均在仓库根目录运行。[README 预览模型介绍](../README_zh.md#复现当前预览模型第-10000-轮)记录当前快照、实测评估结果及其训练命令。
+先完成[安装](setup_zh.md)和动作转换，以下命令均在仓库根目录运行。[README 消融与发布模型说明](../README_zh.md#消融结果与发布模型)记录实测对比、选中 checkpoint 及其训练命令。
 
 ## 训练变体
 
@@ -45,7 +45,7 @@ Actor、Critic、真实采集和想象训练统一使用所选特征。对照旧
 
 新训练默认 `--world-prediction state_delta`：世界模型预测完整单步状态增量，
 不额外加入恒速外推。Actor 仍输出归一化关节位置指令。缺少此配置的旧 checkpoint
-自动使用 `velocity_residual`，包括 preview 世界模型，保持原预测行为。
+自动使用 `velocity_residual`，包括旧版 preview 权重，保持原预测行为。
 续训自动恢复原模式，不能中途切换。训练新参数化需新建输出目录；如需旧版对照，
 指定 `--world-prediction velocity_residual`。输入统计、隐藏层激活和损失尺度沿用现有规则。
 
@@ -273,8 +273,8 @@ python scripts/play_supermimic.py \
 
 ```bash
 python scripts/play_supermimic.py \
-  --device cuda:0 --checkpoint checkpoints/preview/policy_10000.pt \
-  --world-model checkpoints/preview/world_model_10000.pt \
+  --device cuda:0 --checkpoint checkpoints/best/policy.pt \
+  --world-model checkpoints/best/world_model.pt \
   --world-model-horizon 32 --clips walk1_subject1 run1_subject2 --loop
 ```
 
