@@ -108,7 +108,12 @@ def checked_step(
 
 
 class OnlineTrainer:
-  def __init__(self, env, metadata: dict, config: OnlineConfig):
+  def __init__(
+    self, env, metadata: dict, config: OnlineConfig, *, total_iterations: int = 1000
+  ):
+    if total_iterations < 1:
+      raise ValueError("total_iterations must be positive")
+    self.total_iterations = total_iterations
     if env.num_envs != config.num_envs:
       raise ValueError("Environment count differs from online configuration")
     self.env, self.metadata, self.config = env, metadata, config
@@ -407,8 +412,10 @@ class OnlineTrainer:
     collected = self.iteration % self.config.updates_per_collect == 0
     if collected:
       self.collect(self.config.collect_steps)
-    # Paper schedule: cosine to 0.03x over 250k updates, then constant.
-    fraction = min(self.iteration / 250_000, 1.0)
+    # Span the requested run: initial LR on the first round, 0.03x on the last.
+    # A one-round run uses the initial LR. Resume keeps the absolute iteration
+    # and uses the current run's total, so extending --iterations extends decay.
+    fraction = min(self.iteration / max(self.total_iterations - 1, 1), 1.0)
     lr = self.config.learning_rate * (
       0.03 + 0.97 * (1 + math.cos(math.pi * fraction)) / 2
     )
@@ -510,6 +517,7 @@ class OnlineTrainer:
     return {
       **self.policy_state_dict(),
       "kind": "supermimic_online",
+      "total_iterations": self.total_iterations,
       "device_type": torch.device(self.device).type,
       "world": self.world.state_dict(),
       "critic": self.critic.state_dict(),

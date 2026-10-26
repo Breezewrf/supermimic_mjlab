@@ -118,8 +118,12 @@ python scripts/train_supermimic.py \
 Two updates per five vector collection steps give an update-to-data ratio of `0.4`.
 The world-model window is fixed at 8 steps. Defaults are a learning rate of `2e-4`,
 discount `0.99`, GAE lambda `0.95`, and action exploration noise standard deviation
-`0.1`. The learning rate follows a cosine decay to `0.03` times its initial value over
-250,000 iterations, then stays constant. Evaluation and checkpoint intervals are
+`0.1`. All three optimizers use cosine learning-rate decay over `--iterations`,
+from the initial rate on the first round to `0.03` times that rate on the last.
+A one-round run uses the initial rate. WM-only warmup counts toward the schedule.
+Resume uses the saved iteration and the current `--iterations` total; increasing
+the total extends the schedule and can raise the resumed learning rate.
+Evaluation and checkpoint intervals are
 operational choices for this command, rather than paper hyperparameters. The script
 also evaluates at initialization and at the end. The output directory must not exist.
 

@@ -489,11 +489,53 @@ class OnlineIntegrationTests(unittest.TestCase):
   def tearDownClass(cls):
     cls.env.close()
 
-  def trainer(self, config=None):
+  def trainer(self, config=None, *, total_iterations=1000):
     self.env.reset()
-    trainer = OnlineTrainer(self.env, self.metadata, config or self.config)
+    trainer = OnlineTrainer(
+      self.env, self.metadata, config or self.config, total_iterations=total_iterations
+    )
     trainer.bootstrap()
     return trainer
+
+  def test_cosine_decay_uses_requested_total_for_all_optimizers(self):
+    for total in (1, 3, 15_000):
+      with self.subTest(total_iterations=total):
+        trainer = self.trainer(total_iterations=total)
+        checkpoints = [(0, 1.0)]
+        if total == 3:
+          checkpoints.append((1, 0.515))
+        if total > 1:
+          checkpoints += [(total - 1, 0.03), (total, 0.03)]
+        for iteration, multiplier in checkpoints:
+          trainer.iteration = iteration
+          record = trainer.train_iteration()
+          expected = self.config.learning_rate * multiplier
+          self.assertAlmostEqual(record["learning_rate"], expected)
+          for optimizer in (
+            trainer.world_optimizer,
+            trainer.actor_optimizer,
+            trainer.critic_optimizer,
+          ):
+            for group in optimizer.param_groups:
+              self.assertAlmostEqual(group["lr"], expected)
+
+  def test_cosine_decay_resumes_at_saved_iteration_and_allows_extension(self):
+    trainer = self.trainer(total_iterations=5)
+    trainer.train_iteration()
+    trainer.train_iteration()
+    saved = copy.deepcopy(trainer.state_dict())
+    self.assertEqual(saved["total_iterations"], 5)
+    expected = trainer.train_iteration()["learning_rate"]
+    resumed = OnlineTrainer(self.env, self.metadata, self.config, total_iterations=5)
+    resumed.load_state_dict(saved)
+    self.assertAlmostEqual(resumed.train_iteration()["learning_rate"], expected)
+    # Historical checkpoints have no schedule horizon; the current total wins.
+    del saved["total_iterations"]
+    extended = OnlineTrainer(self.env, self.metadata, self.config, total_iterations=9)
+    extended.load_state_dict(saved)
+    self.assertEqual(extended.iteration, 2)
+    self.assertEqual(extended.total_iterations, 9)
+    self.assertGreater(extended.train_iteration()["learning_rate"], expected)
 
   def test_wm_only_warmup_preserves_policy_and_resumes_at_phase_boundary(self):
     config = replace(self.config, wm_only_iters=3)
@@ -882,6 +924,19 @@ class OnlineCliTests(unittest.TestCase):
         self.assertIn("WM-only warmup:", result.stdout)
         self.assertNotIn('"actor_objective":', result.stdout)
         saved = torch.load(output / "last.pt", map_location="cpu", weights_only=True)
+        expected_lr = 5e-5 * (1.0 if iteration == 1 else 0.03)
+        self.assertEqual(saved["total_iterations"], iteration)
+        self.assertEqual(
+          json.loads((output / "config.json").read_text())["total_iterations"],
+          iteration,
+        )
+        for name in ("world_optimizer", "actor_optimizer", "critic_optimizer"):
+          self.assertAlmostEqual(saved[name]["param_groups"][0]["lr"], expected_lr)
+        metrics = [
+          json.loads(line)
+          for line in (output / "metrics.jsonl").read_text().splitlines()
+        ]
+        self.assertAlmostEqual(metrics[-1]["learning_rate"], expected_lr)
         self.assertEqual(saved["config"]["wm_only_iters"], 1)
         self.assertEqual(saved["config"]["learning_rate"], 5e-5)
         self.assertEqual(saved["config"]["reference_dim"], reference_dim)

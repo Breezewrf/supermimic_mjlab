@@ -86,7 +86,7 @@ def main():
     "--iterations",
     type=int,
     default=1000,
-    help="Total update rounds, including WM-only warmup and saved rounds",
+    help="Total update rounds and cosine LR decay horizon, including WM-only warmup and saved rounds",
   )
   parser.add_argument("--eval-interval", type=int, default=100)
   parser.add_argument(
@@ -323,7 +323,9 @@ def main():
         ),
         device=args.device,
       )
-      trainer = OnlineTrainer(env, robot_metadata(), config)
+      trainer = OnlineTrainer(
+        env, robot_metadata(), config, total_iterations=args.iterations
+      )
       if saved:
         trainer.load_state_dict(saved)
       else:
@@ -334,6 +336,7 @@ def main():
     }
     run_config = {
       "config": asdict(config),
+      "total_iterations": args.iterations,
       "device": args.device,
       "manifest": str(args.manifest.resolve()),
       "manifest_sha256": manifest_hash,
