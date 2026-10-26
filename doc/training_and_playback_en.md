@@ -317,8 +317,8 @@ Add a world-model comparison using the exported weights:
 
 ```bash
 python scripts/play_supermimic.py \
-  --device cuda:0 --checkpoint checkpoints/best/policy.pt \
-  --world-model checkpoints/best/world_model.pt \
+  --device cuda:0 --checkpoint checkpoints/best/policy_best.pt \
+  --world-model checkpoints/best/world_model_best.pt \
   --world-model-horizon 32 --clips walk1_subject1 run1_subject2 --loop
 ```
 

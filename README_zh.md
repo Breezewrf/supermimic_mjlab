@@ -126,8 +126,8 @@ python scripts/data/convert_lafan_to_npz.py \
 
 | 文件 | 内容 |
 | --- | --- |
-| `checkpoints/best/policy.pt` | 第 15000 轮最佳 Actor 权重，用于真实物理播放 |
-| `checkpoints/best/world_model.pt` | 同轮配套世界模型，用于叠加预测姿态 |
+| `checkpoints/best/policy_best.pt` | 第 15000 轮最佳 Actor 权重，用于真实物理播放 |
+| `checkpoints/best/world_model_best.pt` | 同轮配套世界模型，用于叠加预测姿态 |
 
 选中策略在完整标准评估中取得 **40/40 成功动作**、**1.0 平均完成率**和
 **0.8528 归一化回报**。
@@ -168,7 +168,7 @@ python scripts/train_supermimic.py \
 
 ```bash
 python scripts/play_supermimic.py \
-  --device cuda:0 --checkpoint checkpoints/best/policy.pt \
+  --device cuda:0 --checkpoint checkpoints/best/policy_best.pt \
   --clips walk1_subject1 run1_subject2 --loop
 ```
 
@@ -176,8 +176,8 @@ python scripts/play_supermimic.py \
 
 ```bash
 python scripts/play_supermimic.py \
-  --device cuda:0 --checkpoint checkpoints/best/policy.pt \
-  --world-model checkpoints/best/world_model.pt \
+  --device cuda:0 --checkpoint checkpoints/best/policy_best.pt \
+  --world-model checkpoints/best/world_model_best.pt \
   --world-model-mode future --world-model-horizon 32 \
   --clips walk1_subject1 run1_subject2 --loop
 ```
@@ -188,7 +188,7 @@ python scripts/play_supermimic.py \
 
 ```bash
 python scripts/evaluate_supermimic.py \
-  --device cuda:0 --checkpoint checkpoints/best/policy.pt \
+  --device cuda:0 --checkpoint checkpoints/best/policy_best.pt \
   --output outputs/supermimic/evaluation_best.json
 ```
 

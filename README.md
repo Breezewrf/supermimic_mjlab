@@ -138,8 +138,8 @@ clips, with trade-offs on some get-up, jump, and run clips.
 
 | File | Contents |
 | --- | --- |
-| `checkpoints/best/policy.pt` | Best Actor weights for real-physics playback; iteration 15000 |
-| `checkpoints/best/world_model.pt` | Matching world model for prediction overlays |
+| `checkpoints/best/policy_best.pt` | Best Actor weights for real-physics playback; iteration 15000 |
+| `checkpoints/best/world_model_best.pt` | Matching world model for prediction overlays |
 
 The selected policy achieved **40/40 successful motions**, **1.0 mean completion**,
 and **0.8528 normalized return** in the full standard evaluation.
@@ -181,7 +181,7 @@ Play selected motions in real physics:
 
 ```bash
 python scripts/play_supermimic.py \
-  --device cuda:0 --checkpoint checkpoints/best/policy.pt \
+  --device cuda:0 --checkpoint checkpoints/best/policy_best.pt \
   --clips walk1_subject1 run1_subject2 --loop
 ```
 
@@ -189,8 +189,8 @@ Add the matching world model to preview the policy 32 control steps (0.64 s) ahe
 
 ```bash
 python scripts/play_supermimic.py \
-  --device cuda:0 --checkpoint checkpoints/best/policy.pt \
-  --world-model checkpoints/best/world_model.pt \
+  --device cuda:0 --checkpoint checkpoints/best/policy_best.pt \
+  --world-model checkpoints/best/world_model_best.pt \
   --world-model-mode future --world-model-horizon 32 \
   --clips walk1_subject1 run1_subject2 --loop
 ```
@@ -201,7 +201,7 @@ for playback with failure resets. For standard headless evaluation of all motion
 
 ```bash
 python scripts/evaluate_supermimic.py \
-  --device cuda:0 --checkpoint checkpoints/best/policy.pt \
+  --device cuda:0 --checkpoint checkpoints/best/policy_best.pt \
   --output outputs/supermimic/evaluation_best.json
 ```
 
