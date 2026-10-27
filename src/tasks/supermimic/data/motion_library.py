@@ -37,8 +37,8 @@ class MotionLibrary:
       or metadata["quaternion_order"] != "wxyz"
     ):
       raise ValueError("SuperMimic requires 50 Hz, wxyz reference motions")
-    if len(joint_names) != 29 or len(set(joint_names)) != 29:
-      raise ValueError("Expected 29 unique joint names")
+    if len(joint_names) not in (23, 29) or len(set(joint_names)) != len(joint_names):
+      raise ValueError("Expected 23 or 29 unique joint names")
     if (
       not body_names
       or body_names[0] != "pelvis"
@@ -89,7 +89,11 @@ class MotionLibrary:
           expected = (
             (count, len(stored_joints))
             if key.startswith("joint_")
-            else (count, len(stored_bodies), 4 if key == "body_quat_w" else 3)
+            else (
+              count,
+              len(stored_bodies),
+              4 if key == "body_quat_w" else 3,
+            )
           )
           if raw.shape != expected or not np.isfinite(raw).all():
             raise ValueError(f"Invalid {key} array in {name}: {raw.shape}")

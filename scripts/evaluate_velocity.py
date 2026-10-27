@@ -9,6 +9,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from src.tasks.supermimic.config.cli import add_robot_argument, resolve_robot_arguments
 from src.tasks.supermimic.config.task_cfg import FoundationConfig
 from src.tasks.supermimic.config.velocity_cfg import VelocityConfig
 from src.tasks.supermimic.rl.inference import validate_environment
@@ -20,6 +21,7 @@ from src.tasks.supermimic.velocity_env import VelocityEnv
 
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
+  add_robot_argument(parser)
   parser.add_argument("--checkpoint", type=Path, required=True)
   parser.add_argument("--device", default="cuda:0")
   parser.add_argument("--num-envs", type=int, default=64)
@@ -31,6 +33,7 @@ def main():
     "--output", type=Path, default=Path("outputs/velocity/evaluation.json")
   )
   args = parser.parse_args()
+  resolve_robot_arguments(args, parser)
   torch.set_num_threads(4)
   actor, saved = load_velocity_actor(args.checkpoint, args.device)
   args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -41,7 +44,9 @@ def main():
       simulator_output(sim_log, verbose=False),
     ):
       env = VelocityEnv(
-        FoundationConfig(num_envs=args.num_envs, episode_length_s=1e9),
+        FoundationConfig(
+          robot=args.robot, num_envs=args.num_envs, episode_length_s=1e9
+        ),
         VelocityConfig(**saved["velocity_config"]),
         args.device,
       )

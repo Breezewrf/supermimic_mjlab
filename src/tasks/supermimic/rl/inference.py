@@ -6,7 +6,7 @@ import torch
 
 from ..data.world_model_data import file_sha256
 from ..models.legacy_policy import LEGACY_REFERENCE_SCHEMA, LegacyMotionActor
-from ..models.policy import REFERENCE_SCHEMA, MotionActor
+from ..models.policy import REFERENCE_SCHEMAS, MotionActor
 from ..models.world_model import WorldModel
 from .checkpoints import (
   POLICY_KIND,
@@ -31,7 +31,7 @@ def load_actor(
       "Expected SuperMimic policy weights or an online training checkpoint"
     )
   schema = resolve_reference_schema(saved)
-  if schema not in (REFERENCE_SCHEMA, LEGACY_REFERENCE_SCHEMA):
+  if schema not in REFERENCE_SCHEMAS.values():
     raise ValueError(
       f"Unsupported reference schema {schema!r}; use its matching code version"
     )
@@ -42,11 +42,13 @@ def load_actor(
   if clips and not set(clips).issubset(saved["clips"]):
     raise ValueError("Evaluation clips must be present in the checkpoint")
   actor_class = LegacyMotionActor if schema == LEGACY_REFERENCE_SCHEMA else MotionActor
+  reference_options = {} if actor_class is LegacyMotionActor else {"reference_dim": {s: w for w, s in REFERENCE_SCHEMAS.items()}[schema]}
   policy = actor_class(
     saved["robot_metadata"]["default_q"],
     tuple(saved["config"]["actor_dims"]),
     saved["config"].get("relative_orientation", False),
     saved["config"].get("amp", "none"),
+    **reference_options,
     input_normalization=saved["config"].get("actor_input_normalization", False),
     motion_anchor_ori_b=saved["config"].get("motion_anchor_ori_b", False),
   )
@@ -101,7 +103,10 @@ def validate_environment(env, saved: dict) -> None:
   from ..models.kinematics import robot_metadata
   from .online_training import simulation_parameters
 
-  if saved["robot_metadata"]["signature"] != robot_metadata()["signature"]:
+  if (
+    saved["robot_metadata"]["signature"]
+    != robot_metadata(env.foundation_config.robot)["signature"]
+  ):
     raise ValueError("Checkpoint robot model does not match the current G1")
   if saved.get("simulation") != simulation_parameters(env):
     raise ValueError("Checkpoint simulation configuration does not match")

@@ -1,12 +1,14 @@
 """Explicit state layout and differentiable quaternion/observation operations.
 
-State = [root xyz (0:3), wxyz (3:7), q (7:36), world v (36:39),
-world omega (39:42), qdot (42:71)]. Root xyz excludes the environment origin.
-Context = [foot friction, encoder bias (1:30), torso COM offset (30:33)].
+State = [root xyz, wxyz, joint positions, world linear/angular velocity,
+joint velocities]. For N joints this has 13 + 2N entries. Root xyz excludes
+the environment origin. Context = [foot friction, N encoder biases, torso COM xyz].
 """
 
 import torch
 from torch import Tensor
+
+from ..config.morphology import state_layout
 
 
 def quat_conjugate(q: Tensor) -> Tensor:
@@ -106,9 +108,11 @@ def observe(
     ]
   return torch.cat(
     (
-      state[..., 7:36] - default_q + context[..., 1:30],
-      state[..., 42:71],
-      quat_inverse_apply(state[..., 3:7], state[..., 39:42]),
+      state[..., state_layout(state).q]
+      - default_q
+      + context[..., 1 : 1 + default_q.shape[-1]],
+      state[..., state_layout(state).qd],
+      quat_inverse_apply(state[..., 3:7], state[..., state_layout(state).w]),
       quat_inverse_apply(state[..., 3:7], gravity),
       *relative,
       *([] if anchor_orientation is None else [anchor_orientation]),
@@ -120,15 +124,15 @@ def observe(
 
 
 def add_sensor_noise(
-  observation: Tensor, generator: torch.Generator | None = None
+  observation: Tensor, generator: torch.Generator | None = None, num_joints: int = 29
 ) -> Tensor:
   amplitude = observation.new_tensor(
-    [0.01] * 29
-    + [0.5] * 29
+    [0.01] * num_joints
+    + [0.5] * num_joints
     + [0.2] * 3
     + [0.05] * 3
-    + [0.05] * (observation.shape[-1] - 93)
-    + [0.0] * 29
+    + [0.05] * (observation.shape[-1] - (3 * num_joints + 6))
+    + [0.0] * num_joints
   )
   noise = torch.rand(
     observation.shape,

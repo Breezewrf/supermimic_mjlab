@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from src.tasks.supermimic.config.morphology import RobotLayout
 from src.tasks.supermimic.config.task_cfg import STEP_DT
 from src.tasks.supermimic.data.motion_library import MotionLibrary
 from src.tasks.supermimic.data.replay_buffer import ReplayBuffer
@@ -18,21 +19,22 @@ from src.tasks.supermimic.models.kinematics import G1Kinematics
 def make_motions(directory: Path, metadata: dict) -> tuple[Path, list[str]]:
   """Write two kinematically consistent G1 clips with different root speeds."""
   directory.mkdir(parents=True, exist_ok=True)
+  layout = RobotLayout(len(metadata["joint_names"]))
   kinematics = G1Kinematics(metadata, tuple(metadata["body_names"]))
   names = ["fixture_walk", "fixture_run"]
   entries = []
   for clip, name in enumerate(names):
     frames = 65 + clip * 8
-    state = torch.zeros(frames, 71)
+    state = torch.zeros(frames, layout.state_dim)
     state[:, 2], state[:, 3] = 0.8, 1.0
-    state[:, 7:36] = metadata["default_q"].float()
-    state[:, 36] = 0.05 * (clip + 1)
-    state[:, 0] = torch.arange(frames) * STEP_DT * state[:, 36]
+    state[:, layout.q] = metadata["default_q"].float()
+    state[:, layout.v.start] = 0.05 * (clip + 1)
+    state[:, 0] = torch.arange(frames) * STEP_DT * state[:, layout.v.start]
     bodies = kinematics(state)
     np.savez(
       directory / f"{name}.npz",
-      joint_pos=state[:, 7:36].numpy(),
-      joint_vel=state[:, 42:].numpy(),
+      joint_pos=state[:, layout.q].numpy(),
+      joint_vel=state[:, layout.qd].numpy(),
       **{key: value.numpy() for key, value in bodies.items()},
       fps=np.array([50.0], dtype=np.float32),
       quaternion_order="wxyz",
@@ -57,17 +59,18 @@ def make_replay(directory: Path, metadata: dict) -> tuple[Path, Path, list[str]]
   sequence, not evidence of a physically stable controller.
   """
   manifest, names = make_motions(directory, metadata)
+  layout = RobotLayout(len(metadata["joint_names"]))
   kinematics = G1Kinematics(metadata)
   library = MotionLibrary(manifest, kinematics.joint_names, kinematics.body_names)
   num_envs, episode_length = 4, 48
   replay = ReplayBuffer(num_envs, capacity=episode_length * 2)
   motion = torch.tensor([0, 1, 0, 1])
-  context = torch.zeros(num_envs, 33)
+  context = torch.zeros(num_envs, layout.context_dim)
   context[:, 0] = torch.tensor([0.6, 0.8, 1.0, 1.2])
   default_q = metadata["default_q"].float()
   rng = torch.Generator().manual_seed(71)
   for episode in range(2):
-    previous_action = torch.zeros(num_envs, 29)
+    previous_action = torch.zeros(num_envs, layout.num_joints)
     for step in range(episode_length):
       frame = torch.full((num_envs,), step, dtype=torch.long)
       reference, next_reference = (
@@ -89,7 +92,7 @@ def make_replay(directory: Path, metadata: dict) -> tuple[Path, Path, list[str]]
         )
 
       state, next_state = physical_state(reference), physical_state(next_reference)
-      action = torch.randn(num_envs, 29, generator=rng) * 0.02
+      action = torch.randn(num_envs, layout.num_joints, generator=rng) * 0.02
       reward, _ = tracking_reward(
         next_state,
         kinematics(next_state),

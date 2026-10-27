@@ -107,6 +107,50 @@ python scripts/data/convert_lafan_to_npz.py \
 输出为每段动作的 NPZ 和 `manifest.json`，已有转换结果时可跳过。
 字段和坐标约定见 [LAFAN 转换说明](doc/lafan_conversion_zh.md)。
 
+## G1 23DoF 支持
+
+采集、动作跟踪与速度训练、世界模型、评估、播放和导出均支持 G1 23DoF，默认仍为
+29DoF。23DoF 使用本地资源 `g1_23dof_rev_1_0.xml`，移除腰部 roll/pitch 和双腕
+pitch/yaw，手部跟踪改为左右 rubber-hand body。
+
+| 数据布局 | G1 29DoF | G1 23DoF |
+| --- | --- | --- |
+| 物理状态 / 动作 / 上下文 | 71 / 29 / 33 | 59 / 23 / 27 |
+| 基础观测 | 93 | 75 |
+| 十帧紧凑 / 全身参考 | 730 / 2680 | 610 / 2560 |
+
+两个可选方向观测各增加 6 维；速度控制使用基础观测。下文发布的权重和消融结果均为
+29DoF，23DoF 需要单独训练。
+
+继续使用现有脚本读取同一批 29 关节 LAFAN CSV：按名称选择 23 个关节，再用 23DoF
+模型重新计算身体姿态和速度。
+
+```bash
+python scripts/data/convert_lafan_to_npz.py --robot g1_23dof
+python scripts/train_supermimic.py --robot g1_23dof \
+  --device cuda:0 --num-envs 64 --amp none --no-compile \
+  --output outputs/supermimic/g1_23dof
+```
+
+23DoF 默认动作库为 `src/assets/motions/g1/lafan1_npz_23dof/manifest.json`，
+29DoF 路径保持原样。可用 `--manifest` 或转换脚本的 `--output-dir` 指定其他位置。
+默认使用紧凑参考；23DoF 全身参考使用 `--reference-dim 2560`。自定义 `--model-xml`
+必须与所选机器人匹配。
+
+```bash
+python scripts/evaluate_supermimic.py \
+  --checkpoint outputs/supermimic/g1_23dof/policy_best.pt
+python scripts/play_supermimic.py \
+  --checkpoint outputs/supermimic/g1_23dof/policy_best.pt
+python scripts/train_velocity.py --robot g1_23dof --from-scratch \
+  --output outputs/velocity/g1_23dof
+```
+
+恢复、评估和播放会从 checkpoint 自动读取机器人类型；显式指定冲突的 `--robot`
+会报错。没有机器人字段的旧 checkpoint 按 29DoF 处理。速度任务若从动作策略和世界
+模型初始化，需要同为 23DoF、使用基础观测的配套权重。离线采集和世界模型脚本也支持
+`--robot g1_23dof`；导出命令自动保留机器人信息。
+
 ## 在线训练
 
 `motion_anchor_ori_b` 是可选消融变量，默认关闭，可在训练命令中添加

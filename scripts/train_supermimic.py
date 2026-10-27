@@ -10,9 +10,9 @@ from pathlib import Path
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from src.tasks.supermimic.config.cli import add_robot_argument, resolve_robot_arguments
 from src.tasks.supermimic.config.rl_cfg import OnlineConfig
 from src.tasks.supermimic.config.task_cfg import (
-  DEFAULT_MANIFEST,
   FoundationConfig,
 )
 from src.tasks.supermimic.data.world_model_data import file_sha256
@@ -56,6 +56,7 @@ def evaluate_actor(actor, manifest, config, device, limit=None, max_envs=64):
     actor.eval()
     env = SuperMimicEnv(
       FoundationConfig(
+        robot=config.robot,
         manifest=manifest,
         clips=config.clips,
         num_envs=evaluation_env_count(manifest, config.clips, max_envs),
@@ -76,7 +77,8 @@ def evaluate_actor(actor, manifest, config, device, limit=None, max_envs=64):
 
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+  add_robot_argument(parser)
+  parser.add_argument("--manifest", type=Path)
   parser.add_argument("--device", default="cuda:0")
   parser.add_argument("--output", type=Path)
   parser.add_argument("--resume", type=Path)
@@ -129,8 +131,8 @@ def main():
   parser.add_argument(
     "--reference-dim",
     type=int,
-    choices=(730, 2680),
-    help="Ten-frame reference input width: compact 730 (default) or original full-body 2680",
+    choices=(610, 730, 2560, 2680),
+    help="Ten-frame reference width: compact 610/730 (23/29DoF, default) or full-body 2560/2680",
   )
   parser.add_argument(
     "--learning-rate",
@@ -185,6 +187,7 @@ def main():
     parser.add_argument("--" + name.replace("_", "-"), type=int, nargs="+")
   parser.add_argument("--clips", nargs="+")
   args = parser.parse_args()
+  resolve_robot_arguments(args, parser)
   validate_logging_arguments(parser, args)
   if min(
     args.iterations,
@@ -228,7 +231,9 @@ def main():
     saved_config = training_config(saved) if saved else None
   except ValueError as error:
     parser.error(str(error))
-  config_values = dict(saved_config) if saved else asdict(OnlineConfig())
+  config_values = (
+    dict(saved_config) if saved else asdict(OnlineConfig(robot=args.robot))
+  )
   for field in fields(OnlineConfig):
     value = getattr(args, field.name, None)
     if value is not None:
@@ -286,6 +291,7 @@ def main():
 
       env = runtime.env = SuperMimicEnv(
         FoundationConfig.training(
+          robot=args.robot,
           manifest=args.manifest,
           num_envs=config.num_envs,
           clips=config.clips,
@@ -297,7 +303,10 @@ def main():
         device=args.device,
       )
       trainer = runtime.trainer = OnlineTrainer(
-        env, robot_metadata(), config, total_iterations=args.iterations
+        env,
+        robot_metadata(args.robot),
+        config,
+        total_iterations=args.iterations,
       )
       if saved:
         trainer.load_state_dict(saved)

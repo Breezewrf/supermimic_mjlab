@@ -5,6 +5,7 @@ from itertools import pairwise
 import torch
 from torch import Tensor, nn
 
+from ..config.morphology import RobotLayout, state_layout
 from ..mdp.state import (
   quat_apply,
   quat_conjugate,
@@ -24,12 +25,18 @@ LEGACY_REFERENCE_SCHEMA = "full_body_268"
 LEGACY_GOAL_DIM = 2680
 
 
+REFERENCE_SCHEMAS = {
+  730: REFERENCE_SCHEMA,
+  2680: LEGACY_REFERENCE_SCHEMA,
+  610: "root_joint_61_v1",
+  2560: "full_body_256_v1",
+}
+
+
 def schema_for_dimension(reference_dim: int) -> str:
-  if reference_dim == GOAL_DIM:
-    return REFERENCE_SCHEMA
-  if reference_dim == LEGACY_GOAL_DIM:
-    return LEGACY_REFERENCE_SCHEMA
-  raise ValueError("reference_dim must be 730 or 2680")
+  if reference_dim not in REFERENCE_SCHEMAS:
+    raise ValueError("Unsupported G1 reference dimension")
+  return REFERENCE_SCHEMAS[reference_dim]
 
 
 def mlp(input_dim: int, hidden: tuple[int, ...], output_dim: int) -> nn.Sequential:
@@ -72,8 +79,8 @@ def reference_features(reference: dict[str, Tensor], default_q: Tensor) -> Tenso
     reference["joint_vel"] * 0.1,
   )
   result = torch.cat(parts, -1)
-  if result.shape[-2:] != (10, REFERENCE_DIM):
-    raise ValueError("Expected ten reference frames with 73 root/joint features")
+  if result.shape[-2:] != (10, 15 + 2 * default_q.numel()):
+    raise ValueError("Expected ten reference frames matching the robot joints")
   return result.flatten(-2)
 
 
@@ -103,14 +110,16 @@ def legacy_reference_features(
     ),
     -1,
   )
-  if features.shape[-2:] != (10, 268):
+  if features.shape[-2:] != (10, 210 + 2 * default_q.numel()):
     raise ValueError("Full-body reference needs ten frames and fourteen tracked bodies")
   return features.flatten(-2)
 
 
 def reference_feature_function(reference_dim: int):
   schema_for_dimension(reference_dim)
-  return reference_features if reference_dim == GOAL_DIM else legacy_reference_features
+  return (
+    reference_features if reference_dim in (730, 610) else legacy_reference_features
+  )
 
 
 class MotionActor(nn.Module):
@@ -120,7 +129,7 @@ class MotionActor(nn.Module):
     hidden_dims: tuple[int, ...] = (2048, 1024, 512, 256),
     relative_orientation: bool = False,
     amp: str = "none",
-    reference_dim: int = GOAL_DIM,
+    reference_dim: int | None = None,
     input_normalization: bool = False,
     motion_anchor_ori_b: bool = False,
   ):
@@ -129,11 +138,17 @@ class MotionActor(nn.Module):
     self.relative_orientation = relative_orientation
     self.motion_anchor_ori_b = motion_anchor_ori_b
     self.amp = amp
+    layout = RobotLayout(default_q.numel())
+    reference_dim = layout.reference_dim if reference_dim is None else reference_dim
+    if reference_dim not in (layout.reference_dim, layout.full_body_reference_dim):
+      raise ValueError("Reference dimension does not match robot joints")
     self.reference_dim = reference_dim
     self.reference_schema = schema_for_dimension(reference_dim)
     self.reference_features = reference_feature_function(reference_dim)
     self.input_normalization = input_normalization
-    self.observation_dim = 93 + 6 * (relative_orientation + motion_anchor_ori_b)
+    self.observation_dim = layout.observation_dim + 6 * (
+      relative_orientation + motion_anchor_ori_b
+    )
     self.obs_norm = (
       RunningNorm(self.observation_dim) if input_normalization else nn.Identity()
     )
@@ -144,11 +159,16 @@ class MotionActor(nn.Module):
     self.register_buffer(
       "observation_scale",
       torch.tensor(
-        [0.3] * 29 + [5.0] * 29 + [3.14] * 3 + [1.0] * (self.observation_dim - 61)
+        [0.3] * layout.num_joints
+        + [5.0] * layout.num_joints
+        + [3.14] * 3
+        + [1.0] * (self.observation_dim - (2 * layout.num_joints + 3))
       ),
     )
     self.encoder = mlp(reference_dim, self.hidden_dims, 32)
-    self.decoder = mlp(32 + 10 * self.observation_dim, self.hidden_dims, 29)
+    self.decoder = mlp(
+      32 + 10 * self.observation_dim, self.hidden_dims, layout.num_joints
+    )
     nn.init.normal_(self.decoder[-1].weight, std=0.001)
     nn.init.zeros_(self.decoder[-1].bias)
 
@@ -194,24 +214,33 @@ class MotionCritic(nn.Module):
     default_q: Tensor,
     hidden_dims: tuple[int, ...] = (256, 128),
     amp: str = "none",
-    reference_dim: int = GOAL_DIM,
+    reference_dim: int | None = None,
     input_normalization: bool = False,
   ):
     super().__init__()
     self.hidden_dims = tuple(hidden_dims)
     self.amp = amp
+    layout = RobotLayout(default_q.numel())
+    reference_dim = layout.reference_dim if reference_dim is None else reference_dim
+    if reference_dim not in (layout.reference_dim, layout.full_body_reference_dim):
+      raise ValueError("Reference dimension does not match robot joints")
     self.reference_dim = reference_dim
     self.reference_schema = schema_for_dimension(reference_dim)
     self.reference_features = reference_feature_function(reference_dim)
     self.input_normalization = input_normalization
     self.input_norm = (
-      RunningNorm(71 + reference_dim + 33) if input_normalization else nn.Identity()
+      RunningNorm(layout.state_dim + reference_dim + layout.context_dim)
+      if input_normalization
+      else nn.Identity()
     )
     self.register_buffer("default_q", default_q.detach().clone().float())
     self.register_buffer(
-      "context_scale", torch.tensor([1.0] + [0.01] * 29 + [0.025, 0.05, 0.05])
+      "context_scale",
+      torch.tensor([1.0] + [0.01] * layout.num_joints + [0.025, 0.05, 0.05]),
     )
-    self.value = mlp(71 + reference_dim + 33, self.hidden_dims, 1)
+    self.value = mlp(
+      layout.state_dim + reference_dim + layout.context_dim, self.hidden_dims, 1
+    )
 
   def features(
     self,
@@ -227,10 +256,10 @@ class MotionCritic(nn.Module):
       (
         quat_apply(inverse_yaw, state[..., :3] - origin) / 0.3,
         quaternion,
-        (state[..., 7:36] - self.default_q) / 0.3,
-        quat_apply(inverse_yaw, state[..., 36:39]),
-        quat_apply(inverse_yaw, state[..., 39:42]) / 3.14,
-        state[..., 42:71] / 5,
+        (state[..., state_layout(state).q] - self.default_q) / 0.3,
+        quat_apply(inverse_yaw, state[..., state_layout(state).v]),
+        quat_apply(inverse_yaw, state[..., state_layout(state).w]) / 3.14,
+        state[..., state_layout(state).qd] / 5,
       ),
       -1,
     )

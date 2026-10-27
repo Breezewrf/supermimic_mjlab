@@ -104,7 +104,7 @@ def imagine(
   goal_fn = kernels.goals if kernels is not None else actor.reference_features
   with torch.no_grad():
     goals = goal_fn(windows, actor.default_q)
-  first_action = history[:, -1, -29:]
+  first_action = history[:, -1, -actor.default_q.numel() :]
   actions, states = [], [state]
   for t in range(horizon):
     step_args = (
@@ -119,7 +119,7 @@ def imagine(
     else:
       next_state, action, observation = kernels.imag_step(*step_args)
     if sensor_noise:
-      observation = add_sensor_noise(observation, generator)
+      observation = add_sensor_noise(observation, generator, actor.default_q.numel())
     history = torch.cat((history[:, 1:], observation[:, None]), 1)
     state = next_state
     actions.append(action)

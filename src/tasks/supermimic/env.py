@@ -6,8 +6,9 @@ import torch
 from mjlab.envs import ManagerBasedRlEnv
 from torch import Tensor
 
+from .config.morphology import tracked_bodies
 from .config.robot_cfg import FOOT_COLLISION_EXPR
-from .config.task_cfg import MOTION_ANCHOR_INDEX, TRACKED_BODIES, FoundationConfig
+from .config.task_cfg import MOTION_ANCHOR_INDEX, FoundationConfig
 from .data.motion_library import MotionLibrary
 from .env_cfg import make_env_cfg
 from .mdp.reset_sampler import ResetSampler
@@ -27,6 +28,8 @@ class SuperMimicEnv(ManagerBasedRlEnv):
     self, config: FoundationConfig, device: str = "cuda:0", render_mode=None
   ):
     self.foundation_config = config
+    self.layout = config.layout
+    self.tracked_bodies = tracked_bodies(config.robot)
     super().__init__(make_env_cfg(config), device=device, render_mode=render_mode)
     self.robot = self.scene["robot"]
     self.library = self._load_library(config, device)
@@ -35,7 +38,7 @@ class SuperMimicEnv(ManagerBasedRlEnv):
     ):
       raise ValueError("PD action order must match G1 joint/state order")
     self.body_ids = torch.tensor(
-      [self.robot.body_names.index(b) for b in TRACKED_BODIES], device=device
+      [self.robot.body_names.index(b) for b in self.tracked_bodies], device=device
     )
     foot_ids, _ = self.robot.find_geoms(FOOT_COLLISION_EXPR)
     if not foot_ids:
@@ -53,8 +56,10 @@ class SuperMimicEnv(ManagerBasedRlEnv):
     self.motion_id = torch.zeros(self.num_envs, dtype=torch.long, device=device)
     self.frame_id = torch.zeros_like(self.motion_id)
     self.episode_id = torch.full_like(self.motion_id, -1)
-    self.previous_action = torch.zeros(self.num_envs, 29, device=device)
-    self.context = torch.zeros(self.num_envs, 33, device=device)
+    self.previous_action = torch.zeros(
+      self.num_envs, self.layout.num_joints, device=device
+    )
+    self.context = torch.zeros(self.num_envs, self.layout.context_dim, device=device)
     self.history = ObservationHistory(
       self.num_envs, config.history_length, device, config.observation_dim
     )
@@ -75,7 +80,7 @@ class SuperMimicEnv(ManagerBasedRlEnv):
     return MotionLibrary(
       config.manifest,
       tuple(self.robot.joint_names),
-      TRACKED_BODIES,
+      self.tracked_bodies,
       device=device,
       clips=config.clips,
     )
@@ -144,7 +149,7 @@ class SuperMimicEnv(ManagerBasedRlEnv):
       anchor_orientation,
     )
     noisy = (
-      add_sensor_noise(clean, self.generator)
+      add_sensor_noise(clean, self.generator, self.layout.num_joints)
       if self.foundation_config.sensor_noise
       else clean.clone()
     )
@@ -232,13 +237,15 @@ class SuperMimicEnv(ManagerBasedRlEnv):
     self.robot.set_joint_position_target(joint_pos, env_ids=env_ids)
     model = self.sim.model
     self.context[env_ids, 0] = model.geom_friction[env_ids, self.foot_geom_id, 0]
-    self.context[env_ids, 1:30] = self.robot.data.encoder_bias[env_ids]
+    self.context[env_ids, 1 : 1 + self.layout.num_joints] = (
+      self.robot.data.encoder_bias[env_ids]
+    )
     original_com = torch.as_tensor(
       self.sim.mj_model.body_ipos[self.torso_id].copy(),
       dtype=self.context.dtype,
       device=self.device,
     )
-    self.context[env_ids, 30:33] = (
+    self.context[env_ids, 1 + self.layout.num_joints :] = (
       model.body_ipos[env_ids, self.torso_id] - original_com
     )
     self.scene.write_data_to_sim()
@@ -265,8 +272,11 @@ class SuperMimicEnv(ManagerBasedRlEnv):
 
   @torch.no_grad()
   def step(self, action: Tensor):
-    if action.shape != (self.num_envs, 29) or not torch.isfinite(action).all():
-      raise ValueError("Expected finite (num_envs, 29) normalized actions")
+    if (
+      action.shape != (self.num_envs, self.layout.num_joints)
+      or not torch.isfinite(action).all()
+    ):
+      raise ValueError("Expected finite normalized actions matching robot joint count")
     action = action.to(self.device).clone()
     if self.foundation_config.action_clip is not None:
       action.clamp_(

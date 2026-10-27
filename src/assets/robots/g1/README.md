@@ -7,8 +7,9 @@ upstream copyright HansZ8).
 The XML and STL files are copied unchanged. The source repository's license
 is included in `LICENSE` (CC BY 4.0).
 
-Training uses `g1_29dof_rev_1_0.xml`; the 23- and 12-DoF variants are retained
-as supplied by the source. The 29-DoF robot has 26 collision meshes, four
+Training defaults to `g1_29dof_rev_1_0.xml`; `--robot g1_23dof` selects
+`g1_23dof_rev_1_0.xml` throughout the data and learning pipelines. The 12-DoF
+variant is retained as supplied by the source and is not a supported training variant. The 29-DoF robot has 26 collision meshes, four
 shoulder cylinders, and four spheres of radius 0.005 m under each foot.
 
 `src/tasks/supermimic/config/robot_cfg.py` adapts the model at load time:

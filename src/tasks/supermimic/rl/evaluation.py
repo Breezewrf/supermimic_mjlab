@@ -31,7 +31,10 @@ def evaluation_env_count(
     not requested
     or bool(
       requested.intersection(
-        (Path(entry["file"]).as_posix(), Path(entry["file"]).with_suffix("").as_posix())
+        (
+          Path(entry["file"]).as_posix(),
+          Path(entry["file"]).with_suffix("").as_posix(),
+        )
       )
     )
     for entry in entries
@@ -130,8 +133,8 @@ def evaluation_summary(report: dict) -> str:
 
 
 def zero_policy(history: Tensor, future_reference: dict[str, Tensor]) -> Tensor:
-  del future_reference
-  return history.new_zeros((len(history), 29))
+  joints = future_reference.get("joint_pos")
+  return history.new_zeros((len(history), 29 if joints is None else joints.shape[-1]))
 
 
 @torch.no_grad()

@@ -18,6 +18,7 @@ import mujoco
 import numpy as np
 import torch
 
+from ..config.morphology import state_layout
 from ..mdp.state import quat_conjugate, quat_inverse_apply, quat_mul, yaw_quat
 from .evaluation import EvaluationInterrupted
 
@@ -59,13 +60,13 @@ class EvaluationScene:
     state = state_tensor.numpy()
     self.data.qpos[self.root_adr[:3]] = state[:3] + self.origin
     self.data.qpos[self.root_adr[3:]] = state[3:7]
-    self.data.qpos[self.joint_adr] = state[7:36]
+    self.data.qpos[self.joint_adr] = state[state_layout(state).q]
     # Perturbation damping uses body velocities, including local angular qvel.
-    self.data.qvel[self.root_v_adr[:3]] = state[36:39]
+    self.data.qvel[self.root_v_adr[:3]] = state[state_layout(state).v]
     self.data.qvel[self.root_v_adr[3:]] = quat_inverse_apply(
-      state_tensor[3:7], state_tensor[39:42]
+      state_tensor[3:7], state_tensor[state_layout(state_tensor).w]
     ).numpy()
-    self.data.qvel[self.joint_v_adr] = state[42:71]
+    self.data.qvel[self.joint_v_adr] = state[state_layout(state).qd]
     self.data.time = frame * env.step_dt
     mujoco.mj_forward(self.model, self.data)
     self.camera.lookat[:] = state[:3] + self.origin
@@ -84,12 +85,12 @@ class EvaluationScene:
       data.qpos[:] = self.data.qpos
       data.qpos[self.root_adr[:3]] = prediction[:3].numpy() + self.origin
       data.qpos[self.root_adr[3:]] = prediction[3:7].numpy()
-      data.qpos[self.joint_adr] = prediction[7:36].numpy()
-      data.qvel[self.root_v_adr[:3]] = prediction[36:39].numpy()
+      data.qpos[self.joint_adr] = prediction[state_layout(prediction).q].numpy()
+      data.qvel[self.root_v_adr[:3]] = prediction[state_layout(prediction).v].numpy()
       data.qvel[self.root_v_adr[3:]] = quat_inverse_apply(
-        prediction[3:7], prediction[39:42]
+        prediction[3:7], prediction[state_layout(prediction).w]
       ).numpy()
-      data.qvel[self.joint_v_adr] = prediction[42:71].numpy()
+      data.qvel[self.joint_v_adr] = prediction[state_layout(prediction).qd].numpy()
       data.time = getattr(self.world_model, "target_frame", frame) * env.step_dt
       mujoco.mj_forward(self.model, data)
     if self.ghost:

@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from src.tasks.supermimic.config.task_cfg import DEFAULT_MANIFEST
+from src.tasks.supermimic.config.cli import add_robot_argument, resolve_robot_arguments
 from src.tasks.supermimic.data.motion_library import MotionLibrary
 from src.tasks.supermimic.data.world_model_data import ReplayCorpus, file_sha256
 from src.tasks.supermimic.models.kinematics import robot_metadata
@@ -36,9 +36,10 @@ def save_checkpoint(path: Path, payload: dict):
 
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
+  add_robot_argument(parser)
   parser.add_argument("--mode", choices=("train", "evaluate"), default="train")
   parser.add_argument("--replay", nargs="+", type=Path, required=True)
-  parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+  parser.add_argument("--manifest", type=Path)
   parser.add_argument("--device", default="cuda:0")
   parser.add_argument(
     "--output", type=Path, default=Path("outputs/supermimic/world_model")
@@ -76,6 +77,7 @@ def main():
     help="Allow a subset of clips; never qualify this run for BPTT",
   )
   args = parser.parse_args()
+  resolve_robot_arguments(args, parser)
   if (
     min(
       args.steps,
@@ -128,7 +130,9 @@ def main():
   )
   split_seed = checkpoint["config"]["seed"] if checkpoint else args.seed
   corpus = ReplayCorpus(args.replay, selected, seed=split_seed, strict=not args.smoke)
-  metadata = robot_metadata()
+  metadata = robot_metadata(args.robot)
+  if corpus.buffers[0].data["action"].shape[-1] != len(metadata["joint_names"]):
+    parser.error("Replay joint count does not match selected robot")
   manifest_hash = file_sha256(args.manifest)
   if checkpoint:
     if checkpoint.get("schema_version") != 1:
@@ -268,6 +272,7 @@ def main():
       if args.device.startswith("cuda")
       else [],
       "config": {
+        "robot": args.robot,
         "seed": split_seed,
         "batch_size": args.batch_size,
         "smoke": args.smoke,

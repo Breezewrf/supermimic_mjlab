@@ -114,6 +114,55 @@ This writes one NPZ per clip and a `manifest.json`. Proceed to training after
 conversion; if these files already exist, this step can be skipped. See the
 [LAFAN conversion guide (Chinese)](doc/lafan_conversion_zh.md) for fields and coordinate conventions.
 
+## G1 23DoF
+
+Both G1 29DoF (default) and G1 23DoF are supported throughout collection,
+motion/velocity training, world-model fitting, evaluation, playback and export.
+The 23DoF variant loads `g1_23dof_rev_1_0.xml` from the vendored assets.
+It omits waist roll/pitch and wrist pitch/yaw, and tracks the two rubber-hand
+bodies in place of the 29DoF wrist-yaw bodies.
+
+| Layout | G1 29DoF | G1 23DoF |
+| --- | --- | --- |
+| Physical state / action / context | 71 / 29 / 33 | 59 / 23 / 27 |
+| Base observation | 93 | 75 |
+| Ten-frame compact / full-body reference | 730 / 2680 | 610 / 2560 |
+
+Each optional orientation observation adds six values. Velocity control uses
+base observations. The released checkpoints and ablation results below use 29DoF;
+23DoF requires its own training weights.
+
+Convert the same 29-joint LAFAN CSV inputs with the existing script. It selects
+joints by name and recomputes all body poses and velocities using the 23DoF model:
+
+```bash
+python scripts/data/convert_lafan_to_npz.py --robot g1_23dof
+python scripts/train_supermimic.py --robot g1_23dof \
+  --device cuda:0 --num-envs 64 --amp none --no-compile \
+  --output outputs/supermimic/g1_23dof
+```
+
+The default 23DoF manifest is
+`src/assets/motions/g1/lafan1_npz_23dof/manifest.json`; 29DoF paths stay unchanged.
+Use `--manifest` or the converter's `--output-dir` for custom locations. Compact
+references are the default; select `--reference-dim 2560` for 23DoF full-body inputs.
+A custom `--model-xml` must match the selected robot.
+
+```bash
+python scripts/evaluate_supermimic.py \
+  --checkpoint outputs/supermimic/g1_23dof/policy_best.pt
+python scripts/play_supermimic.py \
+  --checkpoint outputs/supermimic/g1_23dof/policy_best.pt
+python scripts/train_velocity.py --robot g1_23dof --from-scratch \
+  --output outputs/velocity/g1_23dof
+```
+
+Resume, evaluation and playback infer the robot from the checkpoint; an explicit
+conflicting `--robot` is rejected. Old checkpoints without a robot field use 29DoF.
+Velocity initialization from motion/world-model weights requires matching 23DoF
+checkpoints with base observations. Offline collection and world-model scripts
+also accept `--robot g1_23dof`. Export commands preserve robot metadata automatically.
+
 ## Online training
 
 `motion_anchor_ori_b` is an optional ablation, disabled by default; enable it with

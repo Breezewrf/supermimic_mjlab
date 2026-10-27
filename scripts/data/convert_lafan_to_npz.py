@@ -21,6 +21,8 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+from src.tasks.supermimic.config.morphology import ROBOTS, robot_layout
+
 CSV_JOINT_NAMES = (
   "left_hip_pitch_joint",
   "left_hip_roll_joint",
@@ -128,17 +130,20 @@ def resample_motion(
   return result
 
 
-def load_robot(model_xml: Path | None = None):
+def load_robot(model_xml: Path | None = None, robot: str = "g1_29dof"):
   """Use the same vendored RoboJuDo-Plus G1 as the training task by default."""
   if model_xml is None:
     from mjlab.entity import Entity
 
-    from src.tasks.supermimic.config.robot_cfg import G1_XML, get_supermimic_robot_cfg
+    from src.tasks.supermimic.config.robot_cfg import get_supermimic_robot_cfg
 
-    robot = Entity(get_supermimic_robot_cfg())
-    model = robot.spec.compile()
-    joint_names, body_names = tuple(robot.joint_names), tuple(robot.body_names)
-    source = str(G1_XML.resolve())
+    robot_entity = Entity(get_supermimic_robot_cfg(robot))
+    model = robot_entity.spec.compile()
+    joint_names, body_names = (
+      tuple(robot_entity.joint_names),
+      tuple(robot_entity.body_names),
+    )
+    source = str(robot_layout(robot).xml.resolve())
   else:
     model = mujoco.MjModel.from_xml_path(str(model_xml))
     joint_names = tuple(
@@ -148,6 +153,22 @@ def load_robot(model_xml: Path | None = None):
     )
     body_names = tuple(model.body(i).name for i in range(1, model.nbody))
     source = str(model_xml.resolve())
+  expected = tuple(
+    name
+    for name in CSV_JOINT_NAMES
+    if robot == "g1_29dof"
+    or name
+    not in (
+      "waist_roll_joint",
+      "waist_pitch_joint",
+      "left_wrist_pitch_joint",
+      "left_wrist_yaw_joint",
+      "right_wrist_pitch_joint",
+      "right_wrist_yaw_joint",
+    )
+  )
+  if set(joint_names) != set(expected):
+    raise ValueError("XML joints do not match the selected robot")
   return model, joint_names, body_names, source
 
 
@@ -165,11 +186,19 @@ def motion_to_arrays(
   is needed. cvel linear velocities are shifted from the subtree COM to the
   body-link origins, exactly as mjlab's body_link_lin_vel_w does.
   """
-  if len(joint_names) != 29 or set(joint_names) != set(CSV_JOINT_NAMES):
-    raise ValueError("Robot must have exactly the 29 named G1 joints")
+  if (
+    len(joint_names) not in (23, 29)
+    or len(set(joint_names)) != len(joint_names)
+    or not set(joint_names).issubset(CSV_JOINT_NAMES)
+  ):
+    raise ValueError("Robot must have 23 or 29 named G1 joints")
   free_ids = np.flatnonzero(model.jnt_type == mujoco.mjtJoint.mjJNT_FREE)
-  if len(free_ids) != 1 or model.nq != 36 or model.nv != 35:
-    raise ValueError("Expected one floating-base G1 (nq=36, nv=35)")
+  if (
+    len(free_ids) != 1
+    or model.nq != 7 + len(joint_names)
+    or model.nv != 6 + len(joint_names)
+  ):
+    raise ValueError("Expected one floating-base G1 matching the selected joint count")
   joint_ids = np.array([model.joint(name).id for name in joint_names])
   if np.any(model.jnt_type[joint_ids] != mujoco.mjtJoint.mjJNT_HINGE):
     raise ValueError("G1 joints must be hinge joints")
@@ -234,7 +263,7 @@ def validate_arrays(arrays: dict[str, np.ndarray]) -> None:
   bodies = len(arrays["body_names"])
   for name in MOTION_FIELDS:
     shape = (
-      (count, 29)
+      (count, arrays["joint_pos"].shape[-1])
       if name.startswith("joint_")
       else (count, bodies, 4 if name == "body_quat_w" else 3)
     )
@@ -262,25 +291,27 @@ def save_npz(path: Path, arrays: dict[str, np.ndarray]) -> None:
 
 def main() -> None:
   parser = argparse.ArgumentParser(description=__doc__)
+  parser.add_argument("--robot", choices=ROBOTS, default="g1_29dof")
   parser.add_argument(
     "--input-dir",
     type=Path,
     default=ROOT / "src/assets/motions/LAFAN1_Retargeting_Dataset",
   )
-  parser.add_argument(
-    "--output-dir", type=Path, default=ROOT / "src/assets/motions/g1/lafan1_npz"
-  )
+  parser.add_argument("--output-dir", type=Path)
   parser.add_argument("--pattern", default="*.csv", help="Glob relative to input-dir")
   parser.add_argument("--input-fps", type=positive_fps, default=30.0)
   parser.add_argument("--output-fps", type=positive_fps, default=50.0)
   parser.add_argument("--quaternion-order", choices=("xyzw", "wxyz"), default="xyzw")
   parser.add_argument(
-    "--model-xml", type=Path, help="Override the vendored G1 with a standalone G1 XML"
+    "--model-xml",
+    type=Path,
+    help="Override the vendored G1 with a standalone G1 XML",
   )
   parser.add_argument(
     "--overwrite", action="store_true", help="Replace existing NPZ files"
   )
   args = parser.parse_args()
+  args.output_dir = args.output_dir or robot_layout(args.robot).manifest.parent
   sources = sorted(path for path in args.input_dir.glob(args.pattern) if path.is_file())
   if not sources:
     parser.error(f"No files match {args.input_dir / args.pattern}")
@@ -291,7 +322,7 @@ def main() -> None:
   existing = [path for path in destinations if path.exists()]
   if existing and not args.overwrite:
     parser.error(f"Output already exists: {existing[0]}; use --overwrite to replace")
-  model, joints, bodies, model_source = load_robot(args.model_xml)
+  model, joints, bodies, model_source = load_robot(args.model_xml, args.robot)
   # Hash the compiled model, including the actual geometry and joint definitions.
   with tempfile.TemporaryDirectory() as directory:
     binary = Path(directory) / "robot.mjb"
@@ -345,6 +376,7 @@ def main() -> None:
     "fps": args.output_fps,
     "input_quaternion_order": args.quaternion_order,
     "quaternion_order": "wxyz",
+    "robot": args.robot,
     "model_source": model_source,
     "model_sha256": model_hash,
     "mujoco_version": mujoco.__version__,

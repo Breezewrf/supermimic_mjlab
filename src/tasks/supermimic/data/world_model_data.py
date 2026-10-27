@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 from torch import Tensor
 
+from ..config.morphology import RobotLayout
 from .replay_buffer import REQUIRED_FIELDS, ReplayBuffer
 
 
@@ -50,15 +51,18 @@ class ReplayCorpus:
         raise ValueError(f"Replay clip names do not match manifest: {path}")
       count = min(buffer.steps, buffer.capacity)
       data = {name: value[:count] for name, value in buffer.data.items()}
+      layout = RobotLayout(data["action"].shape[-1])
       observation_shape = data["observation"].shape[2:]
-      if observation_shape not in ((93,), (99,), (105,)):
+      if observation_shape not in tuple(
+        (layout.observation_dim + extra,) for extra in (0, 6, 12)
+      ):
         raise ValueError(f"Wrong replay shape for observation in {path}")
       expected = {
-        "state": (71,),
-        "next_state": (71,),
-        "action": (29,),
-        "previous_action": (29,),
-        "context": (33,),
+        "state": (layout.state_dim,),
+        "next_state": (layout.state_dim,),
+        "action": (layout.num_joints,),
+        "previous_action": (layout.num_joints,),
+        "context": (layout.context_dim,),
         "observation": observation_shape,
         "next_observation": observation_shape,
         "clean_observation": observation_shape,

@@ -11,8 +11,8 @@ from pathlib import Path
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from src.tasks.supermimic.config.cli import add_robot_argument, resolve_robot_arguments
 from src.tasks.supermimic.config.task_cfg import (
-  DEFAULT_MANIFEST,
   FoundationConfig,
 )
 from src.tasks.supermimic.rl.evaluation import (
@@ -50,7 +50,8 @@ def print_motion(row: dict):
 
 def main(*, playback=False):
   parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+  add_robot_argument(parser)
+  parser.add_argument("--manifest", type=Path)
   parser.add_argument("--clips", nargs="*", default=[])
   parser.add_argument("--device", default="cuda:0")
   parser.add_argument("--seed", type=int, default=0)
@@ -135,6 +136,7 @@ def main(*, playback=False):
     help="Export evaluation as MP4 (requires ffmpeg; headless: MUJOCO_GL=egl)",
   )
   args = parser.parse_args()
+  resolve_robot_arguments(args, parser)
   visual = playback or args.viewer != "none" or args.video is not None
   single_env = visual or args.world_model is not None
   max_envs = args.num_envs if args.num_envs is not None else (1 if single_env else 64)
@@ -209,6 +211,7 @@ def main(*, playback=False):
   from src.tasks.supermimic.env import SuperMimicEnv
 
   config = FoundationConfig(
+    robot=args.robot,
     manifest=args.manifest,
     clips=tuple(args.clips),
     num_envs=evaluation_env_count(args.manifest, tuple(args.clips), max_envs),
@@ -238,7 +241,11 @@ def main(*, playback=False):
 
       if args.world_model_mode == "future":
         comparison = WorldModelFuturePreview(
-          env, world, policy, args.world_model_horizon, args.world_model_refresh
+          env,
+          world,
+          policy,
+          args.world_model_horizon,
+          args.world_model_refresh,
         )
       else:
         comparison = WorldModelPlayback(env, world, args.world_model_horizon)
@@ -262,7 +269,8 @@ def main(*, playback=False):
         )
         if comparison is not None:
           print(
-            "Orange ghost = world-model prediction; W: toggle prediction.", flush=True
+            "Orange ghost = world-model prediction; W: toggle prediction.",
+            flush=True,
           )
         if perturbations:
           print(
@@ -310,7 +318,10 @@ def main(*, playback=False):
           before_step=live_viewer.before_step if live_viewer else None,
         )
       except EvaluationInterrupted:
-        print("Viewer closed; the interrupted evaluation was not saved.", flush=True)
+        print(
+          "Viewer closed; the interrupted evaluation was not saved.",
+          flush=True,
+        )
         break
       report.update(
         policy=str(args.checkpoint)

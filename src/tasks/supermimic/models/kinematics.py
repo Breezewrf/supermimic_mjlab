@@ -6,7 +6,8 @@ import json
 import torch
 from torch import Tensor, nn
 
-from ..config.task_cfg import MOTION_ANCHOR_BODY, MOTION_ANCHOR_INDEX, TRACKED_BODIES
+from ..config.morphology import robot_layout, state_layout, tracked_bodies
+from ..config.task_cfg import MOTION_ANCHOR_BODY, MOTION_ANCHOR_INDEX
 from ..mdp.state import (
   motion_anchor_ori_b,
   observe,
@@ -17,20 +18,27 @@ from ..mdp.state import (
 )
 
 
-def robot_metadata() -> dict:
+def robot_metadata(robot: str = "g1_29dof") -> dict:
   import mujoco
   import numpy as np
   from mjlab.entity import Entity
 
   from ..config.robot_cfg import get_supermimic_robot_cfg
 
-  cfg = get_supermimic_robot_cfg()
+  cfg = (
+    get_supermimic_robot_cfg()
+    if robot == "g1_29dof"
+    else get_supermimic_robot_cfg(robot)
+  )
+  layout = robot_layout(robot)
   robot = Entity(cfg)
   model = robot.spec.compile()
   if (
-    model.nq != 36 or model.nv != 35 or model.jnt_type[0] != mujoco.mjtJoint.mjJNT_FREE
+    model.nq != 7 + layout.num_joints
+    or model.nv != 6 + layout.num_joints
+    or model.jnt_type[0] != mujoco.mjtJoint.mjJNT_FREE
   ):
-    raise ValueError("Expected floating-base 29-DoF G1")
+    raise ValueError("Expected floating-base G1 matching the selected variant")
   joint_ids = [model.joint(name).id for name in robot.joint_names]
   body_ids = [model.body(name).id for name in robot.body_names]
   if body_ids[0] != int(model.jnt_bodyid[0]) or body_ids != list(range(1, model.nbody)):
@@ -118,8 +126,13 @@ def robot_metadata() -> dict:
 
 
 class G1Kinematics(nn.Module):
-  def __init__(self, metadata: dict, body_names: tuple[str, ...] = TRACKED_BODIES):
+  def __init__(self, metadata: dict, body_names: tuple[str, ...] | None = None):
     super().__init__()
+    self.layout = robot_layout(
+      "g1_23dof" if len(metadata["joint_names"]) == 23 else "g1_29dof"
+    )
+    if body_names is None:
+      body_names = tracked_bodies(self.layout.robot)
     self.parents = tuple(metadata["parents"])
     self.body_joints = tuple(metadata["body_joints"])
     self.body_names = tuple(body_names)
@@ -191,10 +204,13 @@ class G1Kinematics(nn.Module):
     )
 
   def forward(self, state: Tensor) -> dict[str, Tensor]:
-    if state.shape[-1] != 71:
-      raise ValueError("Expected a 71-dimensional physical state")
+    if state.shape[-1] != self.layout.state_dim:
+      raise ValueError(f"Expected a {self.layout.state_dim}-dimensional physical state")
     pos, quat = [state[..., :3]], [quat_normalize(state[..., 3:7])]
-    linear, angular = [state[..., 36:39]], [state[..., 39:42]]
+    linear, angular = (
+      [state[..., state_layout(state).v]],
+      [state[..., state_layout(state).w]],
+    )
     for body in range(1, len(self.parents)):
       parent, joint = self.parents[body], self.body_joints[body]
       if parent < 0 or parent >= body:
@@ -215,7 +231,9 @@ class G1Kinematics(nn.Module):
         child_quat = quat_mul(base_quat, rotation)
         rotated_anchor = quat_apply(child_quat, self.joint_anchor[joint])
         child_pos = anchor - rotated_anchor
-        child_angular = angular[parent] + axis * state[..., 42 + joint, None]
+        child_angular = (
+          angular[parent] + axis * state[..., 13 + self.layout.num_joints + joint, None]
+        )
         anchor_linear = linear[parent] + torch.linalg.cross(
           angular[parent], anchor - pos[parent]
         )

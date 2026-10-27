@@ -3,6 +3,7 @@
 import torch
 from torch import Tensor
 
+from ..config.morphology import state_layout
 from ..config.task_cfg import STEP_DT
 from .state import (
   quat_apply,
@@ -44,7 +45,7 @@ def tracking_reward(
   )
   root_pos_error = (ref_pos[..., 0, :] - root_pos).square().sum(-1)
   root_ori_error = rotation_error_squared(ref_quat[..., 0, :], root_quat)
-  q = state[..., 7:36]
+  q = state[..., state_layout(state).q]
   limit_cost = (
     (q - joint_limits[..., 1]).clamp_min(0) + (joint_limits[..., 0] - q).clamp_min(0)
   ).sum(-1)

@@ -117,6 +117,11 @@ class OnlineTrainer:
     if env.num_envs != config.num_envs:
       raise ValueError("Environment count differs from online configuration")
     self.env, self.metadata, self.config = env, metadata, config
+    if (
+      env.foundation_config.robot != config.robot
+      or len(metadata["joint_names"]) != env.layout.num_joints
+    ):
+      raise ValueError("Environment, metadata and training robot differ")
     self.device = str(env.device)
     if (
       self.device.startswith("cuda")
@@ -206,7 +211,10 @@ class OnlineTrainer:
         self.actor.update_normalization(inputs["history"][:, -1], goal)
         if self.config.critic_input_normalization:
           features = self.critic.features(
-            self.env.read_state(), inputs["future_reference"], self.env.context, goal
+            self.env.read_state(),
+            inputs["future_reference"],
+            self.env.context,
+            goal,
           )
           self.critic.update_normalization(features)
       action = self.actor(inputs["history"], inputs["future_reference"])
