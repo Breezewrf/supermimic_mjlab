@@ -153,19 +153,26 @@ class MotionActor(nn.Module):
     nn.init.zeros_(self.decoder[-1].bias)
 
   def forward_features(self, history: Tensor, goal: Tensor) -> Tensor:
+    return self.decode(history, self.encode_motion(goal))
+
+  def encode_motion(self, goal: Tensor) -> Tensor:
+    return run_mlp(self.encoder, self.goal_norm(goal), self.amp).tanh()
+
+  def normalize_history(self, history: Tensor) -> Tensor:
     if history.shape[-2:] != (10, self.observation_dim):
       raise ValueError(
         f"Actor needs ten {self.observation_dim}-dimensional observations"
       )
-    latent = run_mlp(self.encoder, self.goal_norm(goal), self.amp).tanh()
-    observation = (
+    return (
       self.obs_norm(history)
       if self.input_normalization
       else history / self.observation_scale
     )
+
+  def decode(self, history: Tensor, latent: Tensor) -> Tensor:
     return run_mlp(
       self.decoder,
-      torch.cat((latent, observation.flatten(-2)), -1),
+      torch.cat((latent, self.normalize_history(history).flatten(-2)), -1),
       self.amp,
     )
 

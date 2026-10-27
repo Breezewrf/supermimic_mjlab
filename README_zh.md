@@ -12,6 +12,9 @@ Actor 和 Critic。
 
 当前数据集包含 40 段 G1 重定向 LAFAN 动作，约 2.45 小时，控制频率为 50 Hz。
 
+新增 93 维观测的速度控制接口，支持速度 encoder 预热、motion/velocity 联合训练以及
+不依赖参考动作的独立播放。训练方法与短跑验证结果见[速度控制说明](doc/velocity_controller_zh.md)。
+
 完整规模训练使用单张 **NVIDIA RTX A6000（48 GB 显存）**，在 4096 环境、FP32
 配置下训练 **15000 轮约需 4 小时**。显存较小的 GPU 可通过减少环境数和 batch size
 缩小训练规模，具体配置见[训练操作指南](doc/training_and_playback_zh.md#缩小训练规模)，性能未经验证。

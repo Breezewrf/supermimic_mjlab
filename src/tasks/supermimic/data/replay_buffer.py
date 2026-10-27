@@ -22,6 +22,15 @@ REQUIRED_FIELDS = {
   "time_out",
   "motion_end",
 }
+COMMON_FIELDS = REQUIRED_FIELDS - {"motion_id", "frame_id", "motion_end"}
+VELOCITY_FIELDS = COMMON_FIELDS | {
+  "command",
+  "next_command",
+  "command_source",
+  "command_remaining",
+  "reference_motion",
+  "reference_frame",
+}
 
 
 class ReplayBuffer:
@@ -31,10 +40,16 @@ class ReplayBuffer:
     capacity: int = 1000,
     device: str = "cpu",
     seed: int = 0,
+    *,
+    task: str = "motion",
   ):
     if num_envs < 1 or capacity < 1:
       raise ValueError("Replay environment count and capacity must be positive")
     self.num_envs, self.capacity, self.device = num_envs, capacity, device
+    if task not in ("motion", "velocity"):
+      raise ValueError("Unknown replay task")
+    self.task = task
+    self.required_fields = REQUIRED_FIELDS if task == "motion" else VELOCITY_FIELDS
     self.data: dict[str, Tensor] = {}
     self.steps = 0
     self.generator = torch.Generator(device=device).manual_seed(seed)
@@ -43,9 +58,9 @@ class ReplayBuffer:
     return min(self.steps, self.capacity) * self.num_envs
 
   def append(self, transition: dict[str, Tensor]) -> None:
-    if not REQUIRED_FIELDS.issubset(transition):
+    if not self.required_fields.issubset(transition):
       raise ValueError(
-        f"Missing transition fields: {REQUIRED_FIELDS - transition.keys()}"
+        f"Missing transition fields: {self.required_fields - transition.keys()}"
       )
     if self.data and transition.keys() != self.data.keys():
       raise ValueError("Replay schema cannot change after the first insertion")
@@ -84,7 +99,7 @@ class ReplayBuffer:
     return (
       self.data["terminated"][slots, envs]
       | self.data["time_out"][slots, envs]
-      | self.data["motion_end"][slots, envs]
+      | (self.data["motion_end"][slots, envs] if self.task == "motion" else False)
     )
 
   def _valid_windows(
@@ -213,6 +228,8 @@ class ReplayBuffer:
       raise ValueError("Invalid batch size or history length")
     if (horizon is None) != (clip_lengths is None):
       raise ValueError("Imagination horizon and clip lengths must be provided together")
+    if self.task == "velocity" and horizon is not None:
+      raise ValueError("Velocity starts do not have a motion horizon")
     if horizon is not None and horizon < 1:
       raise ValueError("Imagination horizon must be positive")
 
@@ -256,6 +273,7 @@ class ReplayBuffer:
     count = min(self.steps, self.capacity)
     return {
       "num_envs": self.num_envs,
+      "task": self.task,
       "capacity": self.capacity,
       "steps": self.steps,
       "data": {key: value[:count].cpu().clone() for key, value in self.data.items()},
@@ -266,7 +284,12 @@ class ReplayBuffer:
 
   @classmethod
   def from_state_dict(cls, state: dict, device: str = "cpu", restore_rng: bool = True):
-    buffer = cls(state["num_envs"], state["capacity"], device)
+    buffer = cls(
+      state["num_envs"],
+      state["capacity"],
+      device,
+      task=state.get("task", "motion"),
+    )
     buffer.steps = state["steps"]
     for name, value in state["data"].items():
       storage = torch.empty(

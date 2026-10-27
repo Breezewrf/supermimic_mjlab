@@ -135,7 +135,14 @@ class ConsoleReporter:
       print(text, file=self.stream, flush=True)
 
   def start(
-    self, config: dict, device: str, motions: int, output: Path, iteration: int
+    self,
+    config: dict,
+    device: str,
+    motions: int,
+    output: Path,
+    iteration: int,
+    *,
+    table_note: str | None = None,
   ):
     self.message(
       f"SuperMimic | {device} | {config['num_envs']:,} envs | {motions} motions | "
@@ -172,7 +179,8 @@ class ConsoleReporter:
       )
     if self.log_format == "table":
       self.message(
-        "Table: interval means | Fail%: failure events per transition | GPU: PyTorch peak GiB"
+        table_note
+        or "Table: interval means | Fail%: failure events per transition | GPU: PyTorch peak GiB"
       )
 
   def training(self, record: dict):
@@ -217,6 +225,9 @@ class ConsoleReporter:
       else f"{record['peak_gpu_memory_gib']:.2f}",
       duration((self.total - record["iteration"]) * record["seconds"]),
     )
+    self.table(columns, row)
+
+  def table(self, columns, row):
     header = self.lines % 20 == 0
     if self.console:
       from rich import box
