@@ -215,15 +215,19 @@ An already running training process needs to restart from `last.pt` to use this 
 
 ## Training logs and W&B
 
-The terminal shows a compact table instead of raw dictionaries. Values are averaged
-between reports; `Fail%` counts physical failure events per collected transition,
-`Steps/s` includes collection and optimization time, and `GPU` is the PyTorch peak
-allocation in GiB. Simulator initialization tables, kernel messages, and repeated
+The terminal separates Reward (higher), Error (lower), Loss (lower), imagined
+Objective (higher), Failure, and Performance. Rewards are weighted contributions
+per control step; physical errors show their units. Values are averaged between
+reports; failure percentages count events per collected transition. Throughput
+includes collection and optimization time; GPU memory is PyTorch peak allocation
+in GiB. Simulator initialization tables, kernel messages, and repeated
 seed messages are saved to `simulator.log`. Exceptions remain visible on stderr.
 
 Use `--log-interval 50` to print less often, `--verbose-sim` to show simulator
 messages, or `--log-format json` for the previous terminal JSON format.
-`metrics.jsonl` still stores every raw iteration, independently of terminal output.
+`metrics.jsonl` stores every iteration, retaining raw fields and adding classified
+`metric_groups`. W&B also provides `reward/`, `error/`, `loss/`, and `objective/`
+groups; legacy names remain available.
 Rich formatting is used when `rich` is installed; plain text is available otherwise.
 
 Enable the optional W&B and Rich dependencies, then sign in once:

@@ -1,5 +1,6 @@
 """Velocity metrics using the motion trainer's terminal renderer."""
 
+from .metric_schema import classified_metrics, is_collection_metric
 from .training_logger import ConsoleReporter, WandbReporter, duration
 
 
@@ -17,26 +18,21 @@ class VelocityMetricWindow:
       self.transitions += record["collected_transitions"]
     for key, value in record.items():
       # Collection metrics are retained between updates; count them only once.
-      if (
-        key.startswith(("motion/", "velocity/"))
-        and key
-        in (
-          "motion/failure_rate",
-          "velocity/physical_failure",
-          "velocity/linear_velocity_error",
-          "velocity/yaw_rate_error",
-        )
-        and not collected
-      ):
+      if is_collection_metric(key) and not collected:
         continue
       if isinstance(value, (int, float)) and not isinstance(value, bool):
-        self.totals[key] = self.totals.get(key, 0.0) + value
-        self.counts[key] = self.counts.get(key, 0) + 1
+        weight = record["collected_transitions"] if is_collection_metric(key) else 1
+        self.totals[key] = self.totals.get(key, 0.0) + value * weight
+        self.counts[key] = self.counts.get(key, 0) + weight
 
   def summary(self):
     result = {key: value / self.counts[key] for key, value in self.totals.items()}
     for key in ("iteration", "stage", "warmup_completed", "learning_rate"):
       result[key] = self.last[key]
+    if not self.transitions:
+      result = {
+        key: value for key, value in result.items() if not is_collection_metric(key)
+      }
     result["steps_per_second"] = self.transitions / max(self.totals["seconds"], 1e-9)
     return result
 
@@ -53,39 +49,81 @@ class VelocityConsoleReporter(ConsoleReporter):
         f"Stage: {self.training_phase} | warmup completed: {record['warmup_completed']:,}"
       )
 
-    def value(key, digits=4, scale=1):
-      number = record.get(key)
-      return "--" if number is None else f"{number * scale:.{digits}f}"
+    metrics = classified_metrics(record, include_collection=True)
 
-    self.table(
+    def value(key, unit="", digits=4, scale=1):
+      number = metrics.get(key)
+      return "--" if number is None else f"{number * scale:.{digits}f}{unit}"
+
+    rows = [
       (
-        "Iter",
-        "WM loss",
-        "Align",
-        "Vel J",
-        "Vel V",
-        "XY err",
-        "Yaw err",
-        "VFail%",
-        "MFail%",
-        "Steps/s",
-        "s/it",
-        "ETA",
+        "Reward ↑",
+        " / ".join(
+          (
+            "motion=" + value("reward/motion/total_per_step"),
+            "velocity=" + value("reward/velocity/total_per_step"),
+          )
+        )
+        + "  (weighted, dt-scaled per control step)",
       ),
       (
-        f"{record['iteration']:,}",
-        value("wm_loss"),
-        value("velocity/alignment_loss"),
-        value("velocity/objective"),
-        value("velocity/critic_loss"),
-        value("velocity/linear_velocity_error", 3),
-        value("velocity/yaw_rate_error", 3),
-        value("velocity/physical_failure", 2, 100),
-        value("motion/failure_rate", 2, 100),
-        f"{record['steps_per_second']:,.0f}",
-        f"{record['seconds']:.2f}",
-        duration((self.total - record["iteration"]) * record["seconds"]),
+        "Error ↓",
+        "velocity: XY="
+        + value("error/velocity/planar_velocity_m_per_s", " m/s", 3)
+        + " / yaw="
+        + value("error/velocity/yaw_rate_rad_per_s", " rad/s", 3),
       ),
+      (
+        "",
+        "motion: root position="
+        + value("error/motion/root_position_m", " m", 3)
+        + " / root rotation="
+        + value("error/motion/root_orientation_rad", " rad", 3),
+      ),
+      (
+        "Loss ↓",
+        "world model="
+        + value("loss/world_model/total")
+        + " / motion="
+        + value("loss/world_model/motion")
+        + " / velocity="
+        + value("loss/world_model/velocity"),
+      ),
+      (
+        "",
+        "latent MSE="
+        + value("loss/velocity/latent_alignment_mse")
+        + " / critic motion="
+        + value("loss/critic/motion")
+        + " / critic velocity="
+        + value("loss/critic/velocity"),
+      ),
+      (
+        "Objective ↑",
+        "imagined return: motion="
+        + value("objective/motion/return")
+        + " / velocity="
+        + value("objective/velocity/return"),
+      ),
+      (
+        "Failure ↓",
+        "motion="
+        + value("failure/motion/events_per_transition", "%", 2, 100)
+        + " / velocity="
+        + value("failure/velocity/events_per_transition", "%", 2, 100)
+        + "  (events per transition)",
+      ),
+      (
+        "Performance",
+        f"{record['steps_per_second']:,.0f} transitions/s / "
+        f"{record['seconds']:.2f} s/iteration / ETA "
+        + duration((self.total - record["iteration"]) * record["seconds"]),
+      ),
+    ]
+    self.metric_sections(
+      f"Iteration {record['iteration']:,}/{self.total:,} | {record['stage']} | "
+      f"lr={record['learning_rate']:.2e}",
+      rows,
     )
 
 
@@ -128,6 +166,7 @@ class VelocityWandbReporter(WandbReporter):
         and record["collected_this_iteration"]
       ):
         metrics["collection/" + key] = value
+    metrics.update(classified_metrics(record))
     self.run.log(metrics)
     self._persist(record["iteration"])
 

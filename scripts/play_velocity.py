@@ -1,4 +1,8 @@
-"""Reference-free velocity playback. WASD: translation; Q/E: turn; space: stop."""
+"""Reference-free velocity playback. WASD: translation; Q/E: turn; space: stop.
+
+Mouse forces: double-click a body, then Ctrl-drag to perturb it.
+Fall resets are disabled by default; --termination enables them.
+"""
 
 import argparse
 import json
@@ -26,16 +30,37 @@ def main():
   parser.add_argument("--device", default="cuda:0")
   parser.add_argument("--command", type=float, nargs=3, default=(0.0, 0.0, 0.0))
   parser.add_argument("--headless", action="store_true")
-  parser.add_argument("--steps", type=int, default=1000)
+  parser.add_argument(
+    "--termination",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Reset after falling (default: disabled during playback)",
+  )
+  parser.add_argument(
+    "--perturbations",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Apply native viewer mouse forces to physics (default: enabled)",
+  )
+  parser.add_argument(
+    "--steps",
+    type=int,
+    help="Control-step limit (default: until window closes; headless: 1000)",
+  )
   args = parser.parse_args()
-  if args.steps < 1:
+  if args.steps is not None and args.steps < 1:
     raise ValueError("steps must be positive")
+  step_limit = (
+    args.steps if args.steps is not None else (1000 if args.headless else None)
+  )
   torch.set_num_threads(4)
   actor, saved = load_velocity_actor(args.checkpoint, args.device)
-  env = viewer = None
+  env = viewer = passive = mouse = None
   try:
     env = VelocityEnv(
-      FoundationConfig(num_envs=1, episode_length_s=1e9),
+      FoundationConfig(
+        num_envs=1, episode_length_s=1e9, terminate_on_failure=args.termination
+      ),
       VelocityConfig(**saved["velocity_config"]),
       args.device,
     )
@@ -44,17 +69,28 @@ def main():
     env.set_command(command)
     keys = SimpleQueue()
     if not args.headless:
-      import mujoco.viewer
-
-      from src.tasks.supermimic.rl.visualization import EvaluationScene
+      from src.tasks.supermimic.rl.visualization import (
+        EvaluationScene,
+        MousePerturbations,
+        PassiveViewer,
+      )
 
       scene = EvaluationScene(env, ghost=False)
-      viewer = mujoco.viewer.launch_passive(
-        scene.model, scene.data, key_callback=keys.put
-      )
+      scene.update(env, 0, 0, env.read_state())
+      if args.perturbations:
+        mouse = MousePerturbations(env, scene.model, scene.data)
+      passive = PassiveViewer(scene.model, scene.data, key_callback=keys.put)
+      viewer = passive.handle
+      with viewer.lock():
+        viewer.cam.distance = scene.camera.distance
+        viewer.cam.azimuth = scene.camera.azimuth
+        viewer.cam.elevation = scene.camera.elevation
       print(__doc__, flush=True)
+      print(f"Mouse forces: {'ON' if mouse is not None else 'OFF'}", flush=True)
     failures = 0
-    for step in range(args.steps):
+    was_fallen = False
+    step = 0
+    while step_limit is None or step < step_limit:
       start = time.perf_counter()
       if viewer is not None and not viewer.is_running():
         break
@@ -78,29 +114,57 @@ def main():
         env.set_command(command)
         print("command", command.tolist(), flush=True)
       action = actor(env.history.data, env.command_state["command"])
+      if mouse is not None:
+        with viewer.lock():
+          mouse.apply(viewer.perturb)
       _, _, terminated, _, extras = env.step(action)
-      failures += int(terminated.sum())
+      step += 1
+      fallen = bool(extras["metrics"]["velocity/physical_failure"].any())
+      reset = bool(terminated.any())
+      failures += int(fallen and not was_fallen)
+      was_fallen = fallen and not reset
       if viewer is not None:
-        scene.update(env, 0, step, extras["transition"]["next_state"])
-        viewer.cam.lookat[:] = scene.camera.lookat
+        if reset and mouse is not None:
+          with viewer.lock():
+            mouse.clear()
+            # A drag target from before the fall must not pull the reset pose.
+            viewer.perturb.active = 0
+            viewer.perturb.active2 = 0
+        scene.update(
+          env,
+          0,
+          step,
+          env.read_state() if reset else extras["transition"]["next_state"],
+        )
+        with viewer.lock():
+          viewer.cam.lookat[:] = scene.camera.lookat
         viewer.sync()
         time.sleep(max(0.0, env.step_dt - (time.perf_counter() - start)))
     print(
       json.dumps(
         {
-          "steps": step + 1,
+          "steps": step,
           "falls": failures,
           "command": command.tolist(),
           "measured_velocity": measured_velocity(env.read_state())[0].tolist(),
           "motion_library_loaded": env.library is not None,
+          "failure_termination_enabled": args.termination,
+          "mouse_perturbations_enabled": mouse is not None,
+          "mouse_perturbed_steps": mouse.applied_steps if mouse is not None else 0,
         }
       )
     )
   finally:
-    if viewer is not None:
-      viewer.close()
-    if env is not None:
-      env.close()
+    try:
+      try:
+        if mouse is not None:
+          mouse.clear()
+      finally:
+        if passive is not None:
+          passive.close()
+    finally:
+      if env is not None:
+        env.close()
 
 
 if __name__ == "__main__":

@@ -261,8 +261,8 @@ def main():
       f"latent warmup={velocity.warmup_updates:,} updates"
     )
     console.message(
-      "XY err: m/s | Yaw err: rad/s | VFail/MFail: velocity/motion failure events "
-      "per transition | Vel J: objective | Vel V: critic loss"
+      "Reward: weighted per control step (higher) | Error: physical units (lower) | "
+      "Loss: model/critic/alignment fitting (lower) | Objective: imagined return (higher)"
     )
 
     tracking = runtime.start_tracking(run, reporter=VelocityWandbReporter)

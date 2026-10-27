@@ -75,6 +75,9 @@ class TrainingRuntimeTests(unittest.TestCase):
       for line in (self.output / "metrics.jsonl").read_text().splitlines()
     ]
     self.assertEqual([r["iteration"] for r in rows], list(range(1, 6)))
+    self.assertEqual(rows[0]["metric_schema_version"], 1)
+    self.assertEqual(rows[0]["metric_groups"]["reward"]["motion/total_per_step"], 0.03)
+    self.assertEqual(rows[0]["metric_groups"]["loss"]["world_model/total"], 0.8)
     self.assertIn("simulator output", (self.output / "simulator.log").read_text())
 
   def test_resume_trims_future_metrics_and_flushes_stage_before_joint(self):

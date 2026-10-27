@@ -180,13 +180,15 @@ python scripts/export_supermimic_policy.py \
 
 ## 训练日志与 W&B
 
-终端默认使用紧凑表格，不再打印完整字典。表格按两次输出之间的区间统计：`Fail%`
-为每条真实采集转移对应的物理失败事件频率，`Steps/s` 包含采集和优化时间，`GPU`
-为 PyTorch 分配器记录的显存峰值（GiB）。初始化表格、kernel 信息和重复 seed 输出
+终端按 Reward（越大越好）、Error（越小越好）、Loss（越小越好）、Objective（想象回报）、
+Failure 和 Performance 分区显示。Reward 为已乘权重与 dt 的每控制步贡献，Error 显示物理单位。
+区间统计中的失败百分比为每条采集转移对应的失败事件频率；吞吐包含采集和优化时间，
+GPU 为 PyTorch 分配器记录的显存峰值（GiB）。初始化表格、kernel 信息和重复 seed 输出
 写入 `simulator.log`，异常回溯仍在 stderr 显示。
 
 可用 `--log-interval 50` 降低输出频率，`--verbose-sim` 显示仿真器详细输出，
-`--log-format json` 恢复原终端 JSON 格式。`metrics.jsonl` 始终逐轮保存原始指标。
+`--log-format json` 恢复原终端 JSON 格式。`metrics.jsonl` 逐轮保留原始指标，并增加分类后的 `metric_groups`。
+W&B 新增 `reward/`、`error/`、`loss/`、`objective/` 分组，旧字段保留兼容。
 安装了 `rich` 时使用格式化表格，否则使用普通文本。
 
 启用可选的 W&B 和 Rich 依赖，再登录一次：

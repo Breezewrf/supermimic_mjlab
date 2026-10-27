@@ -210,6 +210,8 @@ class WandbTests(unittest.TestCase):
     metrics = tracker.run.log.call_args.args[0]
     self.assertEqual(metrics["world_model/velocity_loss"], 0.3)
     self.assertEqual(metrics["velocity/linear_velocity_error"], 0.8)
+    self.assertEqual(metrics["error/velocity/planar_velocity_m_per_s"], 0.8)
+    self.assertEqual(metrics["loss/velocity/latent_alignment_mse"], 0.4)
     self.assertNotIn("velocity/objective", metrics)
     joint = warmup | {
       "iteration": 2,
@@ -221,6 +223,9 @@ class WandbTests(unittest.TestCase):
     tracker.training(joint)
     metrics = tracker.run.log.call_args.args[0]
     self.assertEqual(metrics["velocity/objective"], 1.2)
+    self.assertEqual(metrics["objective/velocity/return"], 1.2)
+    self.assertEqual(metrics["loss/critic/motion"], 0.5)
+    self.assertNotIn("error/velocity/planar_velocity_m_per_s", metrics)
     self.assertEqual(metrics["motion/critic_loss"], 0.5)
     self.assertNotIn("velocity/linear_velocity_error", metrics)
     self.assertNotIn("motion/failure_rate", metrics)

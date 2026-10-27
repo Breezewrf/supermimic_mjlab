@@ -5,6 +5,7 @@ import json
 import traceback
 
 from .checkpoints import save_checkpoint
+from .metric_schema import metric_groups
 from .online_training import restore_rng, rng_state
 from .training_logger import WandbReporter, simulator_output
 
@@ -131,6 +132,10 @@ class TrainingRuntime:
           flush()
         with simulator_output(self.sim_log, args.verbose_sim):
           record = trainer.train_iteration()
+        record = record | {
+          "metric_schema_version": 1,
+          "metric_groups": metric_groups(record),
+        }
         log.write(json.dumps(record, allow_nan=False) + "\n")
         log.flush()
         window.add(record)

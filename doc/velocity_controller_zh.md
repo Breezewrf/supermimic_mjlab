@@ -117,7 +117,7 @@ curriculum 计数与 RNG；网络/训练参数以保存配置为准。
 物理仿真重新开始 episode，使用新的 episode ID，避免把恢复后的新历史拼接到旧 replay。
 保存文件不是逐 substep 的 MuJoCo 物理快照，不承诺续训物理轨迹逐位一致。
 
-终端默认沿用 motion 训练的表格格式，`--log-interval 10` 控制区间统计输出频率；
+终端按 Reward、Error、Loss、Objective、Failure 和 Performance 分区显示，`--log-interval 10` 控制区间统计输出频率；
 `--log-format json` 可切回逐条 JSON 输出。完整逐轮指标始终保存至 `metrics.jsonl`。
 
 两个训练入口共用 `rl/training_runner.py`，统一处理训练循环、日志间隔、保存调度、
@@ -136,6 +136,20 @@ JSONL 恢复、W&B run 生命周期、异常报告和仿真资源清理。
 
 记录包括 motion/velocity 奖励和误差、跌倒率、两类策略与 critic 指标、latent 对齐、
 世界模型两类损失、梯度、学习率、阶段和采集控制步。
+W&B 新增按含义命名的分组（原字段作为兼容别名保留）：
+
+| 分组 | 示例 | 含义 |
+| --- | --- | --- |
+| `reward/` | `reward/velocity/linear_tracking`、`reward/velocity/total_per_step` | 已乘权重与 dt 的每控制步奖励，越大越好；惩罚项为负数 |
+| `error/` | `error/velocity/planar_velocity_m_per_s`、`error/velocity/yaw_rate_rad_per_s` | 真实物理误差，保留 m/s、rad/s 等单位，越小越好 |
+| `loss/` | `loss/world_model/total`、`loss/velocity/latent_alignment_mse`、`loss/critic/velocity` | 模型、latent 对齐及 critic 拟合损失 |
+| `objective/` | `objective/velocity/return` | 想象 rollout 的折扣回报与末端价值，不等于实际每步奖励 |
+| `failure/` | `failure/velocity/events_per_transition` | 失败事件占转移数的比例，终端转换为百分比 |
+| `gradient/`、`diagnostic/` | 梯度范数、动作变化、想象存活率 | 训练诊断 |
+
+JSONL 保留原始字段，并增加 `metric_schema_version=1` 与分类后的 `metric_groups`。
+旧 JSONL 也可直接由新 W&B reporter 分类，不需要重写日志。
+区间内的实际采集指标按新采集转移数加权，未采集轮次不会重复计入。
 真实采集指标只在产生新数据时上报；最终的 1/8/32 步回放诊断单独归入
 `velocity_replay_prediction/`，不表示 held-out 评估。
 
@@ -157,8 +171,12 @@ python scripts/play_velocity.py \
 ```
 
 窗口按键：`W/S` 增减前向速度，`A/D` 增减侧向速度，`Q/E` 增减 yaw rate，空格清零。
-`--command 0.5 0 0.2` 设置初始指令；`--steps` 控制播放步数；
-`--headless` 使用相同策略与物理环境执行无窗口检查。播放检测到跌倒后自动回到站姿。
+默认启用鼠标外力：双击机器人身体选中，再按住 `Ctrl` 拖拽，对真实物理仿真施加扰动。
+`--no-perturbations` 可关闭；松开拖拽、跌倒重置及退出时会清除外力，headless 模式不启用。
+`--command 0.5 0 0.2` 设置初始指令。有窗口播放默认持续运行直到关闭窗口；
+`--steps N` 可显式限制播放步数。`--headless` 使用相同策略与物理环境执行无窗口检查，
+默认运行 1000 步，也可用 `--steps` 调整。
+播放默认关闭跌倒 termination，拖倒后继续执行；`--termination` 可启用跌倒后自动回到站姿。
 
 ```bash
 python scripts/evaluate_velocity.py \

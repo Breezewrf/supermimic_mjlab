@@ -215,7 +215,9 @@ python scripts/train_supermimic.py \
 
 ## 训练日志与 W&B
 
-终端按输出区间统计平均值；`Fail%` 为每条采集转移对应的物理失败事件频率，
+终端按 Reward、Error、Loss、Objective、Failure 和 Performance 分区，误差显示物理单位。
+JSONL/W&B 提供 `reward/`、`error/`、`loss/`、`objective/` 分类，并保留旧字段兼容。
+日志按输出区间统计平均值；失败百分比为每条采集转移对应的物理失败事件频率，
 `Steps/s` 包含采集和优化时间，`GPU` 为 PyTorch 分配器记录的显存峰值（GiB）。
 仿真初始化、kernel 和 seed 信息写入 `simulator.log`，异常回溯保留在 stderr。
 

@@ -189,6 +189,24 @@ class MousePerturbations:
       self.applied_steps += 1
 
 
+class PassiveViewer:
+  """Own a MuJoCo viewer and wait for its render thread when closing."""
+
+  def __init__(self, model, data, **kwargs):
+    import mujoco.viewer
+
+    existing_threads = set(threading.enumerate())
+    self.handle = mujoco.viewer.launch_passive(model, data, **kwargs)
+    self._threads = set(threading.enumerate()) - existing_threads
+
+  def close(self):
+    # Handle.close() only requests exit. Keep the model/data alive until the
+    # daemon render thread has completed its OpenGL teardown.
+    self.handle.close()
+    for thread in self._threads:
+      thread.join(timeout=5.0)
+
+
 class LiveViewer:
   """Real-time passive viewer; key events only queue commands on the GUI thread."""
 
@@ -204,8 +222,6 @@ class LiveViewer:
   ):
     if not math.isfinite(speed) or speed <= 0:
       raise ValueError("Playback speed must be positive and finite")
-    import mujoco.viewer
-
     self.world_model = world_model
     self.scene = EvaluationScene(
       env, ghost=ghost, global_ghost=global_ghost, world_model=world_model
@@ -219,17 +235,14 @@ class LiveViewer:
     self.paused = False
     self.commands = SimpleQueue()
     self.deadline = None
-    existing_threads = set(threading.enumerate())
-    self.viewer = mujoco.viewer.launch_passive(
+    self._passive = PassiveViewer(
       self.scene.model,
       self.scene.data,
       key_callback=self.commands.put,
       show_left_ui=False,
       show_right_ui=False,
     )
-    # launch_passive owns a daemon render thread. Let its GL teardown finish
-    # before our buffers and the Python interpreter are destroyed on CLI exit.
-    self._viewer_threads = set(threading.enumerate()) - existing_threads
+    self.viewer = self._passive.handle
     self.viewer.cam.distance = self.scene.camera.distance
     self.viewer.cam.azimuth = self.scene.camera.azimuth
     self.viewer.cam.elevation = self.scene.camera.elevation
@@ -325,9 +338,7 @@ class LiveViewer:
   def close(self):
     if self.mouse:
       self.mouse.clear()
-    self.viewer.close()
-    for thread in self._viewer_threads:
-      thread.join(timeout=5.0)
+    self._passive.close()
 
 
 class VideoRecorder:
