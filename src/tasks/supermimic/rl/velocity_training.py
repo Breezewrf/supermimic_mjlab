@@ -6,6 +6,7 @@ from dataclasses import asdict
 
 import torch
 
+from ..data.episode_statistics import EpisodeSummary
 from ..data.replay_buffer import ReplayBuffer
 from ..mdp.velocity import measured_velocity
 from ..models.velocity_policy import VelocityActor, VelocityCritic, VelocityEncoder
@@ -71,6 +72,7 @@ class VelocityTrainer(OnlineTrainer):
     self.world_pretrained = False
     self.env.reference_only = self.training_stage != "joint"
     self.env.reset()
+    self.env.randomize_initial_episode_progress()
 
   @property
   def training_stage(self):
@@ -86,7 +88,8 @@ class VelocityTrainer(OnlineTrainer):
   @torch.no_grad()
   def collect(self, steps):
     started = time.perf_counter()
-    totals = {}
+    episodes = EpisodeSummary()
+    command_resamples = 0
     self.env.reference_only = self.training_stage != "joint"
     m, v = self.env.motion_ids, self.env.velocity_ids
     for _ in range(steps):
@@ -143,15 +146,21 @@ class VelocityTrainer(OnlineTrainer):
             for key in ("state", "action", "context", "next_state")
           }
         )
-      for key, value in extras["metrics"].items():
-        totals[key] = totals.get(key, 0.0) + float(value.float().mean()) / steps
-      totals["motion/failure_rate"] = (
-        totals.get("motion/failure_rate", 0.0)
-        + float(extras["motion_transition"]["terminated"].float().mean()) / steps
-      )
+      episodes.add(extras["episode_statistics"])
+      command_resamples += extras["command_resamples"]
       self.environment_steps += self.env.num_envs
+    summary = episodes.summary()
+    # Keep historical reward/error names, now sampled only from finished episodes.
+    aliases = {
+      f"{task}/{key}": value / row["count"]
+      for task, row in summary.items()
+      for key, value in row["metric_mean_sums"].items()
+    }
     self.last_collection = {
-      **totals,
+      **aliases,
+      "statistics_scope": "completed_episodes",
+      "episode_statistics": summary,
+      "command_resamples": command_resamples,
       "collection_seconds": time.perf_counter() - started,
       "collected_transitions": steps * self.env.num_envs,
     }
@@ -482,6 +491,7 @@ class VelocityTrainer(OnlineTrainer):
           k: v.cpu().clone() for k, v in self.env.command_state.items()
         },
         "command_rng": self.env.command_rng.get_state().cpu(),
+        "episode_rng": self.env.episode_rng.get_state().cpu(),
       }
     )
     for name in (
@@ -493,10 +503,21 @@ class VelocityTrainer(OnlineTrainer):
       result[name] = getattr(self, name).state_dict()
     return result
 
-  def load_state_dict(self, saved):
-    if saved.get("kind") != "supermimic_velocity_online" or saved[
-      "velocity_config"
-    ] != asdict(self.velocity_config):
+  def load_state_dict(self, saved, *, allow_timing_override=False):
+    if saved.get("kind") != "supermimic_velocity_online":
+      raise ValueError("Expected a velocity training checkpoint")
+    saved_velocity = saved["velocity_config"]
+    current_velocity = asdict(self.velocity_config)
+    timing = {
+      "resampling_time_range",
+      "randomize_initial_episode_progress",
+    }
+    if saved_velocity.keys() != current_velocity.keys():
+      raise ValueError("Velocity checkpoint/configuration mismatch")
+    differences = {
+      key for key in current_velocity if current_velocity[key] != saved_velocity[key]
+    }
+    if differences and (not allow_timing_override or not differences <= timing):
       raise ValueError("Velocity checkpoint/configuration mismatch")
     if saved["stage"] != self.stage:
       raise ValueError(
@@ -549,7 +570,9 @@ class VelocityTrainer(OnlineTrainer):
     self.env.control_steps = saved["control_steps"]
     self.env.reference_only = self.training_stage != "joint"
     self.env.generator.set_state(saved["env_rng"].cpu())
+    self.env.episode_rng.set_state(saved["episode_rng"].cpu())
     self.env.reset()
+    self.env.randomize_initial_episode_progress()
     for ids, buffer in (
       (self.env.motion_ids, self.replay),
       (self.env.velocity_ids, self.velocity_replay),

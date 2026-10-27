@@ -178,7 +178,7 @@ class VelocityTests(unittest.TestCase):
 
   def test_command_sequence_matches_simulation_across_resampling_and_clip_end(self):
     commands = VelocityCommands(
-      replace(VelocityConfig(), resample_steps=3), self.library
+      replace(VelocityConfig(), resampling_time_range=(0.06, 0.06)), self.library
     )
     starts = commands.empty(2, "cpu")
     commands.resample(
@@ -219,6 +219,32 @@ class VelocityTests(unittest.TestCase):
     before = state["command"].clone()
     commands.advance(state, rng, cfg.curriculum_steps + 1)
     torch.testing.assert_close(state["command"], before)
+
+  def test_timing_configuration_defaults_and_validation(self):
+    self.assertTrue(VelocityConfig().randomize_initial_episode_progress)
+    for interval in ((0, 3), (8, 3), (3, float("nan"))):
+      with self.assertRaises(ValueError):
+        VelocityConfig(resampling_time_range=interval)
+
+  def test_random_holding_times_are_independent_and_imagination_matches(self):
+    cfg = replace(VelocityConfig(), reference_probability=0.0, standing_probability=0.0)
+    commands = VelocityCommands(cfg)
+    state = commands.empty(256, "cpu")
+    commands.resample(state, torch.arange(256), torch.Generator().manual_seed(42), 0)
+    self.assertTrue((state["command_remaining"] >= 150).all())
+    self.assertTrue((state["command_remaining"] <= 400).all())
+    self.assertGreater(len(state["command_remaining"].unique()), 50)
+    commands = VelocityCommands(replace(cfg, resampling_time_range=(0.02, 0.08)))
+    commands.resample(state, torch.arange(256), torch.Generator().manual_seed(3), 0)
+    expected = commands.sequence(state, 12, torch.Generator().manual_seed(4), 0)
+    actual = {key: value.clone() for key, value in state.items()}
+    rng = torch.Generator().manual_seed(4)
+    for step in range(12):
+      before = actual["command_remaining"].clone()
+      changed = commands.advance(actual, rng, step + 1)
+      self.assertEqual(changed.tolist(), (before == 1).nonzero().flatten().tolist())
+      for key, value in actual.items():
+        torch.testing.assert_close(value, expected[key][:, step + 1])
 
   def test_velocity_gradients_freeze_decoder_world_critic_and_keep_bootstrap(self):
     torch.manual_seed(4)

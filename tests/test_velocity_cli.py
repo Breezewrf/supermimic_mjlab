@@ -160,6 +160,10 @@ class VelocityCliTests(unittest.TestCase):
       checkpoint = torch.load(output / "last.pt", weights_only=True)
       self.assertEqual(checkpoint["wandb_run"]["id"], previous["id"])
       self.assertEqual(checkpoint["iteration"], 2)
+      self.assertNotIn("resample_steps", checkpoint["velocity_config"])
+      self.assertTrue(
+        checkpoint["velocity_config"]["randomize_initial_episode_progress"]
+      )
       # Omitting --output on resume must select the checkpoint's directory.
       resume_common = common.copy()
       output_index = resume_common.index("--output")
@@ -182,3 +186,31 @@ class VelocityCliTests(unittest.TestCase):
       self.assertEqual([row["stage"] for row in rows], ["warmup", "joint", "joint"])
       self.assertTrue(list((output / "wandb").glob("offline-run-*/*.wandb")))
       self.assertTrue((output / "velocity_policy_last.pt").exists())
+      self.assertTrue(
+        all(row["statistics_scope"] == "completed_episodes" for row in rows)
+      )
+      self.assertTrue(all(row["metric_schema_version"] == 2 for row in rows))
+      # Current checkpoints support explicit timing overrides on resume.
+      result = subprocess.run(
+        resume_common
+        + [
+          "--resume",
+          str(output / "last.pt"),
+          "--iterations",
+          "4",
+          "--command-hold-seconds",
+          "2",
+          "4",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+      )
+      self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+      resumed = torch.load(output / "last.pt", weights_only=True)
+      self.assertEqual(resumed["iteration"], 4)
+      self.assertNotIn("resample_steps", resumed["velocity_config"])
+      self.assertTrue(resumed["velocity_config"]["randomize_initial_episode_progress"])
+      self.assertEqual(resumed["velocity_config"]["resampling_time_range"], (2.0, 4.0))
+      self.assertIn("episode_rng", resumed)

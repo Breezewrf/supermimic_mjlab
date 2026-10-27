@@ -4,6 +4,7 @@ import torch
 from torch import Tensor
 from torch.nn import functional as F
 
+from ..config.task_cfg import STEP_DT
 from ..config.velocity_cfg import VelocityConfig
 from .state import quat_inverse_apply, yaw_quat
 
@@ -96,7 +97,11 @@ class VelocityCommands:
     )
     command[standing] = 0
     state["command"][ids] = command
-    state["command_remaining"][ids] = cfg.resample_steps
+    low, high = cfg.resampling_time_range
+    seconds = low + (high - low) * torch.rand(
+      len(ids), device=ids.device, generator=generator
+    )
+    state["command_remaining"][ids] = (seconds / STEP_DT).ceil().long().clamp_min(1)
     state["reference_motion"][ids] = -1
     state["reference_frame"][ids] = -1
     self._new_reference(state, ids[state["command_source"][ids]], generator)
@@ -113,14 +118,16 @@ class VelocityCommands:
         >= self.library.lengths[state["reference_motion"][ids]]
       )
       self._new_reference(state, ids[ended], generator)
+    resampled = (state["command_remaining"] <= 0).nonzero().flatten()
     self.resample(
       state,
-      (state["command_remaining"] <= 0).nonzero().flatten(),
+      resampled,
       generator,
       control_step,
       reference_only=reference_only,
     )
     self._read_reference(state)
+    return resampled
 
   @torch.no_grad()
   def sequence(self, starts, horizon, generator, control_step, *, reference_only=False):

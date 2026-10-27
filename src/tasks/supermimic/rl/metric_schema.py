@@ -77,6 +77,7 @@ def is_collection_metric(key):
     "failure_rate",
     "physical_failure",
     "action_change",
+    "reward_per_step",
   )
 
 
@@ -96,6 +97,9 @@ def classified_metrics(record, *, include_collection=None):
     if "window_transitions_per_second" in record:
       include_collection = record.get("real_reward_per_step") is not None
   if not include_collection:
+    return result
+  if record.get("statistics_scope") == "completed_episodes":
+    result.update(completed_episode_metrics(record.get("episode_statistics", {})))
     return result
 
   for task, terms, errors in (
@@ -138,6 +142,42 @@ def classified_metrics(record, *, include_collection=None):
     result["failure/motion/events_per_transition"] = record[
       "failure_events_per_transition"
     ]
+  return result
+
+
+def completed_episode_metrics(report):
+  """Equal-weight completed episodes; preserve both reward units explicitly."""
+  result = {}
+  for task, rewards, errors in (
+    ("motion", MOTION_REWARDS, MOTION_ERRORS),
+    ("velocity", VELOCITY_REWARDS, VELOCITY_ERRORS),
+  ):
+    row = report.get(task, {})
+    count = row.get("count", 0)
+    result[f"episode/{task}/completed"] = count
+    for reason in ("terminated", "time_out", "motion_end"):
+      result[f"reset/{task}/{reason}_count"] = row.get(reason, 0)
+    if not count:
+      continue
+    sums, means = row["metric_sums"], row["metric_mean_sums"]
+    denominator = count * row["normalization_s"]
+    for term in rewards:
+      if term in sums:
+        result[f"reward/{task}/{term}_per_second"] = sums[term] / denominator
+        result[f"reward/{task}/{term}"] = means[term] / count
+    result[f"reward/{task}/total_per_second"] = sums["reward_per_step"] / denominator
+    result[f"reward/{task}/total_per_step"] = means["reward_per_step"] / count
+    for source, name in errors.items():
+      if source in means:
+        result[f"error/{task}/{name}"] = means[source] / count
+    result[f"episode/{task}/return_mean"] = sums["reward_per_step"] / count
+    result[f"episode/{task}/duration_mean_s"] = row["duration_s_sum"] / count
+    result[f"episode/{task}/steps_mean"] = row["steps_sum"] / count
+    result[f"failure/{task}/episode_fraction"] = row["terminated"] / count
+    if "action_change" in means:
+      result[f"diagnostic/{task}/action_change_squared"] = (
+        means["action_change"] / count
+      )
   return result
 
 

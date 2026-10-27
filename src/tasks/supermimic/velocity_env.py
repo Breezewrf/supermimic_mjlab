@@ -7,6 +7,7 @@ from mjlab.envs import ManagerBasedRlEnv
 
 from .config.task_cfg import FoundationConfig
 from .config.velocity_cfg import VelocityConfig
+from .data.episode_statistics import EpisodeStatistics
 from .env import SuperMimicEnv
 from .mdp.resets import reference_reset_state
 from .mdp.rewards import tracking_reward
@@ -54,6 +55,30 @@ class VelocityEnv(SuperMimicEnv):
     )
     # Counts actual collection steps, unaffected by episode resets.
     self.control_steps = 0
+    self.episode_rng = torch.Generator(device=self.device).manual_seed(
+      self.foundation_config.seed + 202
+    )
+    self.episode_timeout_steps = torch.full(
+      (self.num_envs,),
+      math.ceil(self.foundation_config.episode_length_s / self.step_dt),
+      dtype=torch.long,
+      device=self.device,
+    )
+    self.episode_statistics = EpisodeStatistics(self.num_envs, self.device)
+
+  def randomize_initial_episode_progress(self):
+    """Stagger first timeouts without inventing replay age or reward history."""
+    if self.training_tasks and self.velocity_config.randomize_initial_episode_progress:
+      maximum = math.ceil(self.foundation_config.episode_length_s / self.step_dt)
+      self.episode_timeout_steps.copy_(
+        torch.randint(
+          1,
+          maximum + 1,
+          (self.num_envs,),
+          device=self.device,
+          generator=self.episode_rng,
+        )
+      )
 
   def set_command(self, command):
     """Persistent external command for reference-free evaluation/playback."""
@@ -84,6 +109,7 @@ class VelocityEnv(SuperMimicEnv):
       self.seed(seed)
       self.generator.manual_seed(seed)
       self.command_rng.manual_seed(seed + 101)
+      self.episode_rng.manual_seed(seed + 202)
       if self.sampler is not None:
         self.sampler.generator.manual_seed(seed)
     ids = (
@@ -93,6 +119,10 @@ class VelocityEnv(SuperMimicEnv):
     )
     options = options or {}
     ManagerBasedRlEnv._reset_idx(self, ids)
+    self.episode_timeout_steps[ids] = math.ceil(
+      self.foundation_config.episode_length_s / self.step_dt
+    )
+    self.episode_statistics.clear(ids)
     count = len(ids)
     # Default root state is in asset coordinates before environment translation.
     root = self.robot.data.default_root_state[ids].clone()
@@ -221,16 +251,16 @@ class VelocityEnv(SuperMimicEnv):
     self.episode_length_buf += 1
     self.common_step_counter += 1
     self.control_steps += 1
-    time_out = self.episode_length_buf >= math.ceil(
-      self.foundation_config.episode_length_s / self.step_dt
-    )
+    time_out = self.episode_length_buf >= self.episode_timeout_steps
+    command_resamples = 0
     if self.command_override is None:
-      self.commands.advance(
+      resampled = self.commands.advance(
         self.command_state,
         self.command_rng,
         self.control_steps,
         reference_only=self.reference_only,
       )
+      command_resamples = len(resampled)
     velocity_transition["next_command"] = self.command_state["command"].clone()
     self.previous_action.copy_(action)
     clean, noisy = self._observations(next_state)
@@ -253,6 +283,18 @@ class VelocityEnv(SuperMimicEnv):
     self.episode_reward_sum += reward
     self.episode_discounted_return += 0.99 ** transition["episode_step"] * reward
     done = terminated | time_out | motion_end
+    task_ids = {"motion": m, "velocity": v}
+    self.episode_statistics.add(metrics, task_ids, reward)
+    episode_statistics = self.episode_statistics.finish(
+      task_ids,
+      done,
+      self.episode_length_buf,
+      terminated,
+      time_out,
+      motion_end,
+      self.step_dt,
+      self.foundation_config.episode_length_s,
+    )
     reset_ids = done.nonzero().flatten()
     if self.sampler is not None and self.foundation_config.sampling == "return":
       reset_motion = reset_ids[reset_ids < self.motion_count]
@@ -277,5 +319,7 @@ class VelocityEnv(SuperMimicEnv):
       "velocity_transition": velocity_transition,
       "transition": transition,
       "metrics": metrics,
+      "episode_statistics": episode_statistics,
+      "command_resamples": command_resamples,
     }
     return self.obs_buf, reward, terminated, time_out | motion_end, self.extras

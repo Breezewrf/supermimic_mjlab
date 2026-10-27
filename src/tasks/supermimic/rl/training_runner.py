@@ -133,7 +133,9 @@ class TrainingRuntime:
         with simulator_output(self.sim_log, args.verbose_sim):
           record = trainer.train_iteration()
         record = record | {
-          "metric_schema_version": 1,
+          "metric_schema_version": 2
+          if record.get("statistics_scope") == "completed_episodes"
+          else 1,
           "metric_groups": metric_groups(record),
         }
         log.write(json.dumps(record, allow_nan=False) + "\n")

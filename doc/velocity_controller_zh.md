@@ -89,14 +89,22 @@ Motion/velocity 各占一半环境和 imagination batch；`--num-envs` 必须为
 
 ## 指令、数据边界与恢复
 
-每次 reset 或每 250 控制步重新选择指令来源：50% 从参考动作读取，50% 随机采样；
-随机分支以 10% 概率置零。预热阶段使用参考来源。
+每次 reset，以及各环境独立采样的 3～8 秒保持时间到期时，重新选择指令来源：
+50% 从参考动作读取，50% 随机采样；随机分支以 10% 概率置零。预热阶段使用参考来源。
+`--command-hold-seconds MIN MAX` 可调整区间；仿真与 imagination 使用同一个调度器，
+保持时间向上取整到 0.02 秒控制步，当前指令剩余时间进入 replay 和 checkpoint。
+这是参考 Unitree 的去同步设置，与论文 G.1 的固定 250 步指令周期不同。
 参考线速度先按每帧 heading 转换，再进行中心 25 帧平均，clip 边缘复制端点，禁止跨 clip 平滑。
 
 初始随机范围为 `vx[-0.5,1.0]`、`vy[-0.5,0.5]`、`wz[-1,1]`；累计 120000 个采集控制步后
 扩展至 `vx[-1.5,2]`、`vy[-1.32,1.32]`、`wz[-3.35,3.35]`。
 此计数为每环境共享的控制步计数，包含预热，不乘并行环境数。
 速度训练 reset 以各 50% 概率选择站姿和 locomotion 参考姿态。
+
+训练启动和恢复后的首个 episode，为 motion/velocity 两半环境独立随机安排首次超时，
+剩余时长均匀分布于 1～500 控制步（默认最大 episode 为 10 秒）。随后每个 episode
+恢复完整的 10 秒上限。使用独立超时计时，不伪造 `episode_step`、历史或折扣回报；
+`--no-randomize-initial-episode-progress` 可关闭。该设置不影响独立播放或固定起点评估。
 
 `a_t` 与转移奖励使用 `c_t`；下一步才采用 `c_(t+1)`。
 Command 切换不会切断历史或改变物理速度。参考指令片段结束只切换片段，不重置机器人。
@@ -114,10 +122,23 @@ python scripts/train_velocity.py \
 所在目录；省略 `--output` 时自动选用该目录，新训练的默认目录仍为 `outputs/velocity/run`。
 Resume 从 checkpoint 恢复模型、优化器、两个 replay、归一化、阶段、指令来源/游标/计时、
 curriculum 计数与 RNG；网络/训练参数以保存配置为准。
+允许在 resume 时显式覆盖 `--command-hold-seconds` 和 episode 初始相位选项，
+其他 velocity 配置仍需匹配。CLI 默认启用随机初始相位（包括 resume），
+显式 `--no-randomize-initial-episode-progress` 可关闭。不兼容使用旧固定步数计时配置或缺少 episode 相位 RNG 的 checkpoint。
+要在续训时调整指令保持时间，使用：
+
+```bash
+python scripts/train_velocity.py \
+  --resume outputs/velocity/run/last.pt --device cuda:0 --iterations 100000 \
+  --command-hold-seconds 3 8
+```
+
+当前已保存指令的剩余时间会继续使用，下次重采样采用新范围。新的 episode 相位 RNG
+随 checkpoint 保存。
 物理仿真重新开始 episode，使用新的 episode ID，避免把恢复后的新历史拼接到旧 replay。
 保存文件不是逐 substep 的 MuJoCo 物理快照，不承诺续训物理轨迹逐位一致。
 
-终端按 Reward、Error、Loss、Objective、Failure 和 Performance 分区显示，`--log-interval 10` 控制区间统计输出频率；
+终端按 Reward/s、Error、Loss、Objective、Failure、Episodes、Timeouts 和 Performance 分区显示，`--log-interval 10` 控制区间统计输出频率；
 `--log-format json` 可切回逐条 JSON 输出。完整逐轮指标始终保存至 `metrics.jsonl`。
 
 两个训练入口共用 `rl/training_runner.py`，统一处理训练循环、日志间隔、保存调度、
@@ -140,17 +161,27 @@ W&B 新增按含义命名的分组（原字段作为兼容别名保留）：
 
 | 分组 | 示例 | 含义 |
 | --- | --- | --- |
-| `reward/` | `reward/velocity/linear_tracking`、`reward/velocity/total_per_step` | 已乘权重与 dt 的每控制步奖励，越大越好；惩罚项为负数 |
+| `reward/` | `reward/velocity/linear_tracking_per_second`、`reward/velocity/total_per_second` | 完成 episode 的加权奖励累计值除以配置的最大 episode 秒数；兼容的每步均值字段仍保留 |
 | `error/` | `error/velocity/planar_velocity_m_per_s`、`error/velocity/yaw_rate_rad_per_s` | 真实物理误差，保留 m/s、rad/s 等单位，越小越好 |
 | `loss/` | `loss/world_model/total`、`loss/velocity/latent_alignment_mse`、`loss/critic/velocity` | 模型、latent 对齐及 critic 拟合损失 |
 | `objective/` | `objective/velocity/return` | 想象 rollout 的折扣回报与末端价值，不等于实际每步奖励 |
-| `failure/` | `failure/velocity/events_per_transition` | 失败事件占转移数的比例，终端转换为百分比 |
+| `failure/` | `failure/velocity/episode_fraction` | 已完成 episode 中因物理失败终止的比例，终端转换为百分比 |
+| `episode/`、`reset/` | `episode/velocity/completed`、`reset/velocity/time_out_count` | 完成数量、实际长度/回报，以及失败、timeout、clip-end 的独立计数 |
 | `gradient/`、`diagnostic/` | 梯度范数、动作变化、想象存活率 | 训练诊断 |
 
-JSONL 保留原始字段，并增加 `metric_schema_version=1` 与分类后的 `metric_groups`。
-旧 JSONL 也可直接由新 W&B reporter 分类，不需要重写日志。
-区间内的实际采集指标按新采集转移数加权，未采集轮次不会重复计入。
-真实采集指标只在产生新数据时上报；最终的 1/8/32 步回放诊断单独归入
+velocity JSONL 使用 `metric_schema_version=2` 和 `statistics_scope=completed_episodes`，
+`episode_statistics` 保存各接口的完成计数、累计量和每 episode 均值之和；`metric_groups`
+给出分类结果。旧 JSONL（v1）仍可直接由新 W&B reporter 分类，无需重写日志。
+
+奖励和物理误差只在真实 reset 前汇总，不把尚未完成的 episode 当成样本。
+Reward/s 与 mjlab 一样，按每 episode 的奖励累计值除以配置的最大时长，再对完成 episode
+等权平均；早期跌倒或启动时的短 episode 不会被外推成完整 episode 的回报。
+物理误差先按各 episode 的实际步数求平均，再按 episode 数量平均。
+旧的 `motion/*`、`velocity/*` reward/error 字段及 `total_per_step` 保留相同单位，
+统计来源改为完成 episode，避免改变单位却沿用旧名称。
+区间统计按完成 episode 数合并，未采集轮次不会重复计入；没有 episode 完成时显示 `--`。
+恢复物理仿真时，未完成 episode 的统计随新 episode 清空，已完成报告不会重复上报。
+模型、critic、latent 对齐等优化指标仍逐更新上报。最终的 1/8/32 步回放诊断单独归入
 `velocity_replay_prediction/`，不表示 held-out 评估。
 
 在线模式在同一输出目录续训时沿用 `wandb_run.json` 中的 run；回退旧 checkpoint 或离线续训

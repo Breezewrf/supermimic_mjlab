@@ -18,7 +18,8 @@ class VelocityConfig:
     (-3.35, 3.35),
   )
   curriculum_steps: int = 120_000
-  resample_steps: int = 250
+  resampling_time_range: tuple[float, float] = (3.0, 8.0)
+  randomize_initial_episode_progress: bool = True
   reference_probability: float = 0.5
   standing_probability: float = 0.1
   standing_reset_probability: float = 0.5
@@ -49,7 +50,13 @@ class VelocityConfig:
     ):
       if not 0 <= probability <= 1:
         raise ValueError("Probabilities must be in [0, 1]")
-    if self.resample_steps < 1 or self.curriculum_steps < 0 or self.warmup_updates < 0:
+    if (
+      len(self.resampling_time_range) != 2
+      or not all(map(math.isfinite, self.resampling_time_range))
+      or not 0 < self.resampling_time_range[0] <= self.resampling_time_range[1]
+    ):
+      raise ValueError("Command holding times must be positive finite seconds")
+    if self.curriculum_steps < 0 or self.warmup_updates < 0:
       raise ValueError("Invalid velocity schedule")
     if (
       not 0 < self.tilt_degrees < 180

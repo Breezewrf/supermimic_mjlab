@@ -12,6 +12,7 @@ from src.tasks.supermimic.config.task_cfg import FoundationConfig
 from src.tasks.supermimic.config.velocity_cfg import VelocityConfig
 from src.tasks.supermimic.mdp.state import observe
 from src.tasks.supermimic.mdp.velocity import velocity_reward
+from src.tasks.supermimic.mdp.velocity_commands import VelocityCommands
 from src.tasks.supermimic.models.kinematics import robot_metadata
 from src.tasks.supermimic.rl.training_logger import simulator_output
 from src.tasks.supermimic.rl.velocity_inference import load_velocity_actor
@@ -57,7 +58,9 @@ class VelocityTrainingTests(unittest.TestCase):
       world_model_normalization=True,
       learning_rate=1e-5,
     )
-    self.velocity = replace(VelocityConfig(), warmup_updates=1, resample_steps=3)
+    self.velocity = replace(
+      VelocityConfig(), warmup_updates=1, resampling_time_range=(0.06, 0.06)
+    )
     with (
       (self.root / "simulator.log").open("a") as sim_log,
       simulator_output(sim_log, verbose=False),
@@ -73,6 +76,54 @@ class VelocityTrainingTests(unittest.TestCase):
 
   def trainer(self):
     return VelocityTrainer(self.env, self.metadata, self.config, total_iterations=3)
+
+  def test_initial_timeout_phase_preserves_real_episode_age_and_return(self):
+    self.trainer()
+    limits = self.env.episode_timeout_steps.clone()
+    self.assertTrue(((limits >= 1) & (limits <= 500)).all())
+    self.assertGreater(len(limits.unique()), 1)
+    self.assertFalse(self.env.episode_length_buf.any())
+    self.assertFalse(self.env.episode_discounted_return.any())
+    self.env.episode_timeout_steps[:] = torch.tensor([400, 300, 1, 200])
+    _, _, _, _, extras = self.env.step(torch.zeros(4, 29))
+    transition = extras["velocity_transition"]
+    self.assertEqual(int(transition["episode_step"][0]), 0)
+    stats = extras["episode_statistics"]["velocity"]
+    self.assertEqual((stats["count"], stats["steps_sum"], stats["time_out"]), (1, 1, 1))
+    self.assertAlmostEqual(
+      stats["metric_sums"]["reward_per_step"], float(transition["reward"][0])
+    )
+    self.assertEqual(int(self.env.episode_timeout_steps[2]), 500)
+    self.assertEqual(int(self.env.episode_timeout_steps[3]), 200)
+    self.assertAlmostEqual(
+      float(self.env.episode_statistics.sums["velocity/reward_per_step"][3]),
+      float(transition["reward"][1]),
+    )
+
+  def test_checkpoint_can_override_timing_but_not_other_configuration(self):
+    trainer = self.trainer()
+    trainer.bootstrap()
+    path = self.root / "timing.pt"
+    torch.save(trainer.state_dict(), path)
+    saved = torch.load(path, weights_only=True)
+    new_config = replace(self.velocity, resampling_time_range=(0.02, 0.08))
+    self.env.velocity_config = new_config
+    self.env.commands = VelocityCommands(new_config, self.env.library)
+    resumed = self.trainer()
+    with self.assertRaisesRegex(ValueError, "mismatch"):
+      resumed.load_state_dict(saved)
+    resumed.load_state_dict(saved, allow_timing_override=True)
+    self.assertFalse(self.env.episode_length_buf.any())
+    self.assertGreater(len(self.env.episode_timeout_steps.unique()), 1)
+    # A new holding time uses the new scheduler; the current saved command was retained.
+    self.env.command_state["command_remaining"].fill_(1)
+    self.env.commands.advance(
+      self.env.command_state, self.env.command_rng, self.env.control_steps
+    )
+    self.assertTrue((self.env.command_state["command_remaining"] <= 4).all())
+    resumed.velocity_config = replace(new_config, alignment_weight=0.2)
+    with self.assertRaisesRegex(ValueError, "mismatch"):
+      resumed.load_state_dict(saved, allow_timing_override=True)
 
   def test_simulation_reward_matches_analytic_and_command_transition_order(self):
     trainer = self.trainer()

@@ -1,5 +1,6 @@
 """Velocity metrics using the motion trainer's terminal renderer."""
 
+from ..data.episode_statistics import EpisodeSummary
 from .metric_schema import classified_metrics, is_collection_metric
 from .training_logger import ConsoleReporter, WandbReporter, duration
 
@@ -10,18 +11,28 @@ class VelocityMetricWindow:
     self.counts = {}
     self.last = {}
     self.transitions = 0
+    self.episodes = EpisodeSummary()
 
   def add(self, record):
     self.last = record
     collected = record["collected_this_iteration"]
     if collected:
       self.transitions += record["collected_transitions"]
+      self.episodes.add(record.get("episode_statistics", {}))
     for key, value in record.items():
       # Collection metrics are retained between updates; count them only once.
       if is_collection_metric(key) and not collected:
         continue
       if isinstance(value, (int, float)) and not isinstance(value, bool):
         weight = record["collected_transitions"] if is_collection_metric(key) else 1
+        if (
+          is_collection_metric(key)
+          and record.get("statistics_scope") == "completed_episodes"
+        ):
+          task = key.split("/", 1)[0]
+          weight = record["episode_statistics"].get(task, {}).get("count", 0)
+          if not weight:
+            continue
         self.totals[key] = self.totals.get(key, 0.0) + value * weight
         self.counts[key] = self.counts.get(key, 0) + weight
 
@@ -34,6 +45,9 @@ class VelocityMetricWindow:
         key: value for key, value in result.items() if not is_collection_metric(key)
       }
     result["steps_per_second"] = self.transitions / max(self.totals["seconds"], 1e-9)
+    if self.last.get("statistics_scope") == "completed_episodes":
+      result["statistics_scope"] = "completed_episodes"
+      result["episode_statistics"] = self.episodes.summary()
     return result
 
 
@@ -50,6 +64,9 @@ class VelocityConsoleReporter(ConsoleReporter):
       )
 
     metrics = classified_metrics(record, include_collection=True)
+    episodic = record.get("statistics_scope") == "completed_episodes"
+    reward_name = "total_per_second" if episodic else "total_per_step"
+    failure_name = "episode_fraction" if episodic else "events_per_transition"
 
     def value(key, unit="", digits=4, scale=1):
       number = metrics.get(key)
@@ -57,14 +74,18 @@ class VelocityConsoleReporter(ConsoleReporter):
 
     rows = [
       (
-        "Reward ↑",
+        "Reward/s ↑" if episodic else "Reward ↑",
         " / ".join(
           (
-            "motion=" + value("reward/motion/total_per_step"),
-            "velocity=" + value("reward/velocity/total_per_step"),
+            "motion=" + value(f"reward/motion/{reward_name}"),
+            "velocity=" + value(f"reward/velocity/{reward_name}"),
           )
         )
-        + "  (weighted, dt-scaled per control step)",
+        + (
+          "  (completed episode sum / configured seconds)"
+          if episodic
+          else "  (weighted, dt-scaled per control step)"
+        ),
       ),
       (
         "Error ↓",
@@ -108,10 +129,10 @@ class VelocityConsoleReporter(ConsoleReporter):
       (
         "Failure ↓",
         "motion="
-        + value("failure/motion/events_per_transition", "%", 2, 100)
+        + value(f"failure/motion/{failure_name}", "%", 2, 100)
         + " / velocity="
-        + value("failure/velocity/events_per_transition", "%", 2, 100)
-        + "  (events per transition)",
+        + value(f"failure/velocity/{failure_name}", "%", 2, 100)
+        + ("  (completed episodes)" if episodic else "  (events per transition)"),
       ),
       (
         "Performance",
@@ -120,6 +141,31 @@ class VelocityConsoleReporter(ConsoleReporter):
         + duration((self.total - record["iteration"]) * record["seconds"]),
       ),
     ]
+    if episodic:
+      rows.insert(
+        -1,
+        (
+          "Episodes",
+          "motion="
+          + value("episode/motion/completed", digits=0)
+          + " / velocity="
+          + value("episode/velocity/completed", digits=0)
+          + " / mean seconds: motion="
+          + value("episode/motion/duration_mean_s", digits=2)
+          + " / velocity="
+          + value("episode/velocity/duration_mean_s", digits=2),
+        ),
+      )
+      rows.insert(
+        -1,
+        (
+          "Timeouts",
+          "motion="
+          + value("reset/motion/time_out_count", digits=0)
+          + " / velocity="
+          + value("reset/velocity/time_out_count", digits=0),
+        ),
+      )
     self.metric_sections(
       f"Iteration {record['iteration']:,}/{self.total:,} | {record['stage']} | "
       f"lr={record['learning_rate']:.2e}",
@@ -162,10 +208,12 @@ class VelocityWandbReporter(WandbReporter):
       elif key == "seconds":
         metrics["performance/iteration_seconds"] = value
       elif (
-        key in ("collected_transitions", "collection_seconds")
+        key in ("collected_transitions", "collection_seconds", "command_resamples")
         and record["collected_this_iteration"]
       ):
         metrics["collection/" + key] = value
+    if "statistics_scope" in record:
+      metrics["train/statistics_scope"] = record["statistics_scope"]
     metrics.update(classified_metrics(record))
     self.run.log(metrics)
     self._persist(record["iteration"])

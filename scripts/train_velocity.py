@@ -4,7 +4,7 @@ import argparse
 import json
 import random
 import sys
-from dataclasses import asdict, fields
+from dataclasses import asdict, fields, replace
 from pathlib import Path
 
 import numpy as np
@@ -55,6 +55,19 @@ def parser():
   p.add_argument("--stage", choices=("motion", "warmup", "joint"), default="joint")
   p.add_argument("--iterations", type=int, default=100000)
   p.add_argument("--warmup-updates", type=int, default=500)
+  p.add_argument(
+    "--command-hold-seconds",
+    type=float,
+    nargs=2,
+    metavar=("MIN", "MAX"),
+    help="Independent command holding-time range (new runs: 3 8); may override on resume",
+  )
+  p.add_argument(
+    "--randomize-initial-episode-progress",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Stagger first episode timeouts (default: enabled, including resume)",
+  )
   p.add_argument("--num-envs", type=int, default=4096)
   p.add_argument("--capacity", type=int, default=1000)
   p.add_argument("--warmup-steps", type=int, default=32)
@@ -192,6 +205,20 @@ def main():
       stand_still_weight=args.stand_still_weight,
     )
     stage = args.stage
+  timing_override = (
+    args.command_hold_seconds is not None
+    or velocity.randomize_initial_episode_progress
+    != args.randomize_initial_episode_progress
+  )
+  if args.command_hold_seconds is not None:
+    velocity = replace(
+      velocity,
+      resampling_time_range=tuple(args.command_hold_seconds),
+    )
+  velocity = replace(
+    velocity,
+    randomize_initial_episode_progress=args.randomize_initial_episode_progress,
+  )
   if cfg.relative_orientation or cfg.motion_anchor_ori_b:
     raise ValueError("Velocity training requires 93D observations")
   run = {
@@ -201,6 +228,7 @@ def main():
     "total_iterations": args.iterations,
     "manifest": str(args.manifest.resolve()),
     "manifest_sha256": file_sha256(args.manifest),
+    "timing_override_on_resume": bool(args.resume and timing_override),
   }
   args.output.mkdir(parents=True, exist_ok=bool(saved))
   write_json(args.output / "config.json", run)
@@ -226,7 +254,7 @@ def main():
         env, metadata, cfg, total_iterations=args.iterations, stage=stage
       )
       if saved:
-        trainer.load_state_dict(saved)
+        trainer.load_state_dict(saved, allow_timing_override=timing_override)
       else:
         if actor_saved:
           validate_environment(env, actor_saved)
@@ -261,8 +289,14 @@ def main():
       f"latent warmup={velocity.warmup_updates:,} updates"
     )
     console.message(
-      "Reward: weighted per control step (higher) | Error: physical units (lower) | "
+      "Reward/s: completed episode sum / configured seconds (higher) | Error: episode mean in physical units (lower) | "
       "Loss: model/critic/alignment fitting (lower) | Objective: imagined return (higher)"
+    )
+    holding = f"{velocity.resampling_time_range[0]:g}-{velocity.resampling_time_range[1]:g} s independently per environment"
+    console.message(
+      f"Commands: {holding} | random initial episode progress="
+      f"{velocity.randomize_initial_episode_progress}\n"
+      "Statistics: completed episodes only; rewards normalized by configured episode seconds"
     )
 
     tracking = runtime.start_tracking(run, reporter=VelocityWandbReporter)
