@@ -2,20 +2,17 @@
 
 import argparse
 import importlib.metadata
-import importlib.util
-import json
 import sys
 import time
-import traceback
 from dataclasses import asdict, fields
 from pathlib import Path
 
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from src.tasks.supermimic.config.cli import add_robot_argument, resolve_robot_arguments
 from src.tasks.supermimic.config.rl_cfg import OnlineConfig
 from src.tasks.supermimic.config.task_cfg import (
-  DEFAULT_MANIFEST,
   FoundationConfig,
 )
 from src.tasks.supermimic.data.world_model_data import file_sha256
@@ -40,13 +37,14 @@ from src.tasks.supermimic.rl.online_training import (
 from src.tasks.supermimic.rl.training_logger import (
   ConsoleReporter,
   MetricWindow,
-  WandbReporter,
   simulator_output,
 )
-
-
-def write_json(path: Path, data: dict):
-  path.write_text(json.dumps(data, indent=2, allow_nan=False) + "\n")
+from src.tasks.supermimic.rl.training_runner import (
+  TrainingRuntime,
+  add_logging_arguments,
+  validate_logging_arguments,
+  write_json,
+)
 
 
 def evaluate_actor(actor, manifest, config, device, limit=None, max_envs=64):
@@ -58,6 +56,7 @@ def evaluate_actor(actor, manifest, config, device, limit=None, max_envs=64):
     actor.eval()
     env = SuperMimicEnv(
       FoundationConfig(
+        robot=config.robot,
         manifest=manifest,
         clips=config.clips,
         num_envs=evaluation_env_count(manifest, config.clips, max_envs),
@@ -78,7 +77,8 @@ def evaluate_actor(actor, manifest, config, device, limit=None, max_envs=64):
 
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+  add_robot_argument(parser)
+  parser.add_argument("--manifest", type=Path)
   parser.add_argument("--device", default="cuda:0")
   parser.add_argument("--output", type=Path)
   parser.add_argument("--resume", type=Path)
@@ -107,27 +107,7 @@ def main():
     default=0,
     help="Additionally keep historical full iteration_NNNNNN.pt snapshots (0: disabled)",
   )
-  parser.add_argument("--log-interval", type=int, default=10)
-  parser.add_argument("--log-format", choices=("table", "json"), default="table")
-  parser.add_argument(
-    "--verbose-sim",
-    action="store_true",
-    help="Show simulator initialization and kernel output in the terminal",
-  )
-  parser.add_argument(
-    "--wandb",
-    action="store_true",
-    help="Track metrics and evaluation charts with Weights & Biases",
-  )
-  parser.add_argument(
-    "--wandb-project",
-    help="W&B project; default: supermimic, or the saved project on resume",
-  )
-  parser.add_argument("--wandb-entity", help="W&B user or team")
-  parser.add_argument(
-    "--wandb-name", help="W&B run name; default: output directory name"
-  )
-  parser.add_argument("--wandb-mode", choices=("online", "offline"), default="online")
+  add_logging_arguments(parser)
   parser.add_argument("--termination-mode", choices=("learned", "analytic"))
   parser.add_argument("--amp", choices=("bf16", "none"))
   parser.add_argument(
@@ -151,8 +131,8 @@ def main():
   parser.add_argument(
     "--reference-dim",
     type=int,
-    choices=(730, 2680),
-    help="Ten-frame reference input width: compact 730 (default) or original full-body 2680",
+    choices=(610, 730, 2560, 2680),
+    help="Ten-frame reference width: compact 610/730 (23/29DoF, default) or full-body 2560/2680",
   )
   parser.add_argument(
     "--learning-rate",
@@ -207,10 +187,8 @@ def main():
     parser.add_argument("--" + name.replace("_", "-"), type=int, nargs="+")
   parser.add_argument("--clips", nargs="+")
   args = parser.parse_args()
-  if args.wandb and importlib.util.find_spec("wandb") is None:
-    parser.error(
-      "W&B is optional. Install logging support with: uv sync --extra logging"
-    )
+  resolve_robot_arguments(args, parser)
+  validate_logging_arguments(parser, args)
   if min(
     args.iterations,
     args.eval_interval,
@@ -253,7 +231,9 @@ def main():
     saved_config = training_config(saved) if saved else None
   except ValueError as error:
     parser.error(str(error))
-  config_values = dict(saved_config) if saved else asdict(OnlineConfig())
+  config_values = (
+    dict(saved_config) if saved else asdict(OnlineConfig(robot=args.robot))
+  )
   for field in fields(OnlineConfig):
     value = getattr(args, field.name, None)
     if value is not None:
@@ -287,10 +267,8 @@ def main():
     parser.error(
       "Resume cannot change --world-model-normalization; start a new run for this ablation"
     )
-  if saved and (
-    saved_config != asdict(config) or saved["manifest_sha256"] != manifest_hash
-  ):
-    parser.error("Resume requires the original training configuration and manifest")
+  if saved and saved_config != asdict(config):
+    parser.error("Resume requires the original training configuration")
   if saved and args.iterations < saved["iteration"]:
     parser.error("--iterations cannot be below the saved iteration")
   output = args.output or (
@@ -304,15 +282,14 @@ def main():
   output.mkdir(parents=True, exist_ok=bool(saved))
   console = ConsoleReporter(args.iterations, args.log_format)
   console.message(f"Initializing simulation; details: {output / 'simulator.log'}")
-  sim_log = (output / "simulator.log").open("a", buffering=1)
-  env = trainer = tracking = None
-  completed = False
-  try:
+  with TrainingRuntime(args, output, console) as runtime:
+    sim_log = runtime.sim_log
     with simulator_output(sim_log, args.verbose_sim):
       from src.tasks.supermimic.env import SuperMimicEnv
 
-      env = SuperMimicEnv(
+      env = runtime.env = SuperMimicEnv(
         FoundationConfig.training(
+          robot=args.robot,
           manifest=args.manifest,
           num_envs=config.num_envs,
           clips=config.clips,
@@ -323,14 +300,17 @@ def main():
         ),
         device=args.device,
       )
-      trainer = OnlineTrainer(
-        env, robot_metadata(), config, total_iterations=args.iterations
+      trainer = runtime.trainer = OnlineTrainer(
+        env,
+        robot_metadata(args.robot),
+        config,
+        total_iterations=args.iterations,
       )
       if saved:
         trainer.load_state_dict(saved)
       else:
         trainer.bootstrap()
-    runtime = {
+    runtime_versions = {
       name: importlib.metadata.version(name)
       for name in ("torch", "mujoco", "mujoco-warp", "warp-lang")
     }
@@ -340,7 +320,7 @@ def main():
       "device": args.device,
       "manifest": str(args.manifest.resolve()),
       "manifest_sha256": manifest_hash,
-      "runtime": runtime,
+      "runtime": runtime_versions,
       "robot_signature": trainer.metadata["signature"],
       "reference_schema": schema_for_dimension(config.reference_dim),
       "execution": {
@@ -364,21 +344,7 @@ def main():
       console.message(
         "World model: SiLU + LayerNorm | running input/output statistics from real collection"
       )
-    if args.wandb:
-      state = rng_state()
-      try:
-        tracking = WandbReporter(
-          output,
-          run_config,
-          trainer.iteration,
-          project=args.wandb_project,
-          entity=args.wandb_entity,
-          name=args.wandb_name,
-          mode=args.wandb_mode,
-          console=console,
-        )
-      finally:
-        restore_rng(state)
+    tracking = runtime.start_tracking(run_config)
     best_evaluation = None
     current_evaluation = saved.get("evaluation") if saved else None
     if saved:
@@ -400,7 +366,7 @@ def main():
     def checkpoint_metadata():
       return {
         "manifest_sha256": manifest_hash,
-        "runtime": runtime,
+        "runtime": runtime_versions,
         "best_return": (
           best_evaluation["normalized_return"] if best_evaluation else -float("inf")
         ),
@@ -466,18 +432,6 @@ def main():
         tracking.evaluation(report)
         tracking.diagnostics(diagnostics)
 
-    log_path = output / "metrics.jsonl"
-    if saved and log_path.exists():
-      rows = [
-        json.loads(line) for line in log_path.read_text().splitlines() if line.strip()
-      ]
-      log_path.write_text(
-        "".join(
-          json.dumps(row) + "\n"
-          for row in rows
-          if row["iteration"] <= trainer.iteration
-        )
-      )
     if not saved:
       validate()
       save_checkpoint(output / "last.pt", checkpoint())
@@ -487,70 +441,15 @@ def main():
     save_weights("last")
     if args.device.startswith("cuda"):
       torch.cuda.reset_peak_memory_stats(args.device)
-    window = MetricWindow()
-    with log_path.open("a") as log:
-      while trainer.iteration < args.iterations:
-        with simulator_output(sim_log, args.verbose_sim):
-          record = trainer.train_iteration()
-        log.write(json.dumps(record, allow_nan=False) + "\n")
-        log.flush()
-        window.add(record)
-        if tracking:
-          tracking.training(record)
-        if (
-          trainer.iteration % args.log_interval == 0
-          or trainer.iteration == args.iterations
-        ):
-          summary = window.summary()
-          console.training(record if args.log_format == "json" else summary)
-          if tracking:
-            tracking.window(summary)
-          window = MetricWindow()
-        if (
-          trainer.iteration % args.eval_interval == 0
-          or trainer.iteration == args.iterations
-        ):
-          validate()
-        periodic = trainer.iteration % args.checkpoint_interval == 0
-        historical_full = bool(
-          args.full_checkpoint_interval
-          and trainer.iteration % args.full_checkpoint_interval == 0
-        )
-        if periodic or historical_full or trainer.iteration == args.iterations:
-          snapshot = checkpoint()
-          save_checkpoint(output / "last.pt", snapshot)
-          if historical_full:
-            save_checkpoint(output / f"iteration_{trainer.iteration:06d}.pt", snapshot)
-          save_weights("last")
-          console.message(
-            f"Checkpoint saved at iteration {trainer.iteration:,}: {output / 'last.pt'}"
-          )
-    completed = True
-  except Exception as error:
-    if output.exists():
-      context = getattr(trainer, "failure_context", None)
-      if context is not None:
-        save_checkpoint(output / "critic_failure.pt", context)
-      write_json(
-        output / "failure.json",
-        {
-          "iteration": trainer.iteration if trainer else None,
-          "phase": trainer.phase if trainer else "initialization",
-          "error": str(error),
-          "traceback": traceback.format_exc(),
-        },
-      )
-    raise
-  finally:
-    try:
-      if tracking:
-        tracking.close(exit_code=0 if completed else 1)
-    finally:
-      try:
-        if env is not None:
-          env.close()
-      finally:
-        sim_log.close()
+
+    def save(historical):
+      snapshot = checkpoint()
+      save_checkpoint(output / "last.pt", snapshot)
+      if historical:
+        save_checkpoint(output / f"iteration_{trainer.iteration:06d}.pt", snapshot)
+      save_weights("last")
+
+    runtime.train(MetricWindow, checkpoint=save, evaluate=validate)
 
 
 if __name__ == "__main__":

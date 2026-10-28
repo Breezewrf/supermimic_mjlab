@@ -6,8 +6,9 @@ import torch
 from mjlab.envs import ManagerBasedRlEnv
 from torch import Tensor
 
+from .config.morphology import tracked_bodies
 from .config.robot_cfg import FOOT_COLLISION_EXPR
-from .config.task_cfg import MOTION_ANCHOR_INDEX, TRACKED_BODIES, FoundationConfig
+from .config.task_cfg import MOTION_ANCHOR_INDEX, FoundationConfig
 from .data.motion_library import MotionLibrary
 from .env_cfg import make_env_cfg
 from .mdp.reset_sampler import ResetSampler
@@ -27,21 +28,17 @@ class SuperMimicEnv(ManagerBasedRlEnv):
     self, config: FoundationConfig, device: str = "cuda:0", render_mode=None
   ):
     self.foundation_config = config
+    self.layout = config.layout
+    self.tracked_bodies = tracked_bodies(config.robot)
     super().__init__(make_env_cfg(config), device=device, render_mode=render_mode)
     self.robot = self.scene["robot"]
-    self.library = MotionLibrary(
-      config.manifest,
-      tuple(self.robot.joint_names),
-      TRACKED_BODIES,
-      device=device,
-      clips=config.clips,
-    )
+    self.library = self._load_library(config, device)
     if tuple(self.action_manager.get_term("joint_pos").target_names) != tuple(
       self.robot.joint_names
     ):
       raise ValueError("PD action order must match G1 joint/state order")
     self.body_ids = torch.tensor(
-      [self.robot.body_names.index(b) for b in TRACKED_BODIES], device=device
+      [self.robot.body_names.index(b) for b in self.tracked_bodies], device=device
     )
     foot_ids, _ = self.robot.find_geoms(FOOT_COLLISION_EXPR)
     if not foot_ids:
@@ -50,15 +47,19 @@ class SuperMimicEnv(ManagerBasedRlEnv):
     self.torso_id = int(
       self.robot.indexing.body_ids[self.robot.body_names.index("torso_link")]
     )
-    self.sampler = ResetSampler(
-      self.library.lengths, mode=config.sampling, seed=config.seed
+    self.sampler = (
+      ResetSampler(self.library.lengths, mode=config.sampling, seed=config.seed)
+      if self.library is not None
+      else None
     )
     self.generator = torch.Generator(device=device).manual_seed(config.seed)
     self.motion_id = torch.zeros(self.num_envs, dtype=torch.long, device=device)
     self.frame_id = torch.zeros_like(self.motion_id)
     self.episode_id = torch.full_like(self.motion_id, -1)
-    self.previous_action = torch.zeros(self.num_envs, 29, device=device)
-    self.context = torch.zeros(self.num_envs, 33, device=device)
+    self.previous_action = torch.zeros(
+      self.num_envs, self.layout.num_joints, device=device
+    )
+    self.context = torch.zeros(self.num_envs, self.layout.context_dim, device=device)
     self.history = ObservationHistory(
       self.num_envs, config.history_length, device, config.observation_dim
     )
@@ -72,7 +73,22 @@ class SuperMimicEnv(ManagerBasedRlEnv):
     self.episode_start_frame = torch.zeros_like(self.frame_id)
     self.episode_reward_sum = torch.zeros(self.num_envs, device=device)
     self.episode_discounted_return = torch.zeros_like(self.episode_reward_sum)
+    self._initialize_task()
     self.reset()
+
+  def _load_library(self, config, device):
+    return MotionLibrary(
+      config.manifest,
+      tuple(self.robot.joint_names),
+      self.tracked_bodies,
+      device=device,
+      clips=config.clips,
+      motion=config.motion,
+      motion_dir=config.motion_dir,
+    )
+
+  def _initialize_task(self):
+    pass
 
   def read_state(self) -> Tensor:
     data = self.robot.data
@@ -135,7 +151,7 @@ class SuperMimicEnv(ManagerBasedRlEnv):
       anchor_orientation,
     )
     noisy = (
-      add_sensor_noise(clean, self.generator)
+      add_sensor_noise(clean, self.generator, self.layout.num_joints)
       if self.foundation_config.sensor_noise
       else clean.clone()
     )
@@ -202,26 +218,7 @@ class SuperMimicEnv(ManagerBasedRlEnv):
       perturb=self.foundation_config.reset_noise,
       generator=self.generator,
     )
-    root[:, :3] += self.scene.env_origins[env_ids]
-    self.robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
-    self.robot.write_root_state_to_sim(root, env_ids=env_ids)
-    self.robot.clear_state(env_ids)
-    self.robot.set_joint_position_target(joint_pos, env_ids=env_ids)
-    model = self.sim.model
-    self.context[env_ids, 0] = model.geom_friction[env_ids, self.foot_geom_id, 0]
-    self.context[env_ids, 1:30] = self.robot.data.encoder_bias[env_ids]
-    original_com = torch.as_tensor(
-      self.sim.mj_model.body_ipos[self.torso_id].copy(),
-      dtype=self.context.dtype,
-      device=self.device,
-    )
-    self.context[env_ids, 30:33] = (
-      model.body_ipos[env_ids, self.torso_id] - original_com
-    )
-    self.scene.write_data_to_sim()
-    self.sim.forward()
-    self.sim.sense()
-    self.check_simulation_capacity()
+    self._apply_reset_state(env_ids, root, joint_pos, joint_vel)
     clean, noisy = self._observations(self.read_state())
     self.clean_observation[env_ids], self.current_observation[env_ids] = (
       clean[env_ids],
@@ -232,10 +229,56 @@ class SuperMimicEnv(ManagerBasedRlEnv):
     self.obs_buf = self.policy_input()
     return self.obs_buf, self.extras
 
+  def _apply_reset_state(self, env_ids, root, joint_pos, joint_vel):
+    """Common simulator reset writes/context refresh for both task interfaces."""
+    root = root.clone()
+    root[:, :3] += self.scene.env_origins[env_ids]
+    self.robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
+    self.robot.write_root_state_to_sim(root, env_ids=env_ids)
+    self.robot.clear_state(env_ids)
+    self.robot.set_joint_position_target(joint_pos, env_ids=env_ids)
+    model = self.sim.model
+    self.context[env_ids, 0] = model.geom_friction[env_ids, self.foot_geom_id, 0]
+    self.context[env_ids, 1 : 1 + self.layout.num_joints] = (
+      self.robot.data.encoder_bias[env_ids]
+    )
+    original_com = torch.as_tensor(
+      self.sim.mj_model.body_ipos[self.torso_id].copy(),
+      dtype=self.context.dtype,
+      device=self.device,
+    )
+    self.context[env_ids, 1 + self.layout.num_joints :] = (
+      model.body_ipos[env_ids, self.torso_id] - original_com
+    )
+    self.scene.write_data_to_sim()
+    self.sim.forward()
+    self.sim.sense()
+    self.check_simulation_capacity()
+
+  def _step_physics(self, action):
+    self.action_manager.process_action(action)
+    for _ in range(self.cfg.decimation):
+      self._sim_step_counter += 1
+      self.action_manager.apply_action()
+      self.scene.write_data_to_sim()
+      self.sim.step()
+      self.check_simulation_capacity()
+      self.scene.update(dt=self.physics_dt)
+    self.sim.forward()
+    self.sim.sense()
+    self.check_simulation_capacity()
+    state = self.read_state()
+    if not torch.isfinite(state).all():
+      raise FloatingPointError("Nonfinite simulator state")
+    return state
+
   @torch.no_grad()
   def step(self, action: Tensor):
-    if action.shape != (self.num_envs, 29) or not torch.isfinite(action).all():
-      raise ValueError("Expected finite (num_envs, 29) normalized actions")
+    if (
+      action.shape != (self.num_envs, self.layout.num_joints)
+      or not torch.isfinite(action).all()
+    ):
+      raise ValueError("Expected finite normalized actions matching robot joint count")
     action = action.to(self.device).clone()
     if self.foundation_config.action_clip is not None:
       action.clamp_(
@@ -253,19 +296,7 @@ class SuperMimicEnv(ManagerBasedRlEnv):
       "episode_id": self.episode_id.clone(),
       "episode_step": self.episode_length_buf.clone(),
     }
-    self.action_manager.process_action(action)
-    for _ in range(self.cfg.decimation):
-      self._sim_step_counter += 1
-      self.action_manager.apply_action()
-      self.scene.write_data_to_sim()
-      self.sim.step()
-      self.check_simulation_capacity()
-      self.scene.update(dt=self.physics_dt)
-    # Refresh before reading any derived state or calculating task signals.
-    self.sim.forward()
-    self.sim.sense()
-    self.check_simulation_capacity()
-    next_state = self.read_state()
+    next_state = self._step_physics(action)
     next_frame = (self.frame_id + 1).minimum(self.library.lengths[self.motion_id] - 1)
     reference = self.library.get_frame(self.motion_id, next_frame)
     reward, metrics = tracking_reward(

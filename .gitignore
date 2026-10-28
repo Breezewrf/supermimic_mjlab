@@ -4,7 +4,8 @@ outputs
 logs
 wandb
 MUJOCO_LOG.TXT
-src/assets/motions/
+src/assets/motions/*
+!src/assets/motions/examples/
 __pycache__/
 *.py[cod]
 .venv/

@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+from .morphology import robot_layout
+
 DEFAULT_MANIFEST = (
   Path(__file__).resolve().parents[3] / "assets/motions/g1/lafan1_npz/manifest.json"
 )
@@ -33,7 +35,7 @@ STEP_DT = 0.02
 
 @dataclass(frozen=True)
 class FoundationConfig:
-  manifest: Path = DEFAULT_MANIFEST
+  manifest: Path | None = None
   clips: tuple[str, ...] = ()
   num_envs: int = 4
   seed: int = 0
@@ -48,12 +50,26 @@ class FoundationConfig:
   motion_anchor_ori_b: bool = False
   reset_noise: bool = False
   terminate_on_failure: bool = True
+  robot: str = "g1_29dof"
+  motion: Path | None = None
+  motion_dir: Path | None = None
 
   @property
   def observation_dim(self) -> int:
-    return OBS_DIM + 6 * (self.relative_orientation + self.motion_anchor_ori_b)
+    return self.layout.observation_dim + 6 * (
+      self.relative_orientation + self.motion_anchor_ori_b
+    )
+
+  @property
+  def layout(self):
+    return robot_layout(self.robot)
 
   def __post_init__(self):
+    if sum(value is not None for value in (self.manifest, self.motion, self.motion_dir)) > 1:
+      raise ValueError("Select exactly one motion source")
+    if self.manifest is None and self.motion is None and self.motion_dir is None:
+      object.__setattr__(self, "manifest", self.layout.manifest)
+    robot_layout(self.robot)
     if self.num_envs < 1 or self.history_length < 1 or self.future_length < 1:
       raise ValueError("Environment, history and future counts must be positive")
     if self.episode_length_s <= 0 or self.sampling not in ("uniform", "return"):

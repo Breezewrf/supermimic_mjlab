@@ -11,6 +11,7 @@ import torch
 from ..config.rl_cfg import OnlineConfig
 from ..data.replay_buffer import ReplayBuffer
 from ..mdp.resets import RESET_NOISE
+from ..models.kinematics import validate_robot_metadata
 from ..models.policy import MotionActor, MotionCritic, schema_for_dimension
 from ..models.world_model import WorldModel
 from .checkpoints import resolve_reference_schema, training_config
@@ -117,6 +118,11 @@ class OnlineTrainer:
     if env.num_envs != config.num_envs:
       raise ValueError("Environment count differs from online configuration")
     self.env, self.metadata, self.config = env, metadata, config
+    if (
+      env.foundation_config.robot != config.robot
+      or len(metadata["joint_names"]) != env.layout.num_joints
+    ):
+      raise ValueError("Environment, metadata and training robot differ")
     self.device = str(env.device)
     if (
       self.device.startswith("cuda")
@@ -206,7 +212,10 @@ class OnlineTrainer:
         self.actor.update_normalization(inputs["history"][:, -1], goal)
         if self.config.critic_input_normalization:
           features = self.critic.features(
-            self.env.read_state(), inputs["future_reference"], self.env.context, goal
+            self.env.read_state(),
+            inputs["future_reference"],
+            self.env.context,
+            goal,
           )
           self.critic.update_normalization(features)
       action = self.actor(inputs["history"], inputs["future_reference"])
@@ -552,8 +561,7 @@ class OnlineTrainer:
     saved_config = training_config(saved)
     if saved_config != asdict(self.config) or saved["clips"] != self.env.library.names:
       raise ValueError("Online checkpoint configuration or motion library mismatch")
-    if saved["robot_metadata"]["signature"] != self.metadata["signature"]:
-      raise ValueError("Online checkpoint robot signature mismatch")
+    validate_robot_metadata(saved["robot_metadata"], self.metadata)
     if saved.get("simulation") != self.simulation_parameters:
       raise ValueError("Online checkpoint simulation configuration mismatch")
     if saved["device_type"] != torch.device(self.device).type:

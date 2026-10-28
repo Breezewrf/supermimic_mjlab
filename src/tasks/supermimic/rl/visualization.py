@@ -18,6 +18,7 @@ import mujoco
 import numpy as np
 import torch
 
+from ..config.morphology import state_layout
 from ..mdp.state import quat_conjugate, quat_inverse_apply, quat_mul, yaw_quat
 from .evaluation import EvaluationInterrupted
 
@@ -59,13 +60,13 @@ class EvaluationScene:
     state = state_tensor.numpy()
     self.data.qpos[self.root_adr[:3]] = state[:3] + self.origin
     self.data.qpos[self.root_adr[3:]] = state[3:7]
-    self.data.qpos[self.joint_adr] = state[7:36]
+    self.data.qpos[self.joint_adr] = state[state_layout(state).q]
     # Perturbation damping uses body velocities, including local angular qvel.
-    self.data.qvel[self.root_v_adr[:3]] = state[36:39]
+    self.data.qvel[self.root_v_adr[:3]] = state[state_layout(state).v]
     self.data.qvel[self.root_v_adr[3:]] = quat_inverse_apply(
-      state_tensor[3:7], state_tensor[39:42]
+      state_tensor[3:7], state_tensor[state_layout(state_tensor).w]
     ).numpy()
-    self.data.qvel[self.joint_v_adr] = state[42:71]
+    self.data.qvel[self.joint_v_adr] = state[state_layout(state).qd]
     self.data.time = frame * env.step_dt
     mujoco.mj_forward(self.model, self.data)
     self.camera.lookat[:] = state[:3] + self.origin
@@ -84,12 +85,12 @@ class EvaluationScene:
       data.qpos[:] = self.data.qpos
       data.qpos[self.root_adr[:3]] = prediction[:3].numpy() + self.origin
       data.qpos[self.root_adr[3:]] = prediction[3:7].numpy()
-      data.qpos[self.joint_adr] = prediction[7:36].numpy()
-      data.qvel[self.root_v_adr[:3]] = prediction[36:39].numpy()
+      data.qpos[self.joint_adr] = prediction[state_layout(prediction).q].numpy()
+      data.qvel[self.root_v_adr[:3]] = prediction[state_layout(prediction).v].numpy()
       data.qvel[self.root_v_adr[3:]] = quat_inverse_apply(
-        prediction[3:7], prediction[39:42]
+        prediction[3:7], prediction[state_layout(prediction).w]
       ).numpy()
-      data.qvel[self.joint_v_adr] = prediction[42:71].numpy()
+      data.qvel[self.joint_v_adr] = prediction[state_layout(prediction).qd].numpy()
       data.time = getattr(self.world_model, "target_frame", frame) * env.step_dt
       mujoco.mj_forward(self.model, data)
     if self.ghost:
@@ -189,6 +190,24 @@ class MousePerturbations:
       self.applied_steps += 1
 
 
+class PassiveViewer:
+  """Own a MuJoCo viewer and wait for its render thread when closing."""
+
+  def __init__(self, model, data, **kwargs):
+    import mujoco.viewer
+
+    existing_threads = set(threading.enumerate())
+    self.handle = mujoco.viewer.launch_passive(model, data, **kwargs)
+    self._threads = set(threading.enumerate()) - existing_threads
+
+  def close(self):
+    # Handle.close() only requests exit. Keep the model/data alive until the
+    # daemon render thread has completed its OpenGL teardown.
+    self.handle.close()
+    for thread in self._threads:
+      thread.join(timeout=5.0)
+
+
 class LiveViewer:
   """Real-time passive viewer; key events only queue commands on the GUI thread."""
 
@@ -204,8 +223,6 @@ class LiveViewer:
   ):
     if not math.isfinite(speed) or speed <= 0:
       raise ValueError("Playback speed must be positive and finite")
-    import mujoco.viewer
-
     self.world_model = world_model
     self.scene = EvaluationScene(
       env, ghost=ghost, global_ghost=global_ghost, world_model=world_model
@@ -219,17 +236,14 @@ class LiveViewer:
     self.paused = False
     self.commands = SimpleQueue()
     self.deadline = None
-    existing_threads = set(threading.enumerate())
-    self.viewer = mujoco.viewer.launch_passive(
+    self._passive = PassiveViewer(
       self.scene.model,
       self.scene.data,
       key_callback=self.commands.put,
       show_left_ui=False,
       show_right_ui=False,
     )
-    # launch_passive owns a daemon render thread. Let its GL teardown finish
-    # before our buffers and the Python interpreter are destroyed on CLI exit.
-    self._viewer_threads = set(threading.enumerate()) - existing_threads
+    self.viewer = self._passive.handle
     self.viewer.cam.distance = self.scene.camera.distance
     self.viewer.cam.azimuth = self.scene.camera.azimuth
     self.viewer.cam.elevation = self.scene.camera.elevation
@@ -325,9 +339,7 @@ class LiveViewer:
   def close(self):
     if self.mouse:
       self.mouse.clear()
-    self.viewer.close()
-    for thread in self._viewer_threads:
-      thread.join(timeout=5.0)
+    self._passive.close()
 
 
 class VideoRecorder:

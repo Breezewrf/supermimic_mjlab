@@ -1,5 +1,6 @@
 """Native mouse forces reach physics and clear on release without touching poses."""
 
+import threading
 import unittest
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -9,7 +10,38 @@ import mujoco
 import numpy as np
 import torch
 
-from src.tasks.supermimic.rl.visualization import LiveViewer, MousePerturbations
+from src.tasks.supermimic.rl.visualization import (
+  LiveViewer,
+  MousePerturbations,
+  PassiveViewer,
+)
+
+
+class PassiveViewerTests(unittest.TestCase):
+  def test_close_waits_for_render_thread_teardown(self):
+    exit_requested = threading.Event()
+    render_stopped = threading.Event()
+    handle = MagicMock()
+    handle.close.side_effect = exit_requested.set
+    threads = []
+
+    def render():
+      exit_requested.wait(timeout=2.0)
+      render_stopped.set()
+
+    def launch(*args, **kwargs):
+      thread = threading.Thread(target=render, daemon=True)
+      threads.append(thread)
+      thread.start()
+      return handle
+
+    with patch("mujoco.viewer.launch_passive", side_effect=launch):
+      viewer = PassiveViewer(object(), object())
+      self.assertTrue(threads[0].is_alive())
+      viewer.close()
+    self.assertTrue(render_stopped.is_set())
+    self.assertFalse(threads[0].is_alive())
+    handle.close.assert_called_once()
 
 
 class MousePerturbationTests(unittest.TestCase):

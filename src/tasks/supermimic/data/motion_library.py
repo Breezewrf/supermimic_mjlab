@@ -1,4 +1,4 @@
-"""Manifest-backed, name-mapped reference motion library."""
+"""Name-mapped reference motions from a manifest, NPZ file, or directory."""
 
 import json
 from pathlib import Path
@@ -8,6 +8,7 @@ import torch
 from torch import Tensor
 
 from ..config.task_cfg import STEP_DT
+from .motion_sources import motion_entries, select_motion_entries
 
 MOTION_FIELDS = (
   "joint_pos",
@@ -22,23 +23,27 @@ MOTION_FIELDS = (
 class MotionLibrary:
   def __init__(
     self,
-    manifest: Path | str,
+    manifest: Path | str | None,
     joint_names: tuple[str, ...],
     body_names: tuple[str, ...],
     device: str = "cpu",
     clips: tuple[str, ...] = (),
+    *,
+    motion: Path | None = None,
+    motion_dir: Path | None = None,
   ):
-    manifest = Path(manifest).resolve()
-    metadata = json.loads(manifest.read_text())
-    if metadata.get("schema_version") != 1:
-      raise ValueError("Unsupported motion manifest schema")
-    if (
-      not np.isclose(metadata["fps"], 1 / STEP_DT)
-      or metadata["quaternion_order"] != "wxyz"
-    ):
-      raise ValueError("SuperMimic requires 50 Hz, wxyz reference motions")
-    if len(joint_names) != 29 or len(set(joint_names)) != 29:
-      raise ValueError("Expected 29 unique joint names")
+    if manifest is not None:
+      manifest = Path(manifest).resolve()
+      metadata = json.loads(manifest.read_text())
+      if metadata.get("schema_version") != 1:
+        raise ValueError("Unsupported motion manifest schema")
+      if (
+        not np.isclose(metadata["fps"], 1 / STEP_DT)
+        or metadata["quaternion_order"] != "wxyz"
+      ):
+        raise ValueError("SuperMimic requires 50 Hz, wxyz reference motions")
+    if len(joint_names) not in (23, 29) or len(set(joint_names)) != len(joint_names):
+      raise ValueError("Expected 23 or 29 unique joint names")
     if (
       not body_names
       or body_names[0] != "pelvis"
@@ -49,20 +54,18 @@ class MotionLibrary:
     self.joint_names, self.body_names = joint_names, body_names
     self.names: list[str] = []
     lengths, arrays = [], {key: [] for key in MOTION_FIELDS}
-    requested = set(clips)
-    matched = set()
-    for entry in metadata["clips"]:
-      relative = Path(entry["file"])
-      if relative.is_absolute() or ".." in relative.parts:
-        raise ValueError("Manifest clip paths must stay inside the motion directory")
-      name = relative.with_suffix("").as_posix()
-      selectors = {name, relative.as_posix()}
-      if requested and not requested.intersection(selectors):
-        continue
-      matched.update(requested.intersection(selectors))
-      if name in self.names:
-        raise ValueError(f"Duplicate motion: {name}")
-      with np.load(manifest.parent / relative, allow_pickle=False) as source:
+    entries = select_motion_entries(
+      motion_entries(manifest, motion=motion, motion_dir=motion_dir), clips
+    )
+    for entry in entries:
+      name = entry.name
+      with np.load(entry.path, allow_pickle=False) as source:
+        required = set(MOTION_FIELDS) | {"fps", "quaternion_order", "joint_names", "body_names"}
+        missing = required - set(source.files)
+        if missing:
+          raise ValueError(f"Motion {name} lacks required fields: {', '.join(sorted(missing))}")
+        if source["joint_pos"].ndim != 2:
+          raise ValueError(f"Invalid joint_pos array in {name}")
         if source["quaternion_order"].item() != "wxyz" or not np.isclose(
           source["fps"].item(), 50
         ):
@@ -81,7 +84,9 @@ class MotionLibrary:
           raise ValueError(f"Body names do not match robot: {name}")
         joint_ids = [stored_joints.index(j) for j in joint_names]
         body_ids = [stored_bodies.index(b) for b in body_names]
-        count = int(entry["frames"])
+        if manifest is not None and entry.frames is None:
+          raise ValueError(f"Manifest lacks frame count: {name}")
+        count = int(entry.frames) if entry.frames is not None else source["joint_pos"].shape[0]
         if count < 2:
           raise ValueError(f"Clip must have at least two frames: {name}")
         for key in MOTION_FIELDS:
@@ -89,7 +94,11 @@ class MotionLibrary:
           expected = (
             (count, len(stored_joints))
             if key.startswith("joint_")
-            else (count, len(stored_bodies), 4 if key == "body_quat_w" else 3)
+            else (
+              count,
+              len(stored_bodies),
+              4 if key == "body_quat_w" else 3,
+            )
           )
           if raw.shape != expected or not np.isfinite(raw).all():
             raise ValueError(f"Invalid {key} array in {name}: {raw.shape}")
@@ -101,10 +110,6 @@ class MotionLibrary:
           arrays[key].append(torch.from_numpy(selected).float())
       lengths.append(count)
       self.names.append(name)
-    if requested - matched:
-      raise ValueError(f"Unknown clips: {sorted(requested - matched)}")
-    if not lengths:
-      raise ValueError("No reference motions selected")
     self.lengths = torch.tensor(lengths, dtype=torch.long, device=device)
     self.offsets = self.lengths.cumsum(0) - self.lengths
     self.data = {key: torch.cat(value).to(device) for key, value in arrays.items()}

@@ -12,6 +12,9 @@ Actor 和 Critic。
 
 当前数据集包含 40 段 G1 重定向 LAFAN 动作，约 2.45 小时，控制频率为 50 Hz。
 
+新增 93 维观测的速度控制接口，支持速度 encoder 预热、motion/velocity 联合训练以及
+不依赖参考动作的独立播放。训练方法与短跑验证结果见[速度控制说明](doc/velocity_controller_zh.md)。
+
 完整规模训练使用单张 **NVIDIA RTX A6000（48 GB 显存）**，在 4096 环境、FP32
 配置下训练 **15000 轮约需 4 小时**。显存较小的 GPU 可通过减少环境数和 batch size
 缩小训练规模，具体配置见[训练操作指南](doc/training_and_playback_zh.md#缩小训练规模)，性能未经验证。
@@ -92,10 +95,13 @@ scripts/
 
 ## 准备动作数据
 
-原始 CSV 位于 `src/assets/motions/LAFAN1_Retargeting_Dataset/`。尚未转换时运行：
+G1 29DoF 和 23DoF 使用相同流程，通过 `--robot` 选择机器人（默认 `g1_29dof`），
+并准备与之匹配的 retarget 动作数据。下面以
+`src/assets/motions/LAFAN1_Retargeting_Dataset/` 中的 CSV 为例；其他 retarget 数据集
+用 `--input-dir` 指定：
 
 ```bash
-python scripts/data/convert_lafan_to_npz.py \
+python scripts/data/convert_lafan_to_npz.py --robot g1_29dof \
   --input-dir src/assets/motions/LAFAN1_Retargeting_Dataset \
   --output-dir src/assets/motions/g1/lafan1_npz \
   --input-fps 30 --output-fps 50
@@ -104,7 +110,18 @@ python scripts/data/convert_lafan_to_npz.py \
 输出为每段动作的 NPZ 和 `manifest.json`，已有转换结果时可跳过。
 字段和坐标约定见 [LAFAN 转换说明](doc/lafan_conversion_zh.md)。
 
+23DoF 使用 `--robot g1_23dof`，并将 `--output-dir` 改为
+`src/assets/motions/g1/lafan1_npz_23dof`，两个机器人的转换数据分开存放。
+训练会选择对应的默认 manifest；评估／播放通过 `--motion` 或 `--motion-dir`
+指定匹配的 NPZ 数据。
+
 ## 在线训练
+
+两种机器人使用相同训练命令，通过 `--robot g1_29dof` 或 `--robot g1_23dof` 选择。
+默认使用紧凑参考；全身参考在 29DoF 下使用 `--reference-dim 2680`，23DoF 下使用
+`--reference-dim 2560`。恢复、评估和播放从 checkpoint 自动读取机器人类型，权重和
+动作数据需与机器人匹配。下文发布的权重及消融结果均为 29DoF。速度训练和离线训练
+也使用相同的 `--robot` 选择方式。
 
 `motion_anchor_ori_b` 是可选消融变量，默认关闭，可在训练命令中添加
 `--motion-anchor-ori-b` 开启。
@@ -139,6 +156,7 @@ python scripts/data/convert_lafan_to_npz.py \
 
 ```bash
 python scripts/train_supermimic.py \
+  --robot g1_29dof \
   --device cuda:0 \
   --reference-dim 2680 \
   --world-prediction state_delta \
@@ -169,7 +187,8 @@ python scripts/train_supermimic.py \
 ```bash
 python scripts/play_supermimic.py \
   --device cuda:0 --checkpoint checkpoints/best/policy_best.pt \
-  --clips walk1_subject1 run1_subject2 --loop
+  --clips walk1_subject1 run1_subject2 --loop \
+  --motion-dir src/assets/motions/g1/lafan1_npz
 ```
 
 同时预览世界模型内策略在未来 32 个控制步（0.64 秒）后的预测：
@@ -179,7 +198,8 @@ python scripts/play_supermimic.py \
   --device cuda:0 --checkpoint checkpoints/best/policy_best.pt \
   --world-model checkpoints/best/world_model_best.pt \
   --world-model-mode future --world-model-horizon 32 \
-  --clips walk1_subject1 run1_subject2 --loop
+  --clips walk1_subject1 run1_subject2 --loop \
+  --motion-dir src/assets/motions/g1/lafan1_npz
 ```
 
 不指定 `--clips` 时播放全部 40 段动作。播放默认允许鼠标外力，并在超过高度／倾斜
@@ -189,11 +209,20 @@ python scripts/play_supermimic.py \
 ```bash
 python scripts/evaluate_supermimic.py \
   --device cuda:0 --checkpoint checkpoints/best/policy_best.pt \
-  --output outputs/supermimic/evaluation_best.json
+  --output outputs/supermimic/evaluation_best.json \
+  --motion-dir src/assets/motions/g1/lafan1_npz
 ```
 
 训练默认启用域随机化、观测噪声和按回报采样的重置；不指定 `--clips` 时使用全部
 动作，调试可指定 `--clips walk1_subject1 run1_subject2`。
+
+评估／播放必须显式选择一个动作来源：`--motion /path/to/clip.npz`、
+`--motion-dir /path/to/motions` 或 `--manifest /path/to/manifest.json`，三者互斥。
+文件和目录模式无需 manifest；目录按相对路径排序并递归加载 NPZ。不指定 `--clips`
+时使用该来源的全部动作，包括训练中未出现的动作。
+模型和数据 SHA 仅作为可选溯源信息，不再阻止加载；仍检查网络维度、机器人关节／刚体
+顺序及拓扑、动作格式和仿真配置。在线续训为恢复 replay 和采样器状态，仍保留原 clip 顺序。
+
 
 机器人关闭自碰撞，保留全身触地。训练重置扰动参考位姿、根速度和关节位置；摩擦与
 躯干质心在启动时采样，编码器偏差逐 episode 重采样。评估关闭重置噪声和域随机化。
@@ -206,13 +235,36 @@ checkpoint 格式和查看器操作见[操作指南](doc/training_and_playback_z
 
 ```bash
 python scripts/train_supermimic.py \
+  --robot g1_29dof \
   --device cuda:0 --resume outputs/supermimic/run/last.pt \
   --iterations 32000
 ```
 
+## Play OOD 动作
+
+<p align="center">
+  <img src="src/assets/motions/examples/C5_-_walk_to_run_stageii.gif" alt="分布外动作播放：行走转跑步" width="48%" />
+  <img src="src/assets/motions/examples/dance_video.gif" alt="分布外动作播放：视频舞蹈" width="48%" />
+</p>
+
+<p align="center">左：ACCAD 数据集中的动作示例。右：从视频转换为动作数据的示例。</p>
+
+也可以使用 [video2motion](https://github.com/Breezewrf/video2motion)，从视频、Kimodo、
+GMR 动作或 ACCAD 数据集导出 SuperMimic 可用的动作数据。转换方法参考该仓库，
+导出的 NPZ 可直接搭配对应机器人的 checkpoint 播放：
+
+```bash
+python scripts/play_supermimic.py \
+  --checkpoint checkpoints/best/policy_best.pt \
+  --motion src/assets/motions/examples/C5_-_walk_to_run_stageii.npz \
+  --loop
+```
+
 ## 训练日志与 W&B
 
-终端按输出区间统计平均值；`Fail%` 为每条采集转移对应的物理失败事件频率，
+终端按 Reward、Error、Loss、Objective、Failure 和 Performance 分区，误差显示物理单位。
+JSONL/W&B 提供 `reward/`、`error/`、`loss/`、`objective/` 分类，并保留旧字段兼容。
+日志按输出区间统计平均值；失败百分比为每条采集转移对应的物理失败事件频率，
 `Steps/s` 包含采集和优化时间，`GPU` 为 PyTorch 分配器记录的显存峰值（GiB）。
 仿真初始化、kernel 和 seed 信息写入 `simulator.log`，异常回溯保留在 stderr。
 
@@ -231,6 +283,7 @@ wandb login
 
 ```bash
 python scripts/train_supermimic.py \
+  --robot g1_29dof \
   --device cuda:0 --iterations 1000 \
   --wandb --wandb-project supermimic --wandb-name g1-lafan \
   --output outputs/supermimic/online_wandb

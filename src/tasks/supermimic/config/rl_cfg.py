@@ -3,6 +3,8 @@
 import math
 from dataclasses import dataclass
 
+from .morphology import robot_layout
+
 
 @dataclass(frozen=True)
 class OnlineConfig:
@@ -34,17 +36,24 @@ class OnlineConfig:
   diagnostics_batch_size: int = 64
   compile: bool = True
   amp: str = "bf16"
-  reference_dim: int = 730
+  reference_dim: int | None = None
   actor_input_normalization: bool = False
   critic_input_normalization: bool = False
   world_prediction: str = "state_delta"
   world_model_normalization: bool = False
+  robot: str = "g1_29dof"
 
   def __post_init__(self):
     if self.world_prediction not in ("state_delta", "velocity_residual"):
       raise ValueError("world_prediction must be state_delta or velocity_residual")
-    if self.reference_dim not in (730, 2680):
-      raise ValueError("reference_dim must be 730 or 2680")
+    layout = robot_layout(self.robot)
+    if self.reference_dim is None:
+      object.__setattr__(self, "reference_dim", layout.reference_dim)
+    if self.reference_dim not in (
+      layout.reference_dim,
+      layout.full_body_reference_dim,
+    ):
+      raise ValueError("reference_dim does not match the selected robot")
     counts = (
       self.num_envs,
       self.collect_steps,

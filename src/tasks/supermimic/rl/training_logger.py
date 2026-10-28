@@ -6,6 +6,8 @@ import uuid
 from contextlib import nullcontext, redirect_stdout
 from pathlib import Path
 
+from .metric_schema import classified_metrics
+
 
 def duration(seconds: float) -> str:
   seconds = max(0, int(seconds))
@@ -135,7 +137,14 @@ class ConsoleReporter:
       print(text, file=self.stream, flush=True)
 
   def start(
-    self, config: dict, device: str, motions: int, output: Path, iteration: int
+    self,
+    config: dict,
+    device: str,
+    motions: int,
+    output: Path,
+    iteration: int,
+    *,
+    table_note: str | None = None,
   ):
     self.message(
       f"SuperMimic | {device} | {config['num_envs']:,} envs | {motions} motions | "
@@ -172,7 +181,8 @@ class ConsoleReporter:
       )
     if self.log_format == "table":
       self.message(
-        "Table: interval means | Fail%: failure events per transition | GPU: PyTorch peak GiB"
+        table_note
+        or "Table: interval means | Fail%: failure events per transition | GPU: PyTorch peak GiB"
       )
 
   def training(self, record: dict):
@@ -187,36 +197,86 @@ class ConsoleReporter:
         self.message("Joint training: actor and critic updates enabled")
       self.training_phase = phase
 
-    def value(key):
-      return "--" if record.get(key) is None else f"{record[key]:.4f}"
+    metrics = classified_metrics(record)
+
+    def value(key, unit="", digits=4):
+      number = metrics.get(key)
+      return "--" if number is None else f"{number:.{digits}f}{unit}"
 
     failure = record.get("failure_events_per_transition")
-    columns = (
-      "Iter",
-      "Real R",
-      "Fail%",
-      "WM loss",
-      "Actor J",
-      "V loss",
-      "Steps/s",
-      "s/it",
-      "GPU",
-      "ETA",
+    rows = [
+      (
+        "Reward ↑",
+        "motion="
+        + value("reward/motion/total_per_step")
+        + " (weighted, dt-scaled per control step)",
+      ),
+      (
+        "Error ↓",
+        "body position="
+        + value("error/motion/body_position_m", " m", 3)
+        + " / body rotation="
+        + value("error/motion/body_orientation_rad", " rad", 3),
+      ),
+      (
+        "",
+        "root position="
+        + value("error/motion/root_position_m", " m", 3)
+        + " / root rotation="
+        + value("error/motion/root_orientation_rad", " rad", 3),
+      ),
+      (
+        "Loss ↓",
+        "WM loss="
+        + value("loss/world_model/total")
+        + " / state="
+        + value("loss/world_model/state")
+        + " / termination="
+        + value("loss/world_model/termination"),
+      ),
+      ("", "critic=" + value("loss/critic/motion")),
+      ("Objective ↑", "imagined return=" + value("objective/motion/return")),
+      (
+        "Failure ↓",
+        "--" if failure is None else f"{failure * 100:.2f}% (events per transition)",
+      ),
+      (
+        "Performance",
+        f"{record.get('window_transitions_per_second', 0):,.0f} transitions/s / "
+        f"{record['seconds']:.2f} s/iteration / ETA "
+        + duration((self.total - record["iteration"]) * record["seconds"])
+        + (
+          f" / GPU {record['peak_gpu_memory_gib']:.2f} GiB"
+          if "peak_gpu_memory_gib" in record
+          else ""
+        ),
+      ),
+    ]
+    self.metric_sections(
+      f"Iteration {record['iteration']:,}/{self.total:,} | {phase} | "
+      f"lr={record['learning_rate']:.2e}",
+      rows,
     )
-    row = (
-      f"{record['iteration']:,}",
-      value("real_reward_per_step"),
-      "--" if failure is None else f"{100 * failure:.2f}%",
-      value("wm_loss"),
-      value("actor_objective"),
-      value("critic_loss"),
-      "--" if failure is None else f"{record['window_transitions_per_second']:,.0f}",
-      f"{record['seconds']:.2f}",
-      "--"
-      if "peak_gpu_memory_gib" not in record
-      else f"{record['peak_gpu_memory_gib']:.2f}",
-      duration((self.total - record["iteration"]) * record["seconds"]),
-    )
+
+  def metric_sections(self, title, rows):
+    self.message(title)
+    if self.console:
+      from rich import box
+      from rich.table import Table
+      from rich.text import Text
+
+      table = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
+      table.add_column("Type", style="bold cyan", no_wrap=True)
+      table.add_column("Metrics")
+      for label, text in rows:
+        table.add_row(Text(label), Text(text))
+      self.console.print(table)
+    else:
+      for label, text in rows:
+        self.message(f"{label:12} {text}")
+    self.lines += 1
+
+  def table(self, columns, row):
     header = self.lines % 20 == 0
     if self.console:
       from rich import box
@@ -303,6 +363,16 @@ class WandbReporter:
     )
     self.run.define_metric("train/iteration")
     self.run.define_metric("*", step_metric="train/iteration")
+    for group, direction in (
+      ("reward", "max"),
+      ("objective", "max"),
+      ("error", "min"),
+      ("loss", "min"),
+      ("failure", "min"),
+    ):
+      self.run.define_metric(
+        f"{group}/*", summary=direction, step_metric="train/iteration"
+      )
     self.run.define_metric("evaluation/normalized_return", summary="max")
     self.state = {
       "id": self.run.id,
@@ -390,6 +460,7 @@ class WandbReporter:
         metrics["collection/mean_episode_return"] = (
           record["episode_returns_sum"] / record["episodes_ended"]
         )
+    metrics.update(classified_metrics(record))
     self.run.log(metrics)
     self._persist(record["iteration"])
 

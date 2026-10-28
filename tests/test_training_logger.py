@@ -14,6 +14,7 @@ from src.tasks.supermimic.rl.training_logger import (
   WandbReporter,
   simulator_output,
 )
+from src.tasks.supermimic.rl.velocity_logger import VelocityWandbReporter
 
 
 def record(iteration=1, collected=True):
@@ -188,6 +189,48 @@ class WandbTests(unittest.TestCase):
     self.assertEqual(second["train/iteration"], 2)
     tracker.close(exit_code=1)
     tracker.run.finish.assert_called_once_with(exit_code=1)
+
+  def test_velocity_warmup_joint_and_collection_metrics(self):
+    tracker = VelocityWandbReporter(self.output, {}, 0)
+    warmup = {
+      "iteration": 1,
+      "stage": "warmup",
+      "environment_steps": 20,
+      "control_steps": 10,
+      "warmup_completed": 1,
+      "wm_loss": 0.2,
+      "wm_motion_loss": 0.1,
+      "wm_velocity_loss": 0.3,
+      "velocity/alignment_loss": 0.4,
+      "velocity/linear_velocity_error": 0.8,
+      "motion/failure_rate": 0.1,
+      "collected_this_iteration": True,
+    }
+    tracker.training(warmup)
+    metrics = tracker.run.log.call_args.args[0]
+    self.assertEqual(metrics["world_model/velocity_loss"], 0.3)
+    self.assertEqual(metrics["velocity/linear_velocity_error"], 0.8)
+    self.assertEqual(metrics["error/velocity/planar_velocity_m_per_s"], 0.8)
+    self.assertEqual(metrics["loss/velocity/latent_alignment_mse"], 0.4)
+    self.assertNotIn("velocity/objective", metrics)
+    joint = warmup | {
+      "iteration": 2,
+      "stage": "joint",
+      "collected_this_iteration": False,
+      "velocity/objective": 1.2,
+      "motion/critic_loss": 0.5,
+    }
+    tracker.training(joint)
+    metrics = tracker.run.log.call_args.args[0]
+    self.assertEqual(metrics["velocity/objective"], 1.2)
+    self.assertEqual(metrics["objective/velocity/return"], 1.2)
+    self.assertEqual(metrics["loss/critic/motion"], 0.5)
+    self.assertNotIn("error/velocity/planar_velocity_m_per_s", metrics)
+    self.assertEqual(metrics["motion/critic_loss"], 0.5)
+    self.assertNotIn("velocity/linear_velocity_error", metrics)
+    self.assertNotIn("motion/failure_rate", metrics)
+    resumed = VelocityWandbReporter(self.output, {}, 2)
+    self.assertEqual(resumed.state["id"], tracker.state["id"])
 
   def test_online_console_uses_url_property_without_get_url_method(self):
     console = MagicMock()
