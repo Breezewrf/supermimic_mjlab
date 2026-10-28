@@ -35,7 +35,8 @@ uv pip install --no-deps -e .
 发行包名为 `supermimic_mjlab`，Python 导入路径为 `src.tasks.supermimic`。
 G1 XML 和网格资源保存在仓库的 [`src/assets/robots/g1`](../src/assets/robots/g1/README.md)，
 mjlab 提供训练使用的 PD 执行器，无需本地 Unitree SDK2 部署模拟器。
-早期 mjlab 机器人资源的 checkpoint 与当前模型指纹不同，训练和推理需匹配机器人模型。
+模型指纹仅用于溯源，不再阻止加载；仍要求机器人关节／刚体顺序、拓扑、网络维度和仿真
+配置兼容。复现历史成绩仍需使用原始配置和资产。
 
 ## 验证环境
 

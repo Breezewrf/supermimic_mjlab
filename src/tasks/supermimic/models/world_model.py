@@ -5,6 +5,7 @@ from itertools import pairwise
 import torch
 from torch import Tensor, nn
 
+from ..config.morphology import state_layout
 from ..config.task_cfg import STEP_DT
 from ..mdp.rewards import tracking_reward
 from ..mdp.state import (
@@ -35,15 +36,16 @@ WORLD_PREDICTIONS = ("state_delta", "velocity_residual")
 
 
 def encode_state(state: Tensor) -> Tensor:
+  layout = state_layout(state)
   q = quat_normalize(state[..., 3:7])
   return torch.cat(
     (
       state[..., 2:3],
       quat_inverse_apply(q, state.new_tensor([0, 0, -1])),
-      state[..., 7:36],
-      quat_inverse_apply(q, state[..., 36:39]),
-      quat_inverse_apply(q, state[..., 39:42]),
-      state[..., 42:71],
+      state[..., layout.q],
+      quat_inverse_apply(q, state[..., layout.v]),
+      quat_inverse_apply(q, state[..., layout.w]),
+      state[..., layout.qd],
     ),
     dim=-1,
   )
@@ -51,16 +53,17 @@ def encode_state(state: Tensor) -> Tensor:
 
 def apply_state_delta(state: Tensor, delta: Tensor) -> Tensor:
   """Apply complete one-step increments; no velocity-based extrapolation."""
-  dp, dr, dq, dv, dw, dqd = delta.split(GROUPS, dim=-1)
+  layout = state_layout(state)
+  dp, dr, dq, dv, dw, dqd = delta.split(layout.delta_groups, dim=-1)
   q = quat_normalize(state[..., 3:7])
   return torch.cat(
     (
       state[..., :3] + quat_apply(q, dp),
       quat_normalize(quat_mul(q, rotvec_to_quat(dr))),
-      state[..., 7:36] + dq,
-      state[..., 36:39] + quat_apply(q, dv),
-      state[..., 39:42] + quat_apply(q, dw),
-      state[..., 42:71] + dqd,
+      state[..., layout.q] + dq,
+      state[..., layout.v] + quat_apply(q, dv),
+      state[..., layout.w] + quat_apply(q, dw),
+      state[..., layout.qd] + dqd,
     ),
     dim=-1,
   )
@@ -68,15 +71,22 @@ def apply_state_delta(state: Tensor, delta: Tensor) -> Tensor:
 
 def state_delta_targets(state: Tensor, next_state: Tensor) -> Tensor:
   """Complete one-step state differences in the current body frame."""
+  layout = state_layout(state)
   q = quat_normalize(state[..., 3:7])
   return torch.cat(
     (
       quat_inverse_apply(q, next_state[..., :3] - state[..., :3]),
       quat_to_rotvec(quat_mul(quat_conjugate(q), next_state[..., 3:7])),
-      next_state[..., 7:36] - state[..., 7:36],
-      quat_inverse_apply(q, next_state[..., 36:39] - state[..., 36:39]),
-      quat_inverse_apply(q, next_state[..., 39:42] - state[..., 39:42]),
-      next_state[..., 42:71] - state[..., 42:71],
+      next_state[..., layout.q] - state[..., layout.q],
+      quat_inverse_apply(
+        q,
+        next_state[..., layout.v] - state[..., layout.v],
+      ),
+      quat_inverse_apply(
+        q,
+        next_state[..., layout.w] - state[..., layout.w],
+      ),
+      next_state[..., layout.qd] - state[..., layout.qd],
     ),
     dim=-1,
   )
@@ -84,51 +94,63 @@ def state_delta_targets(state: Tensor, next_state: Tensor) -> Tensor:
 
 def integrate(state: Tensor, correction: Tensor | None = None) -> Tensor:
   """Legacy residual dynamics; also supplies the constant-velocity diagnostic baseline."""
+  layout = state_layout(state)
   if correction is None:
-    correction = state.new_zeros((*state.shape[:-1], 70))
-  dp, dr, dq, dv, dw, dqd = correction.split(GROUPS, dim=-1)
+    correction = state.new_zeros((*state.shape[:-1], state.shape[-1] - 1))
+  dp, dr, dq, dv, dw, dqd = correction.split(layout.delta_groups, dim=-1)
   q = quat_normalize(state[..., 3:7])
-  angular_body = quat_inverse_apply(q, state[..., 39:42])
+  angular_body = quat_inverse_apply(q, state[..., layout.w])
   next_q = quat_normalize(quat_mul(q, rotvec_to_quat(angular_body * STEP_DT + dr)))
   return torch.cat(
     (
-      state[..., :3] + state[..., 36:39] * STEP_DT + quat_apply(q, dp),
+      state[..., :3] + state[..., layout.v] * STEP_DT + quat_apply(q, dp),
       next_q,
-      state[..., 7:36] + state[..., 42:71] * STEP_DT + dq,
-      state[..., 36:39] + quat_apply(q, dv),
-      state[..., 39:42] + quat_apply(q, dw),
-      state[..., 42:71] + dqd,
+      state[..., layout.q] + state[..., layout.qd] * STEP_DT + dq,
+      state[..., layout.v] + quat_apply(q, dv),
+      state[..., layout.w] + quat_apply(q, dw),
+      state[..., layout.qd] + dqd,
     ),
     dim=-1,
   )
 
 
 def correction_targets(state: Tensor, next_state: Tensor) -> Tensor:
+  layout = state_layout(state)
   q = quat_normalize(state[..., 3:7])
   rotation = quat_to_rotvec(quat_mul(quat_conjugate(q), next_state[..., 3:7]))
   return torch.cat(
     (
       quat_inverse_apply(
-        q, next_state[..., :3] - state[..., :3] - state[..., 36:39] * STEP_DT
+        q,
+        next_state[..., :3] - state[..., :3] - state[..., layout.v] * STEP_DT,
       ),
-      rotation - quat_inverse_apply(q, state[..., 39:42]) * STEP_DT,
-      next_state[..., 7:36] - state[..., 7:36] - state[..., 42:71] * STEP_DT,
-      quat_inverse_apply(q, next_state[..., 36:39] - state[..., 36:39]),
-      quat_inverse_apply(q, next_state[..., 39:42] - state[..., 39:42]),
-      next_state[..., 42:71] - state[..., 42:71],
+      rotation - quat_inverse_apply(q, state[..., layout.w]) * STEP_DT,
+      next_state[..., layout.q]
+      - state[..., layout.q]
+      - state[..., layout.qd] * STEP_DT,
+      quat_inverse_apply(
+        q,
+        next_state[..., layout.v] - state[..., layout.v],
+      ),
+      quat_inverse_apply(
+        q,
+        next_state[..., layout.w] - state[..., layout.w],
+      ),
+      next_state[..., layout.qd] - state[..., layout.qd],
     ),
     dim=-1,
   )
 
 
 def state_errors(prediction: Tensor, target: Tensor) -> tuple[Tensor, ...]:
+  layout = state_layout(prediction)
   return (
     prediction[..., :3] - target[..., :3],
     quat_to_rotvec(quat_mul(quat_conjugate(target[..., 3:7]), prediction[..., 3:7])),
-    prediction[..., 7:36] - target[..., 7:36],
-    prediction[..., 36:39] - target[..., 36:39],
-    prediction[..., 39:42] - target[..., 39:42],
-    prediction[..., 42:71] - target[..., 42:71],
+    prediction[..., layout.q] - target[..., layout.q],
+    prediction[..., layout.v] - target[..., layout.v],
+    prediction[..., layout.w] - target[..., layout.w],
+    prediction[..., layout.qd] - target[..., layout.qd],
   )
 
 
@@ -169,7 +191,9 @@ class WorldModel(nn.Module):
     self.motion_anchor_ori_b = motion_anchor_ori_b
     self.amp = amp
     self.kinematics = G1Kinematics(metadata)
-    widths = (130, *hidden_dims, 70)
+    layout = self.kinematics.layout
+    input_dim, output_dim = 4 * layout.num_joints + 14, layout.state_dim - 1
+    widths = (input_dim, *hidden_dims, output_dim)
     layers = []
     for index, (left, right) in enumerate(pairwise(widths)):
       layers.append(nn.Linear(left, right))
@@ -184,13 +208,15 @@ class WorldModel(nn.Module):
     self.termination_head = nn.Sequential(
       nn.Linear(2, 64), nn.ELU(), nn.Linear(64, 64), nn.ELU(), nn.Linear(64, 1)
     )
-    self.register_buffer("input_mean", torch.zeros(130))
-    self.register_buffer("input_std", torch.ones(130))
+    self.register_buffer("input_mean", torch.zeros(input_dim))
+    self.register_buffer("input_std", torch.ones(input_dim))
     # Retain the historical buffer name so legacy weights load without conversion.
-    self.register_buffer("correction_scale", torch.ones(70))
-    self.in_norm = RunningNorm(130) if world_model_normalization else nn.Identity()
+    self.register_buffer("correction_scale", torch.ones(output_dim))
+    self.in_norm = (
+      RunningNorm(input_dim) if world_model_normalization else nn.Identity()
+    )
     self.out_norm = (
-      RunningNorm(70, eps=1e-4) if world_model_normalization else nn.Identity()
+      RunningNorm(output_dim, eps=1e-4) if world_model_normalization else nn.Identity()
     )
 
   def features(self, state: Tensor, action: Tensor, context: Tensor) -> Tensor:
@@ -224,7 +250,10 @@ class WorldModel(nn.Module):
     self.input_mean.copy_(features.mean(0))
     self.input_std.copy_(features.std(0, unbiased=False).clamp_min(1e-3))
     targets = self.targets(state, next_state)
-    floor = targets.new_tensor([1e-3] * 35 + [1e-2] * 35)
+    floor = targets.new_tensor(
+      [1e-3] * (6 + self.kinematics.layout.num_joints)
+      + [1e-2] * (6 + self.kinematics.layout.num_joints)
+    )
     self.correction_scale.copy_(targets.std(0, unbiased=False).maximum(floor))
 
   def forward(self, state: Tensor, action: Tensor, context: Tensor) -> Tensor:

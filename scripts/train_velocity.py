@@ -1,4 +1,4 @@
-"""Train a 93-observation SuperMimic velocity interface with a shared decoder."""
+"""Train a proprioceptive SuperMimic velocity interface with a shared decoder."""
 
 import argparse
 import json
@@ -12,8 +12,10 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from src.tasks.supermimic.config.cli import add_robot_argument, resolve_robot_arguments
+from src.tasks.supermimic.config.morphology import robot_layout
 from src.tasks.supermimic.config.rl_cfg import OnlineConfig
-from src.tasks.supermimic.config.task_cfg import DEFAULT_MANIFEST, FoundationConfig
+from src.tasks.supermimic.config.task_cfg import FoundationConfig
 from src.tasks.supermimic.config.velocity_cfg import VelocityConfig
 from src.tasks.supermimic.data.world_model_data import file_sha256
 from src.tasks.supermimic.models.kinematics import robot_metadata
@@ -37,7 +39,8 @@ from src.tasks.supermimic.velocity_env import VelocityEnv
 
 def parser():
   p = argparse.ArgumentParser(description=__doc__)
-  p.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+  add_robot_argument(p)
+  p.add_argument("--manifest", type=Path)
   p.add_argument(
     "--actor-checkpoint",
     type=Path,
@@ -104,7 +107,7 @@ def parser():
     "--initial-evaluation-steps",
     type=int,
     default=250,
-    help="Per-clip 93D motion baseline check; 0 skips it",
+    help="Per-clip motion baseline check; 0 skips it",
   )
   p.add_argument("--stand-still-weight", type=float, default=0.0)
   return p
@@ -127,6 +130,7 @@ def main():
       argument_parser.error("Resume into the checkpoint's existing output directory")
   elif args.output.exists():
     argument_parser.error("Output exists; choose a new directory or use --resume")
+  resolve_robot_arguments(args, argument_parser)
   if args.device.startswith("cuda") and not torch.cuda.is_available():
     raise RuntimeError("CUDA is unavailable in this process")
   torch.manual_seed(args.seed)
@@ -147,8 +151,6 @@ def main():
     cfg = OnlineConfig(**saved["config"])
     velocity = VelocityConfig(**saved["velocity_config"])
     stage = saved["stage"]
-    if saved["manifest_sha256"] != file_sha256(args.manifest):
-      raise ValueError("Resume manifest mismatch")
   else:
     names = {f.name for f in fields(OnlineConfig)}
     values = {key: value for key, value in vars(args).items() if key in names}
@@ -156,7 +158,7 @@ def main():
       values[key] = tuple(values[key])
     values.update(
       amp="none",
-      reference_dim=2680,
+      reference_dim=robot_layout(args.robot).full_body_reference_dim,
       actor_input_normalization=True,
       critic_input_normalization=True,
       world_model_normalization=True,
@@ -169,13 +171,12 @@ def main():
       if (
         actor_cfg["relative_orientation"]
         or actor_cfg["motion_anchor_ori_b"]
-        or actor_saved["actor"]["decoder.0.weight"].shape[1] != 962
+        or actor_saved["actor"]["decoder.0.weight"].shape[1]
+        != 32 + 10 * robot_layout(args.robot).observation_dim
       ):
         raise ValueError(
-          "Initialization requires a 93D decoder; 99D weights cannot be cropped"
+          "Initialization requires a matching robot and proprioceptive decoder"
         )
-      if actor_saved["manifest_sha256"] != file_sha256(args.manifest):
-        raise ValueError("Actor initialization manifest mismatch")
       for key in ("actor_dims", "reference_dim", "actor_input_normalization"):
         values[key] = actor_cfg[key]
       world_saved = torch.load(
@@ -197,8 +198,6 @@ def main():
       )
       if not values["clips"]:
         raise ValueError("No locomotion clips found; supply --clips explicitly")
-    if actor_saved and not set(values["clips"]).issubset(actor_saved["clips"]):
-      raise ValueError("Initialization clips must be in the motion checkpoint")
     cfg = OnlineConfig(**values)
     velocity = VelocityConfig(
       warmup_updates=args.warmup_updates,
@@ -220,7 +219,7 @@ def main():
     randomize_initial_episode_progress=args.randomize_initial_episode_progress,
   )
   if cfg.relative_orientation or cfg.motion_anchor_ori_b:
-    raise ValueError("Velocity training requires 93D observations")
+    raise ValueError("Velocity training requires proprioceptive observations")
   run = {
     "config": asdict(cfg),
     "velocity_config": asdict(velocity),
@@ -234,11 +233,12 @@ def main():
   write_json(args.output / "config.json", run)
   console = VelocityConsoleReporter(args.iterations, args.log_format)
   console.message(f"Initializing simulation; details: {args.output / 'simulator.log'}")
-  metadata = robot_metadata()
+  metadata = robot_metadata(args.robot)
   with TrainingRuntime(args, args.output, console) as runtime:
     with simulator_output(runtime.sim_log, verbose=args.verbose_sim):
       env = runtime.env = VelocityEnv(
         FoundationConfig.training(
+          robot=args.robot,
           manifest=args.manifest,
           clips=cfg.clips,
           num_envs=cfg.num_envs,
@@ -285,7 +285,7 @@ def main():
       table_note="Table: interval means | Fail%: failure events per transition",
     )
     console.message(
-      f"Velocity: 10 x 93 observations | shared decoder | stage={stage} | "
+      f"Velocity: 10 x {env.foundation_config.observation_dim} observations | shared decoder | stage={stage} | "
       f"latent warmup={velocity.warmup_updates:,} updates"
     )
     console.message(

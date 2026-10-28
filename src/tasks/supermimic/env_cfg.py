@@ -1,5 +1,7 @@
 """Minimal mjlab scene for collection; task signals are shared tensor functions."""
 
+import re
+
 import mujoco
 from mjlab.asset_zoo.robots import G1_ACTION_SCALE
 from mjlab.envs import ManagerBasedRlEnvCfg
@@ -12,8 +14,8 @@ from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.terrains import TerrainEntityCfg
 from mjlab.viewer import ViewerConfig
 
-from .config.task_cfg import FoundationConfig
 from .config.robot_cfg import FOOT_COLLISION_EXPR, get_supermimic_robot_cfg
+from .config.task_cfg import FoundationConfig
 
 
 class FoundationMujocoCfg(MujocoCfg):
@@ -34,18 +36,24 @@ def make_env_cfg(config: FoundationConfig) -> ManagerBasedRlEnvCfg:
   com = {0: (-0.025, 0.025), 1: (-0.05, 0.05), 2: (-0.05, 0.05)}
   if not config.randomization:
     com = {i: (0.0, 0.0) for i in range(3)}
+  robot_cfg = get_supermimic_robot_cfg(config.robot)
+  joint_names = [j.name for j in robot_cfg.spec_fn().joints]
   return ManagerBasedRlEnvCfg(
     seed=config.seed,
     scene=SceneCfg(
       terrain=TerrainEntityCfg(terrain_type="plane"),
-      entities={"robot": get_supermimic_robot_cfg()},
+      entities={"robot": robot_cfg},
       num_envs=config.num_envs,
     ),
     actions={
       "joint_pos": JointPositionActionCfg(
         entity_name="robot",
         actuator_names=(".*",),
-        scale=G1_ACTION_SCALE,
+        scale={
+          p: value
+          for p, value in G1_ACTION_SCALE.items()
+          if any(re.fullmatch(p, name) for name in joint_names)
+        },
         use_default_offset=True,
       )
     },

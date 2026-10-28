@@ -168,6 +168,10 @@ class VelocityCliTests(unittest.TestCase):
       resume_common = common.copy()
       output_index = resume_common.index("--output")
       del resume_common[output_index : output_index + 2]
+      manifest.write_text(json.dumps(json.loads(manifest.read_text()), indent=2))
+      checkpoint.pop("manifest_sha256")
+      checkpoint["robot_metadata"].pop("signature")
+      torch.save(checkpoint, output / "last.pt")
       result = subprocess.run(
         resume_common + ["--resume", str(output / "last.pt"), "--iterations", "3"],
         capture_output=True,

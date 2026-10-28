@@ -73,7 +73,7 @@ def imagine_velocity(
   )
   state, history = starts["state"].detach(), starts["history"].detach()
   context = starts["context"].detach()
-  previous = history[:, -1, -29:]
+  previous = history[:, -1, -actor.default_q.numel() :]
   states, actions, latents, rewards, continuation, features, values = (
     [state],
     [],
@@ -114,7 +114,7 @@ def imagine_velocity(
       )
       reward, failure = kernels.signals(next_state, command, action, previous)
     if sensor_noise:
-      observation = add_sensor_noise(observation, generator)
+      observation = add_sensor_noise(observation, generator, actor.default_q.numel())
     history = torch.cat((history[:, 1:], observation[:, None]), 1)
     state, previous = next_state, action
     states.append(state)

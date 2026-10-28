@@ -5,14 +5,17 @@ import math
 import torch
 from torch import Tensor
 
+from ..config.morphology import state_layout
 from ..config.task_cfg import MOTION_ANCHOR_INDEX, STEP_DT
 from ..config.velocity_cfg import VelocityConfig
 from .state import quat_apply, quat_inverse_apply, yaw_quat
 
 
 def measured_velocity(state: Tensor) -> Tensor:
-  planar = quat_inverse_apply(yaw_quat(state[..., 3:7]), state[..., 36:39])[..., :2]
-  return torch.cat((planar, state[..., 41:42]), -1)
+  planar = quat_inverse_apply(
+    yaw_quat(state[..., 3:7]), state[..., state_layout(state).v]
+  )[..., :2]
+  return torch.cat((planar, state[..., state_layout(state).w][..., 2:3]), -1)
 
 
 def standing_command(command: Tensor, cfg: VelocityConfig) -> Tensor:
@@ -43,7 +46,7 @@ def velocity_reward(
   torso_omega = quat_inverse_apply(
     heading, bodies["body_ang_vel_w"][..., MOTION_ANCHOR_INDEX, :]
   )
-  q = state[..., 7:36]
+  q = state[..., state_layout(state).q]
   limit = (
     (q - joint_limits[..., 1]).clamp_min(0) + (joint_limits[..., 0] - q).clamp_min(0)
   ).sum(-1)

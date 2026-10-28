@@ -201,7 +201,7 @@ class EvaluationProtocolTests(unittest.TestCase):
 
 
 class CheckpointInferenceTests(unittest.TestCase):
-  def test_actor_loads_in_eval_mode_and_rejects_incompatible_data(self):
+  def test_actor_loads_with_new_manifest_and_clips_but_checks_reference_schema(self):
     with tempfile.TemporaryDirectory() as folder:
       manifest, checkpoint = Path(folder) / "manifest.json", Path(folder) / "actor.pt"
       manifest.write_text("{}")
@@ -220,15 +220,16 @@ class CheckpointInferenceTests(unittest.TestCase):
       loaded, _, clips = load_actor(checkpoint, manifest, "cpu")
       self.assertFalse(loaded.training)
       self.assertTrue(loaded.relative_orientation)
-      self.assertEqual(clips, ("short", "long"))
+      self.assertEqual(clips, ())
       for key, value in actor.state_dict().items():
         torch.testing.assert_close(loaded.state_dict()[key], value)
       self.assertEqual(load_actor(checkpoint, manifest, "cpu", ("long",))[2], ("long",))
-      with self.assertRaisesRegex(ValueError, "present"):
-        load_actor(checkpoint, manifest, "cpu", ("unknown",))
+      self.assertEqual(
+        load_actor(checkpoint, manifest, "cpu", ("new_clip",))[2], ("new_clip",)
+      )
       manifest.write_text('{"changed": true}')
-      with self.assertRaisesRegex(ValueError, "manifest"):
-        load_actor(checkpoint, manifest, "cpu")
+      load_actor(checkpoint, manifest, "cpu")
+      saved.pop("manifest_sha256")
       saved.pop("reference_schema")
       manifest.write_text("{}")
       torch.save(saved, checkpoint)

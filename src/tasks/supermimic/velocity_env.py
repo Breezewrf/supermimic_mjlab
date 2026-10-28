@@ -27,11 +27,12 @@ class VelocityEnv(SuperMimicEnv):
     training=False,
   ):
     if (
-      config.observation_dim != 93
+      config.relative_orientation
+      or config.motion_anchor_ori_b
       or config.history_length != 10
       or config.future_length != 10
     ):
-      raise ValueError("Velocity requires ten 93-dimensional observations")
+      raise ValueError("Velocity requires ten proprioceptive observations")
     if not 0 <= motion_envs < config.num_envs or (motion_envs and not training):
       raise ValueError("Invalid mixed environment allocation")
     self.velocity_config = velocity
@@ -181,8 +182,11 @@ class VelocityEnv(SuperMimicEnv):
 
   @torch.no_grad()
   def step(self, action):
-    if action.shape != (self.num_envs, 29) or not torch.isfinite(action).all():
-      raise ValueError("Expected finite (num_envs,29) actions")
+    if (
+      action.shape != (self.num_envs, self.layout.num_joints)
+      or not torch.isfinite(action).all()
+    ):
+      raise ValueError("Expected finite actions matching robot joint count")
     action = action.to(self.device).clone()
     if self.foundation_config.action_clip is not None:
       action.clamp_(

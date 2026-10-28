@@ -15,6 +15,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from src.tasks.supermimic.config.cli import add_robot_argument, resolve_robot_arguments
 from src.tasks.supermimic.config.task_cfg import FoundationConfig
 from src.tasks.supermimic.config.velocity_cfg import VelocityConfig
 from src.tasks.supermimic.mdp.velocity import measured_velocity
@@ -26,6 +27,7 @@ from src.tasks.supermimic.velocity_env import VelocityEnv
 @torch.no_grad()
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
+  add_robot_argument(parser)
   parser.add_argument("--checkpoint", type=Path, required=True)
   parser.add_argument("--device", default="cuda:0")
   parser.add_argument("--command", type=float, nargs=3, default=(0.0, 0.0, 0.0))
@@ -48,6 +50,7 @@ def main():
     help="Control-step limit (default: until window closes; headless: 1000)",
   )
   args = parser.parse_args()
+  resolve_robot_arguments(args, parser)
   if args.steps is not None and args.steps < 1:
     raise ValueError("steps must be positive")
   step_limit = (
@@ -59,7 +62,10 @@ def main():
   try:
     env = VelocityEnv(
       FoundationConfig(
-        num_envs=1, episode_length_s=1e9, terminate_on_failure=args.termination
+        robot=args.robot,
+        num_envs=1,
+        episode_length_s=1e9,
+        terminate_on_failure=args.termination,
       ),
       VelocityConfig(**saved["velocity_config"]),
       args.device,

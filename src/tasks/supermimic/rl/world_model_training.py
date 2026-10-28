@@ -4,6 +4,7 @@ import torch
 from torch import Tensor
 from torch.nn import functional as F
 
+from ..config.morphology import state_layout
 from ..models.world_model import (
   GROUP_NAMES,
   integrate,
@@ -44,7 +45,11 @@ def rollout(
     states = torch.stack(states, 1)
   if diagnostics:
     outputs = model.task_heads(
-      states, batch["action"], batch["context"], reference, batch["previous_action"]
+      states,
+      batch["action"],
+      batch["context"],
+      reference,
+      batch["previous_action"],
     )
     outputs["body_pos_w"] = outputs.pop("bodies")["body_pos_w"]
   else:
@@ -92,17 +97,20 @@ def world_model_loss(
     if analytic_losses:
       raise ValueError("Full heads are required for analytic_losses=True")
     return state + termination, parts
+  n = state_layout(predicted).num_joints
   observation_error = torch.where(
     mask[..., None],
-    prediction["clean_observation"][..., :64]
-    - torch.where(mask[..., None], batch["next_clean_observation"][..., :64], 0),
+    prediction["clean_observation"][..., : 2 * n + 6]
+    - torch.where(
+      mask[..., None], batch["next_clean_observation"][..., : 2 * n + 6], 0
+    ),
     0,
   )
   observation = torch.stack(
     [
       (value / scale).square().mean(-1).sum() / batch_size
       for value, scale in zip(
-        observation_error.split((29, 29, 3, 3), dim=-1), (0.3, 5.0, 3.14, 1.0)
+        observation_error.split((n, n, 3, 3), dim=-1), (0.3, 5.0, 3.14, 1.0)
       )
     ]
   ).mean()
@@ -241,8 +249,12 @@ def evaluate_world_model(
           .mean(-1),
           "reward_mae": (predicted["reward"] - batch["reward"]).abs().mean(-1),
           "observation_mse": (
-            predicted["clean_observation"][..., :64]
-            - batch["next_clean_observation"][..., :64]
+            predicted["clean_observation"][
+              ..., : 2 * state_layout(batch["state"]).num_joints + 6
+            ]
+            - batch["next_clean_observation"][
+              ..., : 2 * state_layout(batch["state"]).num_joints + 6
+            ]
           )
           .square()
           .mean((-1, -2)),

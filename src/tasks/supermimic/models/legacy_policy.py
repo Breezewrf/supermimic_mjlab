@@ -32,7 +32,7 @@ class LegacyMotionActor(MotionActor):
       hidden_dims,
       relative_orientation,
       amp,
-      reference_dim=LEGACY_GOAL_DIM,
+      reference_dim=10 * (210 + 2 * default_q.numel()),
       input_normalization=input_normalization,
       motion_anchor_ori_b=motion_anchor_ori_b,
     )

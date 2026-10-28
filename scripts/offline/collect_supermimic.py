@@ -13,13 +13,15 @@ import torch
 
 # Executing a script directly must not depend on editable package installation.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from src.tasks.supermimic.config.task_cfg import DEFAULT_MANIFEST, FoundationConfig
+from src.tasks.supermimic.config.cli import add_robot_argument, resolve_robot_arguments
+from src.tasks.supermimic.config.task_cfg import FoundationConfig
 from src.tasks.supermimic.data.replay_buffer import ReplayBuffer
 
 
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+  add_robot_argument(parser)
+  parser.add_argument("--manifest", type=Path)
   parser.add_argument("--clips", nargs="*", default=[])
   parser.add_argument("--num-envs", type=int, default=4)
   parser.add_argument("--steps", type=int, default=128)
@@ -37,6 +39,7 @@ def main():
   parser.add_argument("--action-noise", type=float, default=0.1)
   parser.add_argument("--mode", choices=("collect", "replay"), default="collect")
   args = parser.parse_args()
+  resolve_robot_arguments(args, parser)
   if args.steps < 1 or args.capacity < 10 or args.action_noise < 0:
     parser.error("steps must be positive, capacity >= 10, action-noise >= 0")
   if args.device.startswith("cuda") and not torch.cuda.is_available():
@@ -47,6 +50,7 @@ def main():
 
   factory = FoundationConfig.training if args.training else FoundationConfig
   config = factory(
+    robot=args.robot,
     manifest=args.manifest,
     clips=tuple(args.clips),
     num_envs=args.num_envs,
@@ -72,7 +76,8 @@ def main():
             torch.tensor([frame], device=env.device),
           )
           largest = max(
-            largest, float((actual["body_pos_w"] - reference["body_pos_w"]).abs().max())
+            largest,
+            float((actual["body_pos_w"] - reference["body_pos_w"]).abs().max()),
           )
       summary["max_body_position_disagreement_m"] = largest
       if largest > 1e-4:
@@ -86,7 +91,11 @@ def main():
       failures = cutoffs = 0
       for _ in range(args.steps):
         action = (
-          torch.randn((env.num_envs, 29), device=env.device, generator=action_generator)
+          torch.randn(
+            (env.num_envs, config.layout.num_joints),
+            device=env.device,
+            generator=action_generator,
+          )
           * args.action_noise
         )
         _, _, terminated, truncated, extras = env.step(action)

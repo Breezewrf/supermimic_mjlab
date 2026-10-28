@@ -100,11 +100,13 @@ can start directly without running them.
 
 ## Prepare motion data
 
-Raw CSV files are stored in `src/assets/motions/LAFAN1_Retargeting_Dataset/`.
-If they have not been converted, run:
+G1 29DoF and 23DoF share the same workflow. Select the robot with `--robot`
+(default: `g1_29dof`) and use matching retargeted motion data. The example below
+uses CSV files in `src/assets/motions/LAFAN1_Retargeting_Dataset/`; set `--input-dir`
+for a different retargeted dataset:
 
 ```bash
-python scripts/data/convert_lafan_to_npz.py \
+python scripts/data/convert_lafan_to_npz.py --robot g1_29dof \
   --input-dir src/assets/motions/LAFAN1_Retargeting_Dataset \
   --output-dir src/assets/motions/g1/lafan1_npz \
   --input-fps 30 --output-fps 50
@@ -114,7 +116,19 @@ This writes one NPZ per clip and a `manifest.json`. Proceed to training after
 conversion; if these files already exist, this step can be skipped. See the
 [LAFAN conversion guide (Chinese)](doc/lafan_conversion_zh.md) for fields and coordinate conventions.
 
+For 23DoF, use `--robot g1_23dof` and change `--output-dir` to
+`src/assets/motions/g1/lafan1_npz_23dof`. Keep the two robots' converted data separate.
+Training selects the corresponding default manifest; evaluation and playback take
+`--motion` or `--motion-dir` pointing to the matching NPZ data.
+
 ## Online training
+
+Use the same training command for either robot, selecting `--robot g1_29dof` or
+`--robot g1_23dof`. Compact references are the default; full-body references use
+`--reference-dim 2680` for 29DoF and `--reference-dim 2560` for 23DoF.
+Resume, evaluation and playback infer the robot from the checkpoint. Weights and
+motion data must match that robot; the released weights and ablation results below
+use 29DoF. The same `--robot` selection applies to velocity and offline training.
 
 `motion_anchor_ori_b` is an optional ablation, disabled by default; enable it with
 `--motion-anchor-ori-b` in the training command.
@@ -152,6 +166,7 @@ Run the selected training configuration from the repository root:
 
 ```bash
 python scripts/train_supermimic.py \
+  --robot g1_29dof \
   --device cuda:0 \
   --reference-dim 2680 \
   --world-prediction state_delta \
@@ -182,7 +197,8 @@ Play selected motions in real physics:
 ```bash
 python scripts/play_supermimic.py \
   --device cuda:0 --checkpoint checkpoints/best/policy_best.pt \
-  --clips walk1_subject1 run1_subject2 --loop
+  --clips walk1_subject1 run1_subject2 --loop \
+  --motion-dir src/assets/motions/g1/lafan1_npz
 ```
 
 Add the matching world model to preview the policy 32 control steps (0.64 s) ahead:
@@ -192,7 +208,8 @@ python scripts/play_supermimic.py \
   --device cuda:0 --checkpoint checkpoints/best/policy_best.pt \
   --world-model checkpoints/best/world_model_best.pt \
   --world-model-mode future --world-model-horizon 32 \
-  --clips walk1_subject1 run1_subject2 --loop
+  --clips walk1_subject1 run1_subject2 --loop \
+  --motion-dir src/assets/motions/g1/lafan1_npz
 ```
 
 Omit `--clips` to play all 40 motions. Playback defaults to allowing mouse forces
@@ -202,12 +219,23 @@ for playback with failure resets. For standard headless evaluation of all motion
 ```bash
 python scripts/evaluate_supermimic.py \
   --device cuda:0 --checkpoint checkpoints/best/policy_best.pt \
-  --output outputs/supermimic/evaluation_best.json
+  --output outputs/supermimic/evaluation_best.json \
+  --motion-dir src/assets/motions/g1/lafan1_npz
 ```
 
 Domain randomization, observation noise, and return-based reset sampling are enabled
 by default. All motions are used unless `--clips` is specified; for debugging, use
 `--clips walk1_subject1 run1_subject2`.
+
+Evaluation and playback require exactly one explicit motion source:
+`--motion /path/to/clip.npz`, `--motion-dir /path/to/motions`, or
+`--manifest /path/to/manifest.json`. File and directory modes need no manifest;
+directories are scanned recursively in relative-path order. Without `--clips`,
+all supplied motions are selected, including motions absent from training.
+Model and data SHA values are optional
+provenance metadata and never block loading. Network dimensions, robot joint/body
+ordering and topology, motion formats, and simulation settings are still checked.
+Online resume retains the original clip order for replay and sampler state.
 
 Robot self-collisions are disabled while full-body ground contacts remain enabled.
 Training resets perturb the reference pose, root velocities and joint positions.
@@ -224,8 +252,31 @@ the total number of iterations, including those already completed:
 
 ```bash
 python scripts/train_supermimic.py \
+  --robot g1_29dof \
   --device cuda:0 --resume outputs/supermimic/run/last.pt \
   --iterations 32000
+```
+
+
+## Play OOD motions
+
+<p align="center">
+  <img src="src/assets/motions/examples/C5_-_walk_to_run_stageii.gif" alt="OOD motion playback: walk to run" width="48%" />
+  <img src="src/assets/motions/examples/dance_video.gif" alt="OOD motion playback: dance from video" width="48%" />
+</p>
+
+<p align="center">Left: an example from the ACCAD dataset. Right: an example of motion data generated from a video.</p>
+
+You can also refer [video2motion](https://github.com/Breezewrf/video2motion) to export
+SuperMimic-compatible motion data from videos, Kimodo, GMR motions, or the ACCAD
+dataset. See that repository for conversion instructions, then play the exported
+NPZ with a checkpoint for the matching robot:
+
+```bash
+python scripts/play_supermimic.py \
+  --checkpoint checkpoints/best/policy_best.pt \
+  --motion src/assets/motions/examples/C5_-_walk_to_run_stageii.npz \
+  --loop
 ```
 
 ## Training logs and W&B
@@ -256,6 +307,7 @@ Enable it for a new run:
 
 ```bash
 python scripts/train_supermimic.py \
+  --robot g1_29dof \
   --device cuda:0 --iterations 1000 \
   --wandb --wandb-project supermimic --wandb-name g1-lafan \
   --output outputs/supermimic/online_wandb

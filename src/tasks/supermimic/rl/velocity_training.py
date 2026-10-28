@@ -9,6 +9,7 @@ import torch
 from ..data.episode_statistics import EpisodeSummary
 from ..data.replay_buffer import ReplayBuffer
 from ..mdp.velocity import measured_velocity
+from ..models.kinematics import validate_robot_metadata
 from ..models.velocity_policy import VelocityActor, VelocityCritic, VelocityEncoder
 from ..models.world_model import normalized_state_error
 from .imagination import critic_loss, frozen_parameters, gae_targets, imagine
@@ -33,7 +34,7 @@ class VelocityTrainer(OnlineTrainer):
     self.stage = stage
     self.velocity_config = env.velocity_config
     self.velocity_encoder = VelocityEncoder(
-      self.velocity_config.command_scale, config.amp
+      self.velocity_config.command_scale, config.amp, self.actor.observation_dim
     ).to(self.device)
     self.velocity_critic = VelocityCritic(
       metadata["default_q"],
@@ -119,7 +120,9 @@ class VelocityTrainer(OnlineTrainer):
           self.env.context[v],
         )
       )
-      action = torch.empty(self.env.num_envs, 29, device=self.device)
+      action = torch.empty(
+        self.env.num_envs, self.actor.default_q.numel(), device=self.device
+      )
       action[m] = self.actor.forward_features(inputs["history"][m], goal)
       # During motion-only adaptation, collect velocity-side dynamics with the
       # motion teacher too. Velocity optimization starts in the next stage/run.
@@ -201,10 +204,16 @@ class VelocityTrainer(OnlineTrainer):
             batch_size, horizon, require_full=True
           )
         except ValueError as error:
-          report["horizons"][str(horizon)] = {"available": False, "reason": str(error)}
+          report["horizons"][str(horizon)] = {
+            "available": False,
+            "reason": str(error),
+          }
           continue
         predicted = self.kernels.world_rollout(
-          batch["state"][:, 0], batch["action"], batch["context"], batch["mask"]
+          batch["state"][:, 0],
+          batch["action"],
+          batch["context"],
+          batch["mask"],
         )
         target = batch["next_state"][:, -1]
         error = measured_velocity(predicted[:, -1]) - measured_velocity(target)
@@ -464,7 +473,7 @@ class VelocityTrainer(OnlineTrainer):
     return {
       "kind": "supermimic_velocity_actor",
       "schema_version": 1,
-      "observation_schema": "proprioceptive_93_v1",
+      "observation_schema": f"proprioceptive_{self.actor.observation_dim}_v1",
       "history_length": 10,
       "config": asdict(self.config),
       "velocity_config": asdict(self.velocity_config),
@@ -525,15 +534,13 @@ class VelocityTrainer(OnlineTrainer):
       )
     # Base resume expects one replay row per environment; mixed replay only has
     # the motion half, so restore the common pieces explicitly here.
-    if (
-      saved["config"] != asdict(self.config) or saved["clips"] != self.env.library.names
-    ):
+    if ({"robot": "g1_29dof", **saved["config"]}) != asdict(self.config) or saved[
+      "clips"
+    ] != self.env.library.names:
       raise ValueError("Training configuration or motion library mismatch")
-    if (
-      saved["robot_metadata"]["signature"] != self.metadata["signature"]
-      or saved["simulation"] != self.simulation_parameters
-    ):
-      raise ValueError("Robot or simulation mismatch")
+    validate_robot_metadata(saved["robot_metadata"], self.metadata)
+    if saved["simulation"] != self.simulation_parameters:
+      raise ValueError("Simulation mismatch")
     if saved["device_type"] != torch.device(self.device).type:
       raise ValueError("Training resume requires the same RNG backend")
     for name in (

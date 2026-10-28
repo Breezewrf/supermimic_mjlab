@@ -6,8 +6,7 @@ from pathlib import Path
 
 import torch
 
-from ..models.legacy_policy import LEGACY_GOAL_DIM, LEGACY_REFERENCE_SCHEMA
-from ..models.policy import GOAL_DIM, REFERENCE_SCHEMA
+from ..models.policy import REFERENCE_SCHEMAS
 
 TRAINING_KIND = "supermimic_online"
 POLICY_KIND = "supermimic_actor"
@@ -20,9 +19,9 @@ POLICY_REQUIRED_FIELDS = (
   "simulation",
   "clips",
   "actor",
-  "manifest_sha256",
 )
 POLICY_OPTIONAL_FIELDS = (
+  "manifest_sha256",
   "iteration",
   "environment_steps",
   "runtime",
@@ -40,7 +39,6 @@ WORLD_MODEL_REQUIRED_FIELDS = (
   "simulation",
   "clips",
   "world",
-  "manifest_sha256",
 )
 WORLD_MODEL_OPTIONAL_FIELDS = (
   *POLICY_OPTIONAL_FIELDS,
@@ -56,12 +54,12 @@ def _infer_reference_schema(actor: dict) -> str:
     raise ValueError(
       "Cannot infer reference_schema: expected a 2D Actor encoder.0.weight"
     )
-  schemas = {GOAL_DIM: REFERENCE_SCHEMA, LEGACY_GOAL_DIM: LEGACY_REFERENCE_SCHEMA}
+  schemas = REFERENCE_SCHEMAS
   width = weight.shape[1]
   if width not in schemas:
     raise ValueError(
       f"Cannot infer reference_schema from Actor encoder input width {width}; "
-      f"recognized widths are {GOAL_DIM} and 2680. Use the checkpoint's matching code version."
+      f"recognized widths are {tuple(REFERENCE_SCHEMAS)}. Use the checkpoint's matching code version."
     )
   return schemas[width]
 
@@ -74,10 +72,11 @@ def resolve_reference_schema(saved: dict) -> str:
 def training_config(saved: dict) -> dict:
   """Fill only historically absent settings, preserving the saved execution mode."""
   schema = resolve_reference_schema(saved)
-  dimensions = {REFERENCE_SCHEMA: GOAL_DIM, LEGACY_REFERENCE_SCHEMA: LEGACY_GOAL_DIM}
+  dimensions = {schema: width for width, schema in REFERENCE_SCHEMAS.items()}
   if schema not in dimensions:
     raise ValueError(f"Unsupported training reference schema {schema!r}")
   config = {
+    "robot": "g1_29dof",
     "wm_only_iters": 0,
     "compile": False,
     "amp": "none",
@@ -230,7 +229,6 @@ def save_inference_pair(output: Path, policy: dict, world: dict, *, tag: str):
   for key in (
     "iteration",
     "environment_steps",
-    "manifest_sha256",
     "config",
     "simulation",
     "clips",
@@ -298,7 +296,9 @@ def restore_best_inference(
       continue
     world = find_component(step, "world_model")
     policy.update(
-      evaluation=report, best_evaluation=report, best_return=report["normalized_return"]
+      evaluation=report,
+      best_evaluation=report,
+      best_return=report["normalized_return"],
     )
     if world is not None:
       world.update(

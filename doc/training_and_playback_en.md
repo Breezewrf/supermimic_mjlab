@@ -282,10 +282,14 @@ randomization and observation noise disabled:
 python scripts/evaluate_supermimic.py \
   --device cuda:0 --checkpoint outputs/supermimic/online_training/policy_best.pt \
   --output outputs/supermimic/online_policy_evaluation.json \
-  --csv outputs/supermimic/eval.csv
+  --csv outputs/supermimic/eval.csv \
+  --motion-dir src/assets/motions/g1/lafan1_npz
 ```
 
-Evaluation uses all training motions by default, until completion or physical failure.
+Evaluation and playback require exactly one explicit source: `--motion <clip.npz>`,
+`--motion-dir <directory>` or `--manifest <manifest.json>`. Directory mode recursively
+loads NPZ files in relative-path order and needs no manifest. All supplied motions
+are used unless `--clips` filters them. Evaluation runs until completion or physical failure.
 Training evaluations and headless evaluation run clips in parallel, with up to 64
 environments by default (all 40 LAFAN1 clips fit in one batch). Use
 `--eval-num-envs N` during training or `--num-envs N` in the evaluation script to
@@ -314,8 +318,15 @@ iteration, motion selection, and scores for comparison on the same motion set.
 ```bash
 python scripts/play_supermimic.py \
   --device cuda:0 --checkpoint outputs/supermimic/online_training/policy_best.pt \
-  --clips walk1_subject1 run1_subject2 --loop
+  --clips walk1_subject1 run1_subject2 --loop \
+  --motion-dir src/assets/motions/g1/lafan1_npz
 ```
+
+In the example above, `--clips walk1_subject1 run1_subject2` selects only
+`walk1_subject1.npz` and `run1_subject2.npz` from `--motion-dir`. Omit `--clips` to
+use every NPZ in the directory and its subdirectories. Clip names are relative
+paths, optionally without `.npz`, such as `subdir/walk1_subject1`; unknown names
+raise an error. The same selection rules apply to evaluation.
 
 Add a world-model comparison using the exported weights:
 
@@ -323,7 +334,8 @@ Add a world-model comparison using the exported weights:
 python scripts/play_supermimic.py \
   --device cuda:0 --checkpoint checkpoints/best/policy_best.pt \
   --world-model checkpoints/best/world_model_best.pt \
-  --world-model-horizon 32 --clips walk1_subject1 run1_subject2 --loop
+  --world-model-horizon 32 --clips walk1_subject1 run1_subject2 --loop \
+  --motion-dir src/assets/motions/g1/lafan1_npz
 ```
 
 The default `--world-model-mode future` runs the policy on imagined observations
@@ -342,8 +354,10 @@ Future mode labels its time lead and compares each displayed forecast only when
 the real rollout reaches the matching target frame; it never scores a future pose
 against the current pose. JSON records the mode and per-clip errors under
 `world_model_comparison`. Nonfinite predictions are hidden until the next refresh.
-Model files are checked against the motion manifest, selected clips, robot signature
-and physics settings; prefer policy/world weights from the same iteration.
+Model files are checked for compatible robot joint/body ordering, topology and
+physics settings; prefer policy/world weights from the same iteration. Model/data
+SHA values are optional provenance metadata. Any of the three sources can supply
+unseen motions; omitting `--clips` selects all motions in the supplied source.
 
 The same options work with `--video` and with `--viewer none` for diagnostics. World
 comparisons use one environment and leave the physical rollout and evaluation return
@@ -386,12 +400,14 @@ On a server without a desktop, export the same evaluation to MP4 (requires `ffmp
 MUJOCO_GL=egl python scripts/evaluate_supermimic.py \
   --device cuda:0 --checkpoint outputs/supermimic/online_training/policy_best.pt \
   --clips walk1_subject1 --video outputs/supermimic/walk.mp4 \
-  --output outputs/supermimic/walk_evaluation.json
+  --output outputs/supermimic/walk_evaluation.json \
+  --motion-dir src/assets/motions/g1/lafan1_npz
 ```
 
 Selected clips are concatenated at 960×540, 50 FPS. Live viewing requires a desktop
-display; MP4 export does not. Both paths validate checkpoint features, manifest,
-robot signature, and physics settings. Known 730/2680-input policies are selected
+display; MP4 export does not. Both paths validate checkpoint features, motion
+format, robot structure, and physics settings without requiring matching SHA values
+or training clip names. Known 730/2680-input policies are selected
 automatically, including older checkpoints without `reference_schema`. Incompatible
 physics configurations are still rejected.
 Playback requires `--checkpoint` or `--policy`; evaluation without either explicitly

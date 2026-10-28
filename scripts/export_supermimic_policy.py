@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.tasks.supermimic.models.legacy_policy import LEGACY_REFERENCE_SCHEMA
-from src.tasks.supermimic.models.policy import REFERENCE_SCHEMA
+from src.tasks.supermimic.models.policy import REFERENCE_SCHEMAS
 from src.tasks.supermimic.rl.checkpoints import export_policy, export_world_model
 
 
@@ -52,7 +52,7 @@ def print_policy_schema(policy: dict):
     print(
       "Legacy full-body features preserved; evaluation and playback select the legacy Actor automatically."
     )
-  elif policy["reference_schema"] != REFERENCE_SCHEMA:
+  elif policy["reference_schema"] not in REFERENCE_SCHEMAS.values():
     print(
       "Legacy policy exported without converting its reference features. "
       "Evaluation and playback require the matching code version."
