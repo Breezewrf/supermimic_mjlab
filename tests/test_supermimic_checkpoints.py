@@ -291,6 +291,17 @@ class CheckpointTests(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "simulation"):
       policy_checkpoint(self.saved)
 
+  def test_manifest_hash_is_optional_for_export_and_inference(self):
+    self.saved.pop("manifest_sha256")
+    output = self.directory / "policy.pt"
+    exported = policy_checkpoint(self.saved)
+    self.assertNotIn("manifest_sha256", exported)
+    save_checkpoint(output, exported)
+    loaded, _, clips = load_actor(output, self.manifest, "cpu", ("new_motion",))
+    self.assertEqual(clips, ("new_motion",))
+    for key, value in self.actor.state_dict().items():
+      torch.testing.assert_close(loaded.state_dict()[key], value, rtol=0, atol=0)
+
   def test_cli_resume_cannot_toggle_world_model_normalization(self):
     source = self.directory / "last.pt"
     for enabled in (False, True):

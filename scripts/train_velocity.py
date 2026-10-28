@@ -151,8 +151,6 @@ def main():
     cfg = OnlineConfig(**saved["config"])
     velocity = VelocityConfig(**saved["velocity_config"])
     stage = saved["stage"]
-    if saved["manifest_sha256"] != file_sha256(args.manifest):
-      raise ValueError("Resume manifest mismatch")
   else:
     names = {f.name for f in fields(OnlineConfig)}
     values = {key: value for key, value in vars(args).items() if key in names}
@@ -179,8 +177,6 @@ def main():
         raise ValueError(
           "Initialization requires a matching robot and proprioceptive decoder"
         )
-      if actor_saved["manifest_sha256"] != file_sha256(args.manifest):
-        raise ValueError("Actor initialization manifest mismatch")
       for key in ("actor_dims", "reference_dim", "actor_input_normalization"):
         values[key] = actor_cfg[key]
       world_saved = torch.load(
@@ -202,8 +198,6 @@ def main():
       )
       if not values["clips"]:
         raise ValueError("No locomotion clips found; supply --clips explicitly")
-    if actor_saved and not set(values["clips"]).issubset(actor_saved["clips"]):
-      raise ValueError("Initialization clips must be in the motion checkpoint")
     cfg = OnlineConfig(**values)
     velocity = VelocityConfig(
       warmup_updates=args.warmup_updates,

@@ -19,9 +19,9 @@ POLICY_REQUIRED_FIELDS = (
   "simulation",
   "clips",
   "actor",
-  "manifest_sha256",
 )
 POLICY_OPTIONAL_FIELDS = (
+  "manifest_sha256",
   "iteration",
   "environment_steps",
   "runtime",
@@ -39,7 +39,6 @@ WORLD_MODEL_REQUIRED_FIELDS = (
   "simulation",
   "clips",
   "world",
-  "manifest_sha256",
 )
 WORLD_MODEL_OPTIONAL_FIELDS = (
   *POLICY_OPTIONAL_FIELDS,
@@ -230,7 +229,6 @@ def save_inference_pair(output: Path, policy: dict, world: dict, *, tag: str):
   for key in (
     "iteration",
     "environment_steps",
-    "manifest_sha256",
     "config",
     "simulation",
     "clips",

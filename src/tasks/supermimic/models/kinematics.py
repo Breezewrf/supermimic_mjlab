@@ -73,8 +73,8 @@ def robot_metadata(robot: str = "g1_29dof") -> dict:
     "joint_limits": torch.from_numpy(limits.copy()),
   }
   digest = hashlib.sha256()
-  # Include physical parameters as well as the kinematic tree: a changed mass,
-  # actuator or collision shape must invalidate a resumed dynamics model.
+  # Record physical parameters and the kinematic tree for provenance only.
+  # Compatibility is checked structurally, without requiring an identical hash.
   for name in (
     "body_mass",
     "body_inertia",
@@ -125,6 +125,13 @@ def robot_metadata(robot: str = "g1_29dof") -> dict:
   return metadata
 
 
+def validate_robot_metadata(saved: dict, current: dict) -> None:
+  """Require compatible tensor ordering and topology, independent of physical SHA."""
+  for key in ("joint_names", "body_names", "parents", "body_joints"):
+    if key not in saved or tuple(saved[key]) != tuple(current[key]):
+      raise ValueError(f"Checkpoint robot model has incompatible {key}")
+
+
 class G1Kinematics(nn.Module):
   def __init__(self, metadata: dict, body_names: tuple[str, ...] | None = None):
     super().__init__()
@@ -137,7 +144,7 @@ class G1Kinematics(nn.Module):
     self.body_joints = tuple(metadata["body_joints"])
     self.body_names = tuple(body_names)
     self.joint_names = tuple(metadata["joint_names"])
-    self.signature = metadata["signature"]
+    self.signature = metadata.get("signature")
     anchor = metadata["body_names"].index(MOTION_ANCHOR_BODY)
     chain = []
     while anchor > 0:

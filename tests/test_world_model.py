@@ -17,7 +17,11 @@ from src.tasks.supermimic.data.motion_library import MotionLibrary
 from src.tasks.supermimic.data.replay_buffer import ReplayBuffer
 from src.tasks.supermimic.data.world_model_data import ReplayCorpus
 from src.tasks.supermimic.mdp.state import quat_apply, quat_mul, rotvec_to_quat
-from src.tasks.supermimic.models.kinematics import G1Kinematics, robot_metadata
+from src.tasks.supermimic.models.kinematics import (
+  G1Kinematics,
+  robot_metadata,
+  validate_robot_metadata,
+)
 from src.tasks.supermimic.models.world_model import (
   WorldModel,
   apply_state_delta,
@@ -44,6 +48,19 @@ class KinematicsTests(unittest.TestCase):
   def setUpClass(cls):
     torch.set_num_threads(4)
     cls.metadata = robot_metadata()
+
+  def test_compatibility_uses_joint_order_and_topology_instead_of_sha(self):
+    metadata = copy.deepcopy(self.metadata)
+    metadata.pop("signature")
+    validate_robot_metadata(metadata, self.metadata)
+    metadata["signature"] = "changed"
+    metadata["body_pos"] += 0.01
+    validate_robot_metadata(metadata, self.metadata)
+    for key in ("joint_names", "body_names", "parents", "body_joints"):
+      changed = copy.deepcopy(self.metadata)
+      changed[key] = list(reversed(changed[key]))
+      with self.subTest(key=key), self.assertRaisesRegex(ValueError, key):
+        validate_robot_metadata(changed, self.metadata)
 
   def test_against_mujoco_with_nonzero_joint_anchor(self):
     from mjlab.entity import Entity
@@ -483,9 +500,71 @@ class ReplayTrainingTests(unittest.TestCase):
         text=True,
         timeout=120,
       )
-      self.assertNotEqual(mismatch.returncode, 0)
-      self.assertIn("does not match", mismatch.stderr)
-      self.assertFalse((root / "mismatch").exists())
+      self.assertEqual(mismatch.returncode, 0, mismatch.stdout + mismatch.stderr)
+      self.assertEqual(
+        json.loads((root / "mismatch/validation.json").read_text()), report
+      )
+
+      # A differently named corpus must rebuild validation indices, including
+      # when cached indices would be out of range for the new source.
+      new_manifest, new_snapshot, _ = make_replay(root / "new_data", self.metadata)
+      manifest_data = json.loads(new_manifest.read_text())
+      replay = torch.load(new_snapshot, weights_only=True)
+      for index, entry in enumerate(manifest_data["clips"]):
+        name = f"unseen_{index}"
+        (new_manifest.parent / entry["file"]).rename(new_manifest.parent / f"{name}.npz")
+        entry["file"] = f"{name}.npz"
+        replay["clips"][index] = name
+      new_manifest.write_text(json.dumps(manifest_data))
+      torch.save(replay, new_snapshot)
+      broken.pop("manifest_sha256")
+      broken["robot_metadata"].pop("signature")
+      broken["validation_indices"] = {
+        key: torch.full_like(value, 99999)
+        for key, value in broken["validation_indices"].items()
+      }
+      torch.save(broken, root / "changed.pt")
+      new_common = common.copy()
+      new_common[new_common.index("--manifest") + 1] = str(new_manifest)
+      new_common[new_common.index("--replay") + 1] = str(new_snapshot)
+      new_evaluation = subprocess.run(
+        new_common + [
+          "--mode", "evaluate", "--checkpoint", str(root / "changed.pt"),
+          "--output", str(root / "new_evaluation"),
+        ],
+        cwd=ROOT, env=environment, capture_output=True, check=False, text=True,
+        timeout=120,
+      )
+      self.assertEqual(
+        new_evaluation.returncode, 0, new_evaluation.stdout + new_evaluation.stderr
+      )
+      self.assertEqual(
+        json.loads((root / "new_evaluation/split.json").read_text())["clip_names"],
+        replay["clips"],
+      )
+      if not normalize:
+        resumed_output = root / "new_resume"
+        resumed_output.mkdir()
+        new_checkpoint = resumed_output / "last.pt"
+        torch.save(broken, new_checkpoint)
+        new_resume = subprocess.run(
+          new_common + [
+            "--resume", str(new_checkpoint), "--output", str(resumed_output),
+            "--steps", str(broken["step"]),
+          ],
+          cwd=ROOT, env=environment, capture_output=True, check=False, text=True,
+          timeout=120,
+        )
+        self.assertEqual(new_resume.returncode, 0, new_resume.stdout + new_resume.stderr)
+        self.assertIn("rebuilt validation windows", new_resume.stdout)
+        restarted = torch.load(new_checkpoint, weights_only=True)
+        self.assertEqual(restarted["split"]["clip_names"], replay["clips"])
+        self.assertEqual(restarted["step"], broken["step"])
+        report = json.loads((resumed_output / "validation.json").read_text())
+        self.assertEqual(
+          restarted["best_loss"], report["horizons"]["8"]["model"]["normalized_state_mse"]
+        )
+        self.assertTrue((resumed_output / "best.pt").exists())
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA unavailable to this process")

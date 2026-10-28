@@ -151,7 +151,8 @@ Actor、Critic、真实采集、普通及编译想象训练均使用所选特征
 完整训练 checkpoint 保存所选维度和 schema，`--resume` 自动恢复，无需重复指定。
 缺少这些字段的历史 checkpoint 从 Actor 编码器输入宽度推断；缺少 `compile`、
 `amp` 的旧断点按非编译 FP32 恢复。旧 2680 维完整训练断点可在当前代码中续训，
-仍要求原有 motion manifest、机器人、物理配置、训练配置和 RNG 后端一致。
+仍要求 clip 顺序、机器人关节／刚体顺序及拓扑、物理配置、训练配置和 RNG 后端一致，
+以恢复 replay 和采样器状态；不再要求模型或 manifest SHA 一致。
 仅有 Actor 的轻量策略不支持续训。不能在续训中把 2680 改成 730 或反向切换，
 不同架构需新建训练。推理、评估、可视化和导出继续自动识别两种架构。
 
@@ -215,7 +216,8 @@ Replay 常规采样也改为对随机候选做窗口/历史检查；仅候选极
 `policy_best.pt` 与 `world_model_best.pt` 配套保存，并由 `best_checkpoint.json`
 记录成绩及历史文件路径。`policy_best.pt`、`policy_last.pt`、`policy_iteration_*.pt` 仅保存 Actor
 与推理所需的配置和签名，不包含 Replay、World Model、Critic 或优化器。
-两种格式都可评估并校验 manifest、动作名称、机器人签名和物理配置；只有完整断点
+两种格式都可在新的 NPZ 文件／目录和未见动作上评估，SHA 为可选溯源信息；仍校验动作格式、
+机器人结构和物理配置。评估不指定 `--clips` 时使用所选来源的全部动作；只有完整断点
 能用于 `--resume`。默认不再保存历史完整断点；显式添加
 `--full-checkpoint-interval 10000` 才会生成 `iteration_010000.pt` 等文件。
 每次到达 `--checkpoint-interval`、最终轮次或刷新最佳时，自动配套保留
@@ -235,8 +237,8 @@ Replay 常规采样也改为对随机候选做窗口/历史检查；仅候选极
 格式，并标记 `reference_schema_inferred: true`；未知维度不会擅自补成新版格式。
 
 采样器评分语义已升级为版本 2，旧训练断点不能直接续训；请使用新的输出目录开始
-对照实验。关闭自碰撞后机器人模型签名也已改变，因此更早物理配置下的断点不能
-直接在新配置下续训或做同配置评估；需用对应版本代码复现旧结果。
+对照实验。机器人模型 SHA 变化不再阻止加载，但仿真协议／配置仍须兼容；
+复现旧物理配置下的成绩，应使用对应版本代码和资产。
 新断点保存观测/终止模式以及固定模型诊断窗口，续训必须使用原有配置。
 `simulation` 字段记录物理协议版本、自碰撞设置、训练初态扰动范围和随机化频率，
 供续训及评估校验。相同 seed 和环境数量会重建相同的启动随机化参数。
@@ -260,7 +262,8 @@ python scripts/train_supermimic.py \
 ```bash
 python scripts/evaluate_supermimic.py \
   --device cuda:0 --checkpoint outputs/supermimic/online_training/policy_best.pt \
-  --output outputs/supermimic/online_policy_evaluation.json
+  --output outputs/supermimic/online_policy_evaluation.json \
+  --motion-dir src/assets/motions/g1/lafan1_npz
 ```
 
 默认评估训练动作库中的所有动作，从各动作首帧开始、关闭域随机化和观测噪声，
@@ -291,8 +294,15 @@ play、窗口和视频仍为单环境。评估 JSON 记录 `evaluation_num_envs`
 JSON 的 `world_model_comparison` 保存模式和逐动作误差。预测使用独立渲染缓冲区，不改变
 策略动作、物理状态或真实评估得分。鼠标外力不属于世界模型输入。该选项也支持
 视频导出及无窗口诊断，固定单环境，并校验世界模型的动作库、机器人和物理配置。
-无桌面环境可用 `MUJOCO_GL=egl python scripts/evaluate_supermimic.py --checkpoint <路径>
---clips walk1_subject1 --video outputs/supermimic/walk.mp4` 导出视频，需要 `ffmpeg`。
+无桌面环境可用以下命令导出视频，需要 `ffmpeg`：
+
+```bash
+MUJOCO_GL=egl python scripts/evaluate_supermimic.py \
+  --checkpoint checkpoints/best/policy_best.pt \
+  --motion-dir src/assets/motions/g1/lafan1_npz \
+  --clips walk1_subject1 --video outputs/supermimic/walk.mp4
+```
+
 渲染使用独立 MuJoCo 缓冲区，显示 `transition.next_state`，不会改写评估仿真或将
 自动重置后的新姿态误当作失败终帧。详见[播放与世界模型可视化](training_and_playback_zh.md#播放与世界模型可视化)。
 播放入口默认支持鼠标外力：双击实体机器人身体，按住 `Ctrl`＋右键拖拽施力，

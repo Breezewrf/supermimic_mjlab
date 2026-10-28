@@ -48,7 +48,8 @@ Unitree 的固定 gait、contact、air-time、soft-landing 奖励需要额外接
 - `outputs/policy_iteration_010000.pt`：已有 93 维 motion 策略及输入归一化。
 - `checkpoints/best/world_model_best.pt`：共享动力学和对应归一化。
 
-两个文件可分别指定。脚本验证机器人签名、关节/物理配置、motion manifest 以及 93 维输入；
+两个文件可分别指定。脚本验证机器人关节／刚体顺序、拓扑、物理配置以及 93 维输入；
+模型和数据 SHA 仅作可选溯源，允许使用新的 motion manifest 和训练中未见的动作。
 99 维最佳 Actor 不会被自动裁剪。如果本机没有旧版 93 维权重，先使用原 motion 训练入口生成
 关闭 `relative_orientation` 和 `motion_anchor_ori_b` 的策略，或使用 `--from-scratch --stage motion`。
 随机 decoder 需要先进行 motion 训练，不能将一次从零开始的短跑视为已有 motion prior。

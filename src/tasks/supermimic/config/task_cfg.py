@@ -51,6 +51,8 @@ class FoundationConfig:
   reset_noise: bool = False
   terminate_on_failure: bool = True
   robot: str = "g1_29dof"
+  motion: Path | None = None
+  motion_dir: Path | None = None
 
   @property
   def observation_dim(self) -> int:
@@ -63,7 +65,9 @@ class FoundationConfig:
     return robot_layout(self.robot)
 
   def __post_init__(self):
-    if self.manifest is None:
+    if sum(value is not None for value in (self.manifest, self.motion, self.motion_dir)) > 1:
+      raise ValueError("Select exactly one motion source")
+    if self.manifest is None and self.motion is None and self.motion_dir is None:
       object.__setattr__(self, "manifest", self.layout.manifest)
     robot_layout(self.robot)
     if self.num_envs < 1 or self.history_length < 1 or self.future_length < 1:

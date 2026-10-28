@@ -9,6 +9,7 @@ import torch
 from ..data.episode_statistics import EpisodeSummary
 from ..data.replay_buffer import ReplayBuffer
 from ..mdp.velocity import measured_velocity
+from ..models.kinematics import validate_robot_metadata
 from ..models.velocity_policy import VelocityActor, VelocityCritic, VelocityEncoder
 from ..models.world_model import normalized_state_error
 from .imagination import critic_loss, frozen_parameters, gae_targets, imagine
@@ -537,11 +538,9 @@ class VelocityTrainer(OnlineTrainer):
       "clips"
     ] != self.env.library.names:
       raise ValueError("Training configuration or motion library mismatch")
-    if (
-      saved["robot_metadata"]["signature"] != self.metadata["signature"]
-      or saved["simulation"] != self.simulation_parameters
-    ):
-      raise ValueError("Robot or simulation mismatch")
+    validate_robot_metadata(saved["robot_metadata"], self.metadata)
+    if saved["simulation"] != self.simulation_parameters:
+      raise ValueError("Simulation mismatch")
     if saved["device_type"] != torch.device(self.device).type:
       raise ValueError("Training resume requires the same RNG backend")
     for name in (

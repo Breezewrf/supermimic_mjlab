@@ -11,7 +11,7 @@ def add_robot_argument(parser):
   )
 
 
-def resolve_robot_arguments(args, parser):
+def resolve_robot_arguments(args, parser, *, default_manifest=True):
   import torch
 
   checkpoint = next(
@@ -31,5 +31,5 @@ def resolve_robot_arguments(args, parser):
   if args.robot is not None and saved_robot is not None and args.robot != saved_robot:
     parser.error("--robot does not match checkpoint robot")
   args.robot = args.robot or saved_robot or "g1_29dof"
-  if hasattr(args, "manifest") and args.manifest is None:
+  if default_manifest and hasattr(args, "manifest") and args.manifest is None:
     args.manifest = robot_layout(args.robot).manifest

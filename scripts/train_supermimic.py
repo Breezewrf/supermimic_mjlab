@@ -267,10 +267,8 @@ def main():
     parser.error(
       "Resume cannot change --world-model-normalization; start a new run for this ablation"
     )
-  if saved and (
-    saved_config != asdict(config) or saved["manifest_sha256"] != manifest_hash
-  ):
-    parser.error("Resume requires the original training configuration and manifest")
+  if saved and saved_config != asdict(config):
+    parser.error("Resume requires the original training configuration")
   if saved and args.iterations < saved["iteration"]:
     parser.error("--iterations cannot be below the saved iteration")
   output = args.output or (

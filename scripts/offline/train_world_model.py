@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.tasks.supermimic.config.cli import add_robot_argument, resolve_robot_arguments
 from src.tasks.supermimic.data.motion_library import MotionLibrary
 from src.tasks.supermimic.data.world_model_data import ReplayCorpus, file_sha256
-from src.tasks.supermimic.models.kinematics import robot_metadata
+from src.tasks.supermimic.models.kinematics import robot_metadata, validate_robot_metadata
 from src.tasks.supermimic.models.world_model import WorldModel
 from src.tasks.supermimic.rl.world_model_training import (
   evaluate_world_model,
@@ -134,17 +134,18 @@ def main():
   if corpus.buffers[0].data["action"].shape[-1] != len(metadata["joint_names"]):
     parser.error("Replay joint count does not match selected robot")
   manifest_hash = file_sha256(args.manifest)
+  same_data = False
   if checkpoint:
     if checkpoint.get("schema_version") != 1:
       raise ValueError("Unsupported world-model checkpoint schema")
-    if (
-      checkpoint["split"] != corpus.split_description()
-      or checkpoint["manifest_sha256"] != manifest_hash
-    ):
-      raise ValueError("Checkpoint data, manifest, or episode split does not match")
-    if checkpoint["robot_metadata"]["signature"] != metadata["signature"]:
-      raise ValueError("Checkpoint robot model does not match the current G1")
-    if checkpoint["config"]["smoke"] != args.smoke:
+    # Hashes only decide whether cached validation windows/scores can be reused.
+    # New data is allowed and receives its own episode-disjoint validation windows.
+    same_data = (
+      checkpoint.get("split") == corpus.split_description()
+      and checkpoint.get("manifest_sha256") == manifest_hash
+    )
+    validate_robot_metadata(checkpoint["robot_metadata"], metadata)
+    if args.resume and checkpoint["config"]["smoke"] != args.smoke:
       raise ValueError("Keep the original checkpoint's --smoke setting")
   hidden = tuple(checkpoint["hidden_dims"] if checkpoint else args.hidden_dims)
   prediction_mode = (
@@ -195,12 +196,20 @@ def main():
   step, best_loss = 0, float("inf")
   if checkpoint:
     model.load_state_dict(checkpoint["model"])
-    fixed = checkpoint["validation_indices"]
+    fixed = (
+      checkpoint["validation_indices"]
+      if same_data
+      else fixed_validation_indices(corpus, args.validation_windows, split_seed)
+    )
     if args.resume:
       if args.batch_size != checkpoint["config"]["batch_size"]:
         parser.error("Resuming requires the original batch size")
       optimizer.load_state_dict(checkpoint["optimizer"])
-      step, best_loss = checkpoint["step"], checkpoint["best_loss"]
+      step = checkpoint["step"]
+      if same_data:
+        best_loss = checkpoint["best_loss"]
+      else:
+        print("Data changed: rebuilt validation windows and reset best loss.")
       sample_rng.set_state(checkpoint["sample_rng"])
       torch.set_rng_state(checkpoint["torch_rng"])
       if args.device.startswith("cuda") and checkpoint["cuda_rng"]:
@@ -297,7 +306,7 @@ def main():
       "".join(json.dumps(row) + "\n" for row in records if row["step"] <= step)
     )
   initial = validate()
-  if not args.resume:
+  if not args.resume or not same_data:
     row = initial["horizons"]["8"]
     if row.get("finite"):
       best_loss = row["model"]["normalized_state_mse"]

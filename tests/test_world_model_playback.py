@@ -281,7 +281,7 @@ class WorldModelPlaybackIntegrationTests(unittest.TestCase):
       finally:
         env.close()
 
-  def test_loader_reconstructs_world_without_actor_schema_and_checks_data(self):
+  def test_loader_reconstructs_world_with_new_data_and_optional_hashes(self):
     with tempfile.TemporaryDirectory() as directory:
       directory = Path(directory)
       manifest = directory / "manifest.json"
@@ -318,11 +318,16 @@ class WorldModelPlaybackIntegrationTests(unittest.TestCase):
       torch.testing.assert_close(legacy(state, action, context), expected)
       for key, value in world.state_dict().items():
         torch.testing.assert_close(loaded.state_dict()[key], value, atol=0, rtol=0)
-      with self.assertRaisesRegex(ValueError, "clips"):
-        load_world_model(path, manifest, "cpu", ("unknown",))
+      load_world_model(path, manifest, "cpu", ("new_clip",))
       manifest.write_text('{"changed": true}')
-      with self.assertRaisesRegex(ValueError, "manifest"):
-        load_world_model(path, manifest, "cpu")
+      load_world_model(path, manifest, "cpu")
+      saved.pop("manifest_sha256")
+      saved["robot_metadata"] = {
+        key: value for key, value in self.metadata.items() if key != "signature"
+      }
+      save_checkpoint(path, world_model_checkpoint(saved))
+      loaded, _ = load_world_model(path, manifest, "cpu")
+      torch.testing.assert_close(loaded(state, action, context), expected)
       saved["kind"] = "supermimic_actor"
       save_checkpoint(path, saved)
       with self.assertRaisesRegex(ValueError, "policy-only"):
@@ -361,6 +366,12 @@ class WorldModelPlaybackIntegrationTests(unittest.TestCase):
           "simulation": simulation_parameters(env),
         }
         validate_environment(env, valid)
+        changed_signature = {**self.metadata, "signature": "different"}
+        validate_environment(env, {**valid, "robot_metadata": changed_signature})
+        missing_signature = {
+          key: value for key, value in self.metadata.items() if key != "signature"
+        }
+        validate_environment(env, {**valid, "robot_metadata": missing_signature})
         with self.assertRaisesRegex(ValueError, "robot model"):
           validate_environment(env, {**valid, "robot_metadata": {"signature": "wrong"}})
         with self.assertRaisesRegex(ValueError, "simulation"):

@@ -11,6 +11,7 @@ import torch
 from ..config.rl_cfg import OnlineConfig
 from ..data.replay_buffer import ReplayBuffer
 from ..mdp.resets import RESET_NOISE
+from ..models.kinematics import validate_robot_metadata
 from ..models.policy import MotionActor, MotionCritic, schema_for_dimension
 from ..models.world_model import WorldModel
 from .checkpoints import resolve_reference_schema, training_config
@@ -560,8 +561,7 @@ class OnlineTrainer:
     saved_config = training_config(saved)
     if saved_config != asdict(self.config) or saved["clips"] != self.env.library.names:
       raise ValueError("Online checkpoint configuration or motion library mismatch")
-    if saved["robot_metadata"]["signature"] != self.metadata["signature"]:
-      raise ValueError("Online checkpoint robot signature mismatch")
+    validate_robot_metadata(saved["robot_metadata"], self.metadata)
     if saved.get("simulation") != self.simulation_parameters:
       raise ValueError("Online checkpoint simulation configuration mismatch")
     if saved["device_type"] != torch.device(self.device).type:

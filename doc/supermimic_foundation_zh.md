@@ -45,13 +45,21 @@ python scripts/offline/collect_supermimic.py \
 
 这是无积分的运动学检查，不是已训练策略的物理跟踪，也不打开可视化窗口。
 
-固定起点评估，默认使用零动作控制器：
+加载已发布的策略 checkpoint，从所选动作的固定起点评估真实物理跟踪效果：
 
 ```bash
 python scripts/evaluate_supermimic.py \
+  --checkpoint checkpoints/best/policy_best.pt \
   --device cuda:0 --clips walk1_subject1 run1_subject2 \
-  --output outputs/supermimic/evaluation.json
+  --output outputs/supermimic/evaluation.json \
+  --motion-dir src/assets/motions/g1/lafan1_npz
 ```
+
+`--motion-dir` 直接加载目录中的 NPZ，无需 manifest；`--manifest` 仅作为兼容输入保留。
+示例中的 `--clips walk1_subject1 run1_subject2` 表示只评估该目录下的
+`walk1_subject1.npz` 和 `run1_subject2.npz`。省略 `--clips` 时，评估目录及其子目录
+中的全部 NPZ。动作名称使用相对于 `--motion-dir` 的路径，可省略 `.npz` 后缀，
+例如 `subdir/walk1_subject1`；指定的动作不存在时会报错。
 
 调试可加 `--max-steps-per-clip 20`，结果会标记 `evaluation_limited`。完整评估关闭
 随机化和噪声，从每条动作首帧播放到末帧或物理失败；奖励除以完整动作最大可达回报，

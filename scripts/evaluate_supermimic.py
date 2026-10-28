@@ -51,7 +51,10 @@ def print_motion(row: dict):
 def main(*, playback=False):
   parser = argparse.ArgumentParser(description=__doc__)
   add_robot_argument(parser)
-  parser.add_argument("--manifest", type=Path)
+  source = parser.add_mutually_exclusive_group(required=True)
+  source.add_argument("--manifest", type=Path, help="Existing motion manifest")
+  source.add_argument("--motion", type=Path, help="Single NPZ reference motion")
+  source.add_argument("--motion-dir", type=Path, help="Recursively load NPZ motions from a directory")
   parser.add_argument("--clips", nargs="*", default=[])
   parser.add_argument("--device", default="cuda:0")
   parser.add_argument("--seed", type=int, default=0)
@@ -136,7 +139,7 @@ def main(*, playback=False):
     help="Export evaluation as MP4 (requires ffmpeg; headless: MUJOCO_GL=egl)",
   )
   args = parser.parse_args()
-  resolve_robot_arguments(args, parser)
+  resolve_robot_arguments(args, parser, default_manifest=False)
   visual = playback or args.viewer != "none" or args.video is not None
   single_env = visual or args.world_model is not None
   max_envs = args.num_envs if args.num_envs is not None else (1 if single_env else 64)
@@ -206,15 +209,22 @@ def main(*, playback=False):
       )
     except ValueError as error:
       parser.error(str(error))
-    if not args.clips:
-      args.clips = list(world_saved["clips"])
   from src.tasks.supermimic.env import SuperMimicEnv
 
+  try:
+    num_envs = evaluation_env_count(
+      args.manifest, tuple(args.clips), max_envs,
+      motion=args.motion, motion_dir=args.motion_dir,
+    )
+  except (ValueError, OSError, KeyError) as error:
+    parser.error(str(error))
   config = FoundationConfig(
     robot=args.robot,
     manifest=args.manifest,
+    motion=args.motion,
+    motion_dir=args.motion_dir,
     clips=tuple(args.clips),
-    num_envs=evaluation_env_count(args.manifest, tuple(args.clips), max_envs),
+    num_envs=num_envs,
     seed=args.seed,
     episode_length_s=1e9,
     terminate_on_failure=termination,

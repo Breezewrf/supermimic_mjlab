@@ -41,8 +41,9 @@ The package distribution is named `supermimic_mjlab`; Python imports use
 `src.tasks.supermimic`. The G1 XML and meshes are vendored under
 [`src/assets/robots/g1`](../src/assets/robots/g1/README.md); mjlab supplies the
 training PD actuators. No local Unitree SDK2 deployment simulator is required.
-Checkpoints from the earlier mjlab robot asset have a different model fingerprint
-and require training with the matching model.
+Model fingerprints are retained for provenance and do not block loading. Robot
+joint/body ordering, topology, network dimensions and simulation settings must be
+compatible; reproducing historical scores still requires the original setup.
 
 ## Verify the environment
 

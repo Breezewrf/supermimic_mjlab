@@ -8,6 +8,8 @@ from pathlib import Path
 import torch
 from torch import Tensor
 
+from ..data.motion_sources import motion_entries, select_motion_entries
+
 Policy = Callable[[Tensor, dict[str, Tensor]], Tensor]
 FrameCallback = Callable[[object, int, int, Tensor, float], None]
 ERROR_METRICS = (
@@ -20,27 +22,16 @@ FAILURE_METRICS = ("height_failure", "tilt_failure", "physical_failure")
 
 
 def evaluation_env_count(
-  manifest: Path, clips: tuple[str, ...] = (), max_envs: int = 64
+  manifest: Path | None, clips: tuple[str, ...] = (), max_envs: int = 64,
+  *, motion: Path | None = None, motion_dir: Path | None = None,
 ) -> int:
-  """Size the evaluation pool from selected clips, without loading motion arrays."""
+  """Size the pool from the selected source, without loading motion arrays."""
   if max_envs < 1:
     raise ValueError("Evaluation environment count must be positive")
-  requested = set(clips)
-  entries = json.loads(Path(manifest).read_text())["clips"]
-  count = sum(
-    not requested
-    or bool(
-      requested.intersection(
-        (
-          Path(entry["file"]).as_posix(),
-          Path(entry["file"]).with_suffix("").as_posix(),
-        )
-      )
-    )
-    for entry in entries
+  entries = select_motion_entries(
+    motion_entries(manifest, motion=motion, motion_dir=motion_dir), clips
   )
-  # MotionLibrary supplies the detailed validation for empty/unknown selections.
-  return max(1, min(max_envs, count))
+  return min(max_envs, len(entries))
 
 
 class EvaluationInterrupted(Exception):

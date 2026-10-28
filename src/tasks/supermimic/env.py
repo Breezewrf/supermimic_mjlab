@@ -83,6 +83,8 @@ class SuperMimicEnv(ManagerBasedRlEnv):
       self.tracked_bodies,
       device=device,
       clips=config.clips,
+      motion=config.motion,
+      motion_dir=config.motion_dir,
     )
 
   def _initialize_task(self):

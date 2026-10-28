@@ -878,6 +878,12 @@ class OnlineCliTests(unittest.TestCase):
       for iteration in (1, 2):
         command = common + ["--iterations", str(iteration)]
         if iteration == 2:
+          # Formatting/provenance changes must not prevent a compatible resume.
+          manifest.write_text(json.dumps(json.loads(manifest.read_text()), indent=2))
+          portable = torch.load(output / "last.pt", weights_only=True)
+          portable.pop("manifest_sha256")
+          portable["robot_metadata"].pop("signature")
+          torch.save(portable, output / "last.pt")
           if prediction == "velocity_residual":
             offset = command.index("--world-prediction")
             del command[offset : offset + 2]
@@ -1029,13 +1035,21 @@ class OnlineCliTests(unittest.TestCase):
       self.assertTrue(diagnostics["world_model"]["horizons"]["1"]["available"])
       self.assertFalse(diagnostics["world_model"]["horizons"]["32"]["available"])
       self.assertTrue(checkpoint["validation_windows"])
+      # Test generalization on a manifest whose clip names were never trained.
+      new_manifest = manifest.parent / "unseen.json"
+      entries = json.loads(manifest.read_text())
+      for index, entry in enumerate(entries["clips"]):
+        source = manifest.parent / entry["file"]
+        entry["file"] = f"unseen_{index}.npz"
+        (manifest.parent / entry["file"]).write_bytes(source.read_bytes())
+      new_manifest.write_text(json.dumps(entries))
       evaluation = Path(folder) / "evaluation.json"
       result = subprocess.run(
         prefix
         + [
           "scripts/evaluate_supermimic.py",
           "--manifest",
-          str(manifest),
+          str(new_manifest),
           "--device",
           "cpu",
           "--checkpoint",
@@ -1054,15 +1068,16 @@ class OnlineCliTests(unittest.TestCase):
       )
       self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
       report = json.loads(evaluation.read_text())
-      self.assertEqual(len(report["motions"]), 1)
-      self.assertEqual(report["motions"][0]["motion"], "fixture_walk")
+      self.assertEqual(
+        [row["motion"] for row in report["motions"]], ["unseen_0", "unseen_1"]
+      )
       self.assertTrue(report["motions"][0]["evaluation_limited"])
       result = subprocess.run(
         prefix
         + [
           "scripts/evaluate_supermimic.py",
           "--manifest",
-          str(manifest),
+          str(new_manifest),
           "--device",
           "cpu",
           "--checkpoint",

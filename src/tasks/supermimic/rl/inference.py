@@ -4,7 +4,6 @@ from pathlib import Path
 
 import torch
 
-from ..data.world_model_data import file_sha256
 from ..models.legacy_policy import LEGACY_REFERENCE_SCHEMA, LegacyMotionActor
 from ..models.policy import REFERENCE_SCHEMAS, MotionActor
 from ..models.world_model import WorldModel
@@ -18,8 +17,9 @@ from .checkpoints import (
 
 
 def load_actor(
-  checkpoint: Path, manifest: Path, device: str, clips: tuple[str, ...] = ()
+  checkpoint: Path, manifest: Path | None, device: str, clips: tuple[str, ...] = ()
 ) -> tuple[MotionActor, dict, tuple[str, ...]]:
+  """Load weights; MotionLibrary validates the independently selected motion source."""
   # Training checkpoints include a large replay buffer. Map storage lazily so
   # inference only needs to read actor weights and validation metadata.
   saved = torch.load(checkpoint, map_location="cpu", weights_only=True, mmap=True)
@@ -37,10 +37,6 @@ def load_actor(
     )
   if saved.get("reference_schema") is None:
     saved = {**saved, "reference_schema": schema, "reference_schema_inferred": True}
-  if saved["manifest_sha256"] != file_sha256(manifest):
-    raise ValueError("Checkpoint manifest does not match")
-  if clips and not set(clips).issubset(saved["clips"]):
-    raise ValueError("Evaluation clips must be present in the checkpoint")
   actor_class = LegacyMotionActor if schema == LEGACY_REFERENCE_SCHEMA else MotionActor
   reference_options = {} if actor_class is LegacyMotionActor else {"reference_dim": {s: w for w, s in REFERENCE_SCHEMAS.items()}[schema]}
   policy = actor_class(
@@ -53,11 +49,12 @@ def load_actor(
     motion_anchor_ori_b=saved["config"].get("motion_anchor_ori_b", False),
   )
   policy.load_state_dict(saved["actor"])
-  return policy.to(device).eval(), saved, clips or tuple(saved["clips"])
+  # An empty selection means all clips in the current manifest, including new data.
+  return policy.to(device).eval(), saved, clips
 
 
 def load_world_model(
-  checkpoint: Path, manifest: Path, device: str, clips: tuple[str, ...] = ()
+  checkpoint: Path, manifest: Path | None, device: str, clips: tuple[str, ...] = ()
 ) -> tuple[WorldModel, dict]:
   """Load exported world weights or a lazily mapped full training snapshot."""
   saved = torch.load(checkpoint, map_location="cpu", weights_only=True, mmap=True)
@@ -73,10 +70,6 @@ def load_world_model(
     raise ValueError(
       f"Checkpoint lacks world-model metadata: {', '.join(sorted(missing))}"
     )
-  if saved["manifest_sha256"] != file_sha256(manifest):
-    raise ValueError("World-model checkpoint manifest does not match")
-  if clips and not set(clips).issubset(saved["clips"]):
-    raise ValueError("Playback clips must be present in the world-model checkpoint")
   config = saved["config"]
   if "world_dims" not in config:
     raise ValueError("Checkpoint lacks world-model configuration: world_dims")
@@ -100,13 +93,11 @@ def load_world_model(
 
 
 def validate_environment(env, saved: dict) -> None:
-  from ..models.kinematics import robot_metadata
+  from ..models.kinematics import robot_metadata, validate_robot_metadata
   from .online_training import simulation_parameters
 
-  if (
-    saved["robot_metadata"]["signature"]
-    != robot_metadata(env.foundation_config.robot)["signature"]
-  ):
-    raise ValueError("Checkpoint robot model does not match the current G1")
+  validate_robot_metadata(
+    saved["robot_metadata"], robot_metadata(env.foundation_config.robot)
+  )
   if saved.get("simulation") != simulation_parameters(env):
     raise ValueError("Checkpoint simulation configuration does not match")

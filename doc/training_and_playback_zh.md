@@ -166,7 +166,8 @@ python scripts/export_supermimic_policy.py \
 `policy_best.pt` 和 `last.pt` 当作同一轮模型。导出文件可通过 play 的 `--world-model` 加载。
 
 `last.pt` 和已有 `iteration_*.pt` 也可同样导出。评估和播放兼容完整断点及轻量策略，
-两种格式保留相同 Actor 权重和数据／机器人／物理配置校验。续训时，会用已保留策略及
+两种格式保留相同 Actor 权重，以及动作格式／机器人结构／物理配置校验；SHA 仅作可选溯源。
+续训时，会用已保留策略及
 不晚于恢复轮次的评估报告，按新的成功数优先规则重选最佳；旧完整断点可用于补全组件。
 若最佳历史策略缺少同轮世界模型，`best_checkpoint.json` 会记录 `world_model: null`，
 终端也会提示，无法补回从未保存的权重。若存在其他轮次的世界模型最佳别名，会另存为
@@ -238,10 +239,11 @@ wandb sync outputs/supermimic/online_offline/wandb/offline-run-*
 python scripts/evaluate_supermimic.py \
   --device cuda:0 --checkpoint outputs/supermimic/online_training/policy_best.pt \
   --output outputs/supermimic/online_policy_evaluation.json \
-  --csv outputs/supermimic/eval.csv
+  --csv outputs/supermimic/eval.csv \
+  --motion-dir src/assets/motions/g1/lafan1_npz
 ```
 
-默认评估全部训练动作，直到动作完成或物理失败。归一化回报按完整动作的最大可达
+默认评估显式指定来源中的全部动作，可用 `--clips` 筛选，直到动作完成或物理失败。归一化回报按完整动作的最大可达
 回报计算，提前失败会降低得分。`--max-steps-per-clip` 仅用于调试，报告会标记未完整
 评估的动作。`policy_best.pt` 可能仍是初始化策略，应以评估报告判断训练是否改善。
 
@@ -268,8 +270,14 @@ CSV 记录 checkpoint、训练轮数、动作选择及分数，便于比较相�
 ```bash
 python scripts/play_supermimic.py \
   --device cuda:0 --checkpoint outputs/supermimic/online_training/policy_best.pt \
-  --clips walk1_subject1 run1_subject2 --loop
+  --clips walk1_subject1 run1_subject2 --loop \
+  --motion-dir src/assets/motions/g1/lafan1_npz
 ```
+
+上例的 `--clips walk1_subject1 run1_subject2` 仅选择 `--motion-dir` 下的
+`walk1_subject1.npz` 和 `run1_subject2.npz`。省略 `--clips` 时使用目录及子目录的全部
+NPZ；名称为相对路径，可省略 `.npz`，例如 `subdir/walk1_subject1`。未知名称会报错。
+评估使用相同的筛选规则。
 
 加入世界模型预测对照：
 
@@ -277,7 +285,8 @@ python scripts/play_supermimic.py \
 python scripts/play_supermimic.py \
   --device cuda:0 --checkpoint checkpoints/best/policy_best.pt \
   --world-model checkpoints/best/world_model_best.pt \
-  --world-model-horizon 32 --clips walk1_subject1 run1_subject2 --loop
+  --world-model-horizon 32 --clips walk1_subject1 run1_subject2 --loop \
+  --motion-dir src/assets/motions/g1/lafan1_npz
 ```
 
 默认 `--world-model-mode future` 会在世界模型内根据预测观测运行策略，橙色机器人
@@ -293,7 +302,10 @@ python scripts/play_supermimic.py \
 不会将未来姿态与当前姿态直接比较。JSON 的 `world_model_comparison` 记录模式和
 逐动作误差；预测出现 NaN／Inf 时隐藏至下次刷新，不影响真实仿真。
 
-世界模型会校验动作库、所选动作、机器人签名和物理配置，建议与策略使用同一轮权重。
+世界模型会校验机器人关节／刚体顺序、拓扑和物理配置，建议与策略使用同一轮权重。
+不再要求模型／数据 SHA 或训练 clip 名单一致。评估／播放必须显式指定一个动作来源：
+`--motion <clip.npz>`、`--motion-dir <目录>` 或 `--manifest <manifest.json>`。
+目录模式按相对路径排序并递归加载 NPZ，无需 manifest；不指定 `--clips` 时使用该来源的全部动作。
 该选项也支持 `--video` 及 `--viewer none` 的诊断运行，固定使用单环境，不改变真实
 仿真回报。鼠标外力只进入真实物理；世界模型没有外力输入，因此拖拽时预测可能偏离。
 
@@ -329,11 +341,12 @@ python scripts/play_supermimic.py \
 MUJOCO_GL=egl python scripts/evaluate_supermimic.py \
   --device cuda:0 --checkpoint outputs/supermimic/online_training/policy_best.pt \
   --clips walk1_subject1 --video outputs/supermimic/walk.mp4 \
-  --output outputs/supermimic/walk_evaluation.json
+  --output outputs/supermimic/walk_evaluation.json \
+  --motion-dir src/assets/motions/g1/lafan1_npz
 ```
 
 视频顺序拼接所选动作；默认 960×540、50 FPS。实时窗口需要桌面显示环境，视频导出
-不需要窗口。评估与播放共用 checkpoint、数据签名和物理参数校验，自动识别已知的
+不需要窗口。评估与播放共用 checkpoint 结构、动作格式和物理参数校验，自动识别已知的
 730／2680 维策略，包括缺少 `reference_schema` 的旧断点；不匹配的物理配置仍会拒绝加载。
 播放必须指定 `--checkpoint` 或 `--policy`；评估未指定策略时运行零动作基线，并明确标注。
 
