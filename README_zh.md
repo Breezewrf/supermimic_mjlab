@@ -2,6 +2,19 @@
 
 [English](README.md) | 简体中文
 
+## 内容目录
+
+- [运行环境](#运行环境)
+- [代码结构](#代码结构)
+- [准备动作数据](#准备动作数据)
+- [在线训练](#在线训练)
+  - [消融结果与发布模型](#消融结果与发布模型)
+  - [断点恢复](#断点恢复)
+- [Play OOD 动作](#play-ood-动作)
+- [Sim2Real](#sim2real)
+- [训练日志与 W&B](#训练日志与-wb)
+- [详细文档](#详细文档)
+
 <p align="center">
   <img src="doc/assets/demo_v0.gif" alt="SuperMimic demo">
 </p>

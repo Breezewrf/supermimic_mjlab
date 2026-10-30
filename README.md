@@ -2,6 +2,19 @@
 
 English | [简体中文](README_zh.md)
 
+## Contents
+
+- [Environment](#environment)
+- [Code structure](#code-structure)
+- [Prepare motion data](#prepare-motion-data)
+- [Online training](#online-training)
+  - [Ablation results and released checkpoint](#ablation-results-and-released-checkpoint)
+  - [Resume training](#resume-training)
+- [Play OOD motions](#play-ood-motions)
+- [Sim2Real](#sim2real)
+- [Training logs and W&B](#training-logs-and-wb)
+- [Detailed guides](#detailed-guides)
+
 <p align="center">
   <img src="doc/assets/demo_v0.gif" alt="SuperMimic demo">
 </p>
