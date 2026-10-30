@@ -260,6 +260,25 @@ python scripts/play_supermimic.py \
   --loop
 ```
 
+## Sim2Real
+
+SuperMimic 已完成 sim2real 迁移，并在
+[RoboJuDo-Plus 的 `supermimic` 分支](https://github.com/chifongip/RoboJuDo-Plus/tree/supermimic)
+中完成部署。动作跟踪、速度控制、loco/mimic 切换、权重与动作配置及真机操作步骤见
+[SuperMimic 部署指南](https://github.com/chifongip/RoboJuDo-Plus/blob/supermimic/docs/supermimic.md)。
+该指南包含 23DoF 真机配置，支持 SuperMimic 速度控制与动作跟踪切换，以及
+Maniloco 与 SuperMimic 切换。
+
+**安全注意事项：**
+
+1. 不同真机的实际状态和表现存在差异，我们无法保证该策略一定能在你的设备上稳定运行。
+2. 我们的真机部署使用 **G1 23DoF，而非 29DoF**。
+3. 初次 sim2real 建议使用幅度较小的 mimic 动作，配合稳定的 locomotion 策略。
+   **当前 SuperMimic velocity tracking 仍不够稳定。**
+4. RoboJuDo-Plus 支持通过 Unitree 手柄方便地切换模式。遇到紧急情况时，可按 **Y**
+   让机器人恢复默认姿态，按 **B** 进入阻尼模式，或按 **A** 进入零力矩（被动）模式。
+   请熟悉这些按键，以帮助保护机器人和测试人员的安全。
+
 ## 训练日志与 W&B
 
 终端按 Reward、Error、Loss、Objective、Failure 和 Performance 分区，误差显示物理单位。

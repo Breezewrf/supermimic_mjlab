@@ -278,6 +278,28 @@ python scripts/play_supermimic.py \
   --motion src/assets/motions/examples/C5_-_walk_to_run_stageii.npz \
   --loop
 ```
+Replace `--loop` with `--viewer none --video output/walk.mp4` can record the mujoco player into video.
+
+## Sim2Real
+
+SuperMimic sim2real transfer is complete and deployed in the
+[RoboJuDo-Plus `supermimic` branch](https://github.com/chifongip/RoboJuDo-Plus/tree/supermimic).
+See its [SuperMimic deployment guide](https://github.com/chifongip/RoboJuDo-Plus/blob/supermimic/docs/supermimic.md)
+for motion tracking, velocity control, loco/mimic switching, checkpoint and motion
+configuration, and real-robot operation. The guide includes 23DoF real-robot
+configurations for SuperMimic velocity + motion tracking and Maniloco + SuperMimic.
+
+**Safety precautions:**
+
+1. Physical robots differ in condition and behavior; we cannot guarantee that the
+   policy will run stably on your hardware.
+2. Our real-robot deployment uses **G1 23DoF, not 29DoF**.
+3. For initial sim2real tests, use small-amplitude mimic motions together with a
+   stable locomotion policy. **Current my implmented SuperMimic velocity tracking is still in development stage.**
+4. RoboJuDo-Plus supports convenient mode switching with the Unitree joystick.
+   When urgent intervention is needed, press **Y** to return to the default pose,
+   **B** to enter damping mode, or **A** to enter zero-torque (passive) mode.
+   Familiarize yourself with these controls to help protect the robot and test personnel.
 
 ## Training logs and W&B
 
