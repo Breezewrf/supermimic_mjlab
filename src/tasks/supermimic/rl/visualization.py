@@ -27,6 +27,63 @@ class ViewerClosed(EvaluationInterrupted):
   """The window closed before the evaluation finished."""
 
 
+WRENCH_FORCE_COLOR = np.array([0.9, 0.0, 0.0, 1.0], dtype=np.float32)
+WRENCH_TORQUE_MAX_ANGLE = 0.6
+
+
+def _add_line(scene, start, end, color, width=2.0):
+  geom = scene.geoms[scene.ngeom]
+  mujoco.mjv_initGeom(
+    geom, mujoco.mjtGeom.mjGEOM_LINE, np.zeros(3), np.zeros(3), np.eye(3).ravel(), color
+  )
+  mujoco.mjv_connector(geom, mujoco.mjtGeom.mjGEOM_LINE, width, start, end)
+  geom.category = mujoco.mjtCatBit.mjCAT_DECOR
+  scene.ngeom += 1
+
+
+def _add_marker_sphere(scene, position, radius, color):
+  geom = scene.geoms[scene.ngeom]
+  mujoco.mjv_initGeom(
+    geom, mujoco.mjtGeom.mjGEOM_SPHERE, np.full(3, radius), position, np.eye(3).ravel(), color
+  )
+  geom.category = mujoco.mjtCatBit.mjCAT_DECOR
+  scene.ngeom += 1
+
+
+def draw_wrench(scene, model, data, option, camera, perturb, body, force, torque=None):
+  """Reproduce the viewer gizmo inside an offscreen scene.
+
+  mjv builds the rotation frame itself when handed a MjvPerturb, so torque needs
+  no custom geometry: the same LINEBOX, size and colour the viewer shows. mjv
+  does not draw the drag stroke, so force reuses the primitives the viewer draws
+  for it, a thin red line and a small sphere at the drag point.
+  """
+  torque = np.zeros(3) if torque is None else np.asarray(torque, dtype=np.float64)
+  torque_norm = float(np.linalg.norm(torque))
+  if np.isfinite(torque_norm) and torque_norm > 1e-9:
+    mujoco.mjv_initPerturb(model, data, scene, perturb)
+    perturb.select = body
+    perturb.active = mujoco.mjtPertBit.mjPERT_ROTATE
+    angle = WRENCH_TORQUE_MAX_ANGLE * torque_norm / (torque_norm + 15.0)
+    axis = torque / torque_norm
+    perturb.refquat[:] = np.concatenate(([math.cos(angle / 2)], math.sin(angle / 2) * axis))
+    mujoco.mjv_updateScene(
+      model, data, option, perturb, camera, mujoco.mjtCatBit.mjCAT_ALL, scene
+    )
+  force = np.asarray(force, dtype=np.float64)
+  force_norm = float(np.linalg.norm(force))
+  if not (np.isfinite(force_norm) and force_norm > 1e-9):
+    return
+  if scene.ngeom + 2 > scene.maxgeom:
+    return
+  direction = force / force_norm
+  length = max(0.6 * force_norm / (force_norm + 80.0), 0.08)
+  start = np.asarray(data.xipos[body], dtype=np.float64) + direction * 0.05
+  tip = start + direction * length
+  _add_line(scene, start, tip, WRENCH_FORCE_COLOR)
+  _add_marker_sphere(scene, tip, 0.02, WRENCH_FORCE_COLOR)
+
+
 class EvaluationScene:
   """CPU render buffers sharing the simulator's geometry and joint ordering."""
 
@@ -136,6 +193,19 @@ class EvaluationScene:
           geom.category = mujoco.mjtCatBit.mjCAT_DECOR
           scene.ngeom += 1
 
+  def add_wrench(self, scene, body, force, torque=None):
+    draw_wrench(
+      scene,
+      self.model,
+      self.data,
+      self.option,
+      self.camera,
+      self.perturb,
+      body,
+      force,
+      torque,
+    )
+
   def _add_ghost(self, scene, data, color):
     start = scene.ngeom
     mujoco.mjv_addGeoms(
@@ -161,10 +231,12 @@ class MousePerturbations:
     self.body_ids = set(env.robot.indexing.body_ids.cpu().tolist())
     self.applied_steps = 0
     self.qfrc = np.zeros(model.nv)
+    self.wrench = None
 
   def clear(self):
     self.env.sim.data.qfrc_applied[0].zero_()
     self.data.xfrc_applied[:] = 0
+    self.wrench = None
 
   def apply(self, perturb):
     self.clear()
@@ -188,6 +260,11 @@ class MousePerturbations:
     target.copy_(torch.from_numpy(self.qfrc).to(target))
     if np.any(self.qfrc):
       self.applied_steps += 1
+      self.wrench = (
+        body,
+        self.data.xfrc_applied[body, :3].copy(),
+        self.data.xfrc_applied[body, 3:].copy(),
+      )
 
 
 class PassiveViewer:
@@ -346,11 +423,20 @@ class VideoRecorder:
   """Optional headless MP4 export of exactly the frames used in evaluation."""
 
   def __init__(
-    self, env, path: Path, *, ghost=True, global_ghost=False, world_model=None
+    self,
+    env,
+    path: Path,
+    *,
+    ghost=True,
+    global_ghost=False,
+    world_model=None,
+    wrench_source=None,
   ):
     self.scene = EvaluationScene(
       env, ghost=ghost, global_ghost=global_ghost, world_model=world_model
     )
+    # Optional MousePerturbations; the viewer's own force gizmo never reaches here.
+    self.wrench_source = wrench_source
     path.parent.mkdir(parents=True, exist_ok=True)
     self.scene.model.vis.global_.offwidth = 960
     self.scene.model.vis.global_.offheight = 540
@@ -389,6 +475,11 @@ class VideoRecorder:
     del reward_sum
     self.scene.update(env, clip, frame, state)
     self.renderer.update_scene(self.scene.data, camera=self.scene.camera)
+    wrench = None if self.wrench_source is None else self.wrench_source.wrench
+    if wrench is not None:
+      body, force, torque = wrench
+      # draw_wrench lets mjv rebuild the scene, so ghosts are added afterwards.
+      self.scene.add_wrench(self.renderer.scene, body, force, torque)
     self.scene.add_ghost(self.renderer.scene)
     assert self.encoder.stdin is not None
     self.encoder.stdin.write(self.renderer.render().tobytes())

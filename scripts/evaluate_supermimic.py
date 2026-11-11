@@ -268,6 +268,7 @@ def main(*, playback=False):
         "global_ghost": args.global_ghost,
         "world_model": comparison,
       }
+      live_viewer = None
       if args.viewer == "native":
         live_viewer = LiveViewer(
           env, speed=args.speed, perturbations=perturbations, **visual_options
@@ -288,7 +289,14 @@ def main(*, playback=False):
             flush=True,
           )
       if args.video:
-        displays.append(VideoRecorder(env, args.video, **visual_options))
+        displays.append(
+          VideoRecorder(
+            env,
+            args.video,
+            wrench_source=None if live_viewer is None else live_viewer.mouse,
+            **visual_options,
+          )
+        )
 
     def on_frame(*frame):
       if comparison is not None:
