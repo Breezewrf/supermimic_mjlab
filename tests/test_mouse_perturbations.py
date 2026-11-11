@@ -136,6 +136,57 @@ class MousePerturbationTests(unittest.TestCase):
       np.linalg.norm(self.env.sim.data.qfrc_applied[0, 3:6].numpy()), 0
     )
 
+  def test_applied_wrench_is_exposed_for_recording_and_cleared(self):
+    self.assertIsNone(self.mouse.wrench)
+    perturb = self.perturb()
+    self.mouse.apply(perturb)
+    body, force, torque = self.mouse.wrench
+    self.assertEqual(body, perturb.select)
+    np.testing.assert_allclose(force, self.data.xfrc_applied[body, :3])
+    np.testing.assert_allclose(torque, self.data.xfrc_applied[body, 3:])
+    self.assertGreater(np.linalg.norm(force), 0)
+    perturb.active = 0
+    self.mouse.apply(perturb)
+    self.assertIsNone(self.mouse.wrench)
+    self.mouse.apply(self.perturb(body=1))
+    self.assertIsNotNone(self.mouse.wrench)
+    self.mouse.clear()
+    self.assertIsNone(self.mouse.wrench)
+
+  def test_draw_wrench_reproduces_the_native_perturb_scene(self):
+    from src.tasks.supermimic.rl.visualization import draw_wrench
+
+    camera = mujoco.MjvCamera()
+    mujoco.mjv_defaultFreeCamera(self.model, camera)
+    camera.distance = 3.0
+    option = mujoco.MjvOption()
+    scene = mujoco.MjvScene(self.model, maxgeom=40)
+    mujoco.mjv_updateScene(
+      self.model, self.data, option, None, camera, mujoco.mjtCatBit.mjCAT_ALL, scene
+    )
+    base = scene.ngeom
+    perturb = mujoco.MjvPerturb()
+    draw_wrench(
+      scene,
+      self.model,
+      self.data,
+      option,
+      camera,
+      perturb,
+      1,
+      np.array([80.0, 0.0, 0.0]),
+      np.array([0.0, 0.0, 30.0]),
+    )
+    linebox, stroke, marker = (scene.geoms[i] for i in (base, base + 1, base + 2))
+    self.assertEqual(linebox.type, mujoco.mjtGeom.mjGEOM_LINEBOX)
+    np.testing.assert_allclose(linebox.rgba, [0.8, 0.2, 0.2, 0.6], atol=1e-6)
+    np.testing.assert_allclose(linebox.size, [0.1, 0.1, 0.1], atol=1e-6)
+    self.assertEqual(stroke.type, mujoco.mjtGeom.mjGEOM_LINE)
+    self.assertEqual(marker.type, mujoco.mjtGeom.mjGEOM_SPHERE)
+    np.testing.assert_allclose(marker.rgba, [0.9, 0.0, 0.0, 1.0], atol=1e-6)
+    self.assertAlmostEqual(float(marker.size[0]), 0.02)
+    self.assertAlmostEqual(float(stroke.size[2]), 0.3, places=6)
+
   def test_viewer_sync_is_read_only_until_step_and_clears_drag_between_motions(self):
     camera = SimpleNamespace(
       lookat=np.zeros(3), distance=3.5, azimuth=135, elevation=-15
