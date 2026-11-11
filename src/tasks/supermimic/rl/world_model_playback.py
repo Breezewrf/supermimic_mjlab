@@ -191,7 +191,7 @@ class WorldModelFuturePreview(WorldModelPlayback):
     }
     goals = self.actor.reference_features(windows, self.actor.default_q)
     # References do not depend on imagined states: encode the whole window once.
-    latents = run_mlp(self.actor.encoder, goals, self.actor.amp).tanh()
+    latents = self.actor.encode_motion(goals)
     state, history = self.actual.clone(), self.history.clone()
     states = [state]
     for step in range(steps):
@@ -199,7 +199,7 @@ class WorldModelFuturePreview(WorldModelPlayback):
         run_mlp(
           self.actor.decoder,
           torch.cat(
-            (latents[:, step], (history / self.actor.observation_scale).flatten(-2)), -1
+            (latents[:, step], self.actor.normalize_history(history).flatten(-2)), -1
           ),
           self.actor.amp,
         )

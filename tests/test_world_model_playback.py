@@ -120,6 +120,77 @@ class WorldModelPlaybackTests(unittest.TestCase):
     self.assertEqual(observer.metrics["root_position_m"], 0)
     self.assertEqual(observer.report()["motions"][0]["nonfinite_steps"], 2)
 
+  def test_future_rollout_reuses_actor_input_normalization(self):
+    """Normalized checkpoints must see the same preprocessing in imagination."""
+
+    class Kinematics:
+      @staticmethod
+      def observation(
+        state,
+        action,
+        context,
+        quaternion,
+        relative_orientation=False,
+        motion_anchor_orientation=False,
+      ):
+        del action, context, quaternion, relative_orientation
+        del motion_anchor_orientation
+        return torch.zeros(state.shape[0], 93)
+
+    class World:
+      kinematics = Kinematics()
+
+      def __call__(self, state, action, context):
+        del context
+        predicted = state.clone()
+        predicted[:, 0] += action[:, 0]
+        return predicted
+
+    steps = 2
+    env = SimpleNamespace(
+      num_envs=1,
+      device="cpu",
+      context=torch.zeros(1, 33),
+      step_dt=0.02,
+      foundation_config=FoundationConfig(num_envs=1),
+      library=SimpleNamespace(
+        get_future=lambda motion, frames, horizon: {
+          "body_quat_w": torch.tensor([[[1.0, 0.0, 0.0, 0.0]]]).expand(1, horizon, 4)
+        }
+      ),
+    )
+    actor = MotionActor(torch.zeros(29), (8,), input_normalization=True).eval()
+    actor.obs_norm.mean.fill_(0.5)
+    actor.obs_norm.var.fill_(4.0)
+    actor.obs_norm.std.fill_(2.0)
+    actor.obs_norm.count.fill_(1000)
+    actor.goal_norm.mean.fill_(-0.25)
+    actor.goal_norm.var.fill_(9.0)
+    actor.goal_norm.std.fill_(3.0)
+    actor.goal_norm.count.fill_(1000)
+    # The reference encoding is irrelevant here; only preprocessing is under test.
+    actor.reference_features = lambda windows, default_q: torch.zeros(
+      1, steps + 1, actor.reference_dim
+    )
+    preview = WorldModelFuturePreview(env, World(), actor, horizon=steps, refresh=1)
+    preview.actual = physical_state()
+    preview.context = torch.zeros(1, 33)
+    preview.history = torch.zeros(1, 10, 93)
+    rollout = preview._rollout(0, 0, steps)
+
+    with torch.no_grad():
+      goals = actor.reference_features({}, actor.default_q)
+      latents = actor.encode_motion(goals)
+      state, history = preview.actual.clone(), preview.history.clone()
+      expected = [state]
+      for step in range(steps):
+        action = actor.decode(history, latents[:, step])
+        state = World()(state, action, preview.context)
+        observation = Kinematics.observation(state, action, None, None)
+        history = torch.cat((history[:, 1:], observation[:, None]), 1)
+        expected.append(state)
+    torch.testing.assert_close(rollout, torch.stack(expected))
+
   def test_prediction_visibility_toggle_does_not_advance_the_model(self):
     observer = WorldModelPlayback(self.env, self.world)
     viewer = object.__new__(LiveViewer)
