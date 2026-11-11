@@ -4,16 +4,20 @@
 
 ## 内容目录
 
-- [运行环境](#运行环境)
-- [代码结构](#代码结构)
-- [准备动作数据](#准备动作数据)
-- [在线训练](#在线训练)
-  - [消融结果与发布模型](#消融结果与发布模型)
-  - [断点恢复](#断点恢复)
-- [Play OOD 动作](#play-ood-动作)
-- [Sim2Real](#sim2real)
-- [训练日志与 W&B](#训练日志与-wb)
-- [详细文档](#详细文档)
+- [SuperMimic Mjlab](#supermimic-mjlab)
+  - [内容目录](#内容目录)
+  - [与官方实现的主要差异](#与官方实现的主要差异)
+  - [运行环境](#运行环境)
+  - [代码结构](#代码结构)
+  - [准备动作数据](#准备动作数据)
+  - [在线训练](#在线训练)
+    - [消融结果与发布模型](#消融结果与发布模型)
+    - [断点恢复](#断点恢复)
+  - [Play OOD 动作](#play-ood-动作)
+  - [Sim2Real](#sim2real)
+  - [训练日志与 W\&B](#训练日志与-wb)
+  - [详细文档](#详细文档)
+  - [参考](#参考)
 
 <p align="center">
   <img src="doc/assets/demo_v0.gif" alt="SuperMimic demo">
@@ -43,6 +47,31 @@ Actor 和 Critic。
 机器人使用本地复制的 [RoboJuDo-Plus G1 资源](src/assets/robots/g1/README.md)，
 加载 `g1_29dof_rev_1_0.xml`，碰撞体包含网格、肩部圆柱体及每脚 4 个半径 5 mm 的
 球体。训练沿用 mjlab 的 PD 控制配置，关闭自碰撞。
+
+## 与官方实现的主要差异
+
+以下对比SuperMimic官方 [`5efbf114` 的实现](https://github.com/HybridRobotics/supermimic/tree/5efbf114e11f725c31d83e217be987c13c0e4ce2)。维度以 G1 29DoF 为准：本仓库对比配置启用 `--reference-dim 2680 --motion-anchor-ori-b`，官方使用默认训练配置。
+
+- **动力学预测：** 本仓库的 `state_delta` 预测 70 维位姿与速度增量；官方预测 35 维速度增量，再解析积分得到根位姿和关节位置。
+
+  `70 = Δp(3) + Δr(3) + Δq(29) + Δv(3) + Δω(3) + Δq̇(29)`。
+
+  `35 = Δv_body(3) + Δω_body(3) + Δq̇(29)`。
+
+- **Actor 观测：** 本仓库使用最近 10 帧本体观测，开启 torso 参考姿态后每帧 99 维；官方默认使用单帧 68 维状态，包含根高度、根线速度等特权量，传感器观测与多帧历史需显式配置。
+
+  `99 = q-relative(29) + q-velocity(29) + angular velocity(3) + gravity(3) + motion-robot torso relative orientation(6) + previous action(29)`。
+
+  `68 = q-position(29) + q-velocity(29) + angular velocity(3) + gravity(3) + linear velocity(3) + height(1)`。
+
+- **参考运动组成与前瞻：** 本配置编码连续 10 帧全身参考，共 2680 维，前瞻 0.18 秒；官方 Actor 每隔 5 步取一帧，共 10 帧、640 维，前瞻 0.9 秒。
+
+  `268 = joint positions(29) + joint velocities(29) + bodies position(14*3) + bodies rotation-6D(14*6) + bodies linear velocity(14*3) + bodies angular velocity(14*3)`，每一帧
+
+  `64 = joint positions(29) + joint velocities(29) + motion-robot pelvis relative orientation(6)`，每一帧
+
+- **世界模型监督：** 两边都从预测状态解析计算奖励与观测。官方也解析计算终止概率，世界模型使用状态误差训练；本仓库对比配置通过 MLP 预测终止概率，在线训练使用状态误差加终止 BCE 损失。
+
 
 ## 运行环境
 
@@ -334,3 +363,11 @@ python scripts/train_supermimic.py \
 - [在线训练与评估协议](doc/supermimic_online_zh.md)
 
 独立采集和模型训练入口用于诊断及离线实验，在线训练可以直接从头开始。
+
+## 参考
+
+
+- [SuperMimic](doc/supermimic.pdf)：原论文及作者为本项目复现提供了算法与研究基础。
+- [unitree_rl_mjlab](https://github.com/unitreerobotics/unitree_rl_mjlab)：提供初始代码基础与速度跟踪实现参考。
+- [RoboJuDo-Plus](https://github.com/chifongip/RoboJuDo-Plus/tree/supermimic)：提供 G1 机器人资源与 sim2real 部署框架。
+- [video2motion](https://github.com/Breezewrf/video2motion)：提供动作转换与 SuperMimic 兼容动作导出。

@@ -4,16 +4,20 @@ English | [简体中文](README_zh.md)
 
 ## Contents
 
-- [Environment](#environment)
-- [Code structure](#code-structure)
-- [Prepare motion data](#prepare-motion-data)
-- [Online training](#online-training)
-  - [Ablation results and released checkpoint](#ablation-results-and-released-checkpoint)
-  - [Resume training](#resume-training)
-- [Play OOD motions](#play-ood-motions)
-- [Sim2Real](#sim2real)
-- [Training logs and W&B](#training-logs-and-wb)
-- [Detailed guides](#detailed-guides)
+- [SuperMimic Mjlab](#supermimic-mjlab)
+  - [Contents](#contents)
+  - [Differences from the official implementation](#differences-from-the-official-implementation)
+  - [Environment](#environment)
+  - [Code structure](#code-structure)
+  - [Prepare motion data](#prepare-motion-data)
+  - [Online training](#online-training)
+    - [Ablation results and released checkpoint](#ablation-results-and-released-checkpoint)
+    - [Resume training](#resume-training)
+  - [Play OOD motions](#play-ood-motions)
+  - [Sim2Real](#sim2real)
+  - [Training logs and W\&B](#training-logs-and-wb)
+  - [Detailed guides](#detailed-guides)
+  - [Reference](#reference)
 
 <p align="center">
   <img src="doc/assets/demo_v0.gif" alt="SuperMimic demo">
@@ -45,6 +49,31 @@ The robot uses the vendored [RoboJuDo-Plus G1 assets](src/assets/robots/g1/READM
 loading `g1_29dof_rev_1_0.xml` with collision meshes, shoulder cylinders, and four
 5 mm radius spheres per foot. Training retains the mjlab PD control setup and
 disables self-collisions.
+
+## Differences from the official implementation
+
+Compared with the official SuperMimic [implementation at `5efbf114`](https://github.com/HybridRobotics/supermimic/tree/5efbf114e11f725c31d83e217be987c13c0e4ce2), the main differences are below. Dimensions refer to G1 29DoF; this repository's comparison configuration uses `--reference-dim 2680 --motion-anchor-ori-b`, while the official side uses its default training configuration.
+
+- **Dynamics prediction:** this repository's `state_delta` predicts 70D pose (mainly use) and velocity increments. The official model predicts 35D velocity increments and analytically integrates root pose and joint positions.
+
+  `70 = Δp(3) + Δr(3) + Δq(29) + Δv(3) + Δω(3) + Δq̇(29)`.
+
+  `35 = Δv_body(3) + Δω_body(3) + Δq̇(29)`.
+
+- **Actor observations:** this repository uses ten frames of proprioceptive observations (99D per frame with torso reference orientation enabled). The official default uses one 68D state, including privileged root height and linear velocity; sensor observations and longer history require explicit configuration.
+
+  `99 = q-relative(29) + q-velocity(29) + angular velocity(3) + gravity(3) + motion-robot torso relative orientation(6) + previous action(29)`.
+
+  `68 = q-position(29) + q-velocity(29) + angular velocity(3) + gravity(3) + linear velocity(3) + height(1)`.
+
+- **Motion reference composition and lookahead:** this configuration encodes ten consecutive full-body reference frames (2680D, 0.18 s lookahead). The official actor encodes ten frames spaced five steps apart (640D, 0.9 s lookahead).
+
+  `268 = joint positions(29) + joint velocities(29) + bodies position(14*3) + bodies rotation-6D(14*6) + bodies linear velocity(14*3) + bodies angular velocity(14*3)`, for each frame.
+
+  `64 = joint positions(29) + joint velocities(29) + motion-robot pelvis relative orientation(6)`, for each frame.
+
+- **World-model supervision:** both implementations analytically compute rewards and observations from predicted states. The official model also computes termination analytically and is trained with state error. This repository's comparison configuration predicts termination with an MLP and uses state error plus termination BCE during online training.
+
 
 ## Environment
 
@@ -365,3 +394,11 @@ Implementation guides (Chinese):
 
 Standalone collection and model training support diagnostics and offline experiments.
 Online training can start directly from scratch.
+
+## Reference
+
+
+- [SuperMimic](doc/supermimic.pdf): the original paper and authors for the algorithm and research underlying this reproduction.
+- [unitree_rl_mjlab](https://github.com/unitreerobotics/unitree_rl_mjlab): the initial codebase and references for velocity tracking.
+- [RoboJuDo-Plus](https://github.com/chifongip/RoboJuDo-Plus/tree/supermimic): G1 robot assets and the sim2real deployment framework.
+- [video2motion](https://github.com/Breezewrf/video2motion): motion conversion and SuperMimic-compatible motion export.
