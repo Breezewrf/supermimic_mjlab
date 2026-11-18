@@ -236,12 +236,14 @@ def main():
     "manifest": str(args.manifest.resolve()),
     "manifest_sha256": file_sha256(args.manifest),
     "timing_override_on_resume": bool(args.resume and timing_override),
+    "tensorboard": args.tensorboard,
   }
   args.output.mkdir(parents=True, exist_ok=bool(saved))
   write_json(args.output / "config.json", run)
   console = VelocityConsoleReporter(args.iterations, args.log_format)
   console.message(f"Initializing simulation; details: {args.output / 'simulator.log'}")
   metadata = robot_metadata(args.robot)
+  initial_motion_report = None
   with TrainingRuntime(args, args.output, console) as runtime:
     with simulator_output(runtime.sim_log, verbose=args.verbose_sim):
       env = runtime.env = VelocityEnv(
@@ -276,7 +278,7 @@ def main():
         if args.initial_evaluation_steps:
           from train_supermimic import evaluate_actor
 
-          report = evaluate_actor(
+          initial_motion_report = evaluate_actor(
             trainer.actor,
             args.manifest,
             cfg,
@@ -284,7 +286,7 @@ def main():
             args.initial_evaluation_steps,
             library=env.library,
           )
-          write_json(args.output / "initial_motion_evaluation.json", report)
+          write_json(args.output / "initial_motion_evaluation.json", initial_motion_report)
         trainer.bootstrap()
 
     console.start(
@@ -311,6 +313,8 @@ def main():
     )
 
     tracking = runtime.start_tracking(run, reporter=VelocityWandbReporter)
+    if runtime.tensorboard and initial_motion_report is not None:
+      runtime.tensorboard.evaluation(initial_motion_report, trainer.iteration)
 
     def save(historical=False):
       full = trainer.state_dict() | {

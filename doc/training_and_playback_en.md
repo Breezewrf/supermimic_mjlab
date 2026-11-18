@@ -273,6 +273,20 @@ rollback occurred. Offline resumes and rollbacks start a new run segment linked 
 model and workload settings must still match the checkpoint. An already running process
 uses its original logging code until it is restarted from a saved checkpoint.
 
+### TensorBoard
+
+Add `--tensorboard` to a motion or velocity training command to write training
+and evaluation scalars to `tensorboard/` inside the output directory. It can
+run alongside `--wandb`.
+
+```bash
+tensorboard --logdir outputs/supermimic/bones_seed_trial/tensorboard
+```
+
+Open `http://localhost:6006` in a browser. Pass `--tensorboard` again on resume
+to continue logging at the saved iteration. TensorBoard hides old events
+beyond the restored checkpoint.
+
 ## Policy evaluation
 
 Load an online checkpoint and simulate each motion from its first frame, with domain

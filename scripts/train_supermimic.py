@@ -365,6 +365,7 @@ def main():
       "simulation": trainer.simulation_parameters,
       "evaluation_limit": args.evaluation_limit,
       "skip_initial_evaluation": args.skip_initial_evaluation,
+      "tensorboard": args.tensorboard,
       "motion_load_workers": args.motion_load_workers,
       "evaluation_max_envs": args.eval_num_envs,
       "full_checkpoint_interval": args.full_checkpoint_interval,
@@ -468,6 +469,8 @@ def main():
       if tracking:
         tracking.evaluation(report)
         tracking.diagnostics(diagnostics)
+      if runtime.tensorboard:
+        runtime.tensorboard.evaluation(report, trainer.iteration)
 
     if not saved:
       if not args.skip_initial_evaluation:

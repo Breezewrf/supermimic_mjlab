@@ -231,6 +231,18 @@ wandb sync outputs/supermimic/online_offline/wandb/offline-run-*
 通过 `parent_run_id` 关联，保留原有曲线。日志参数可以在续训时调整，模型和训练规模
 参数仍须与断点一致。已经启动的训练进程需要从已保存断点重启后才会使用新的日志代码。
 
+### TensorBoard
+
+在动作跟踪或速度训练命令加上 `--tensorboard`，即可把训练和评估的标量写入
+输出目录下的 `tensorboard/`。它可以与 `--wandb` 同时开启。
+
+```bash
+tensorboard --logdir outputs/supermimic/bones_seed_trial/tensorboard
+```
+
+在浏览器打开 `http://localhost:6006`。续训时再次传入 `--tensorboard`，
+曲线沿用训练轮数，TensorBoard 会隐藏比恢复断点更新的旧事件。
+
 ## 策略评估
 
 加载在线 checkpoint，从每段动作首帧进行真实物理仿真，关闭域随机化和观测噪声：

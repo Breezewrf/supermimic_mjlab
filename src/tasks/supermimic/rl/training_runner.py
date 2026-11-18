@@ -7,6 +7,7 @@ import traceback
 from .checkpoints import save_checkpoint
 from .metric_schema import metric_groups
 from .online_training import restore_rng, rng_state
+from .tensorboard_logger import TensorBoardReporter
 from .training_logger import WandbReporter, simulator_output
 
 
@@ -19,6 +20,9 @@ def add_logging_arguments(parser):
   parser.add_argument("--log-format", choices=("table", "json"), default="table")
   parser.add_argument("--verbose-sim", action="store_true")
   parser.add_argument(
+    "--tensorboard", action="store_true", help="Write local TensorBoard scalar logs"
+  )
+  parser.add_argument(
     "--wandb", action="store_true", help="Track training with Weights & Biases"
   )
   parser.add_argument(
@@ -30,6 +34,8 @@ def add_logging_arguments(parser):
 
 
 def validate_logging_arguments(parser, args):
+  if args.tensorboard and importlib.util.find_spec("tensorboard") is None:
+    parser.error("TensorBoard is missing. Install the project environment with: uv sync")
   if args.wandb and importlib.util.find_spec("wandb") is None:
     parser.error(
       "W&B is optional. Install logging support with: uv sync --extra logging"
@@ -42,26 +48,34 @@ class TrainingRuntime:
   def __init__(self, args, output, console):
     self.args, self.output, self.console = args, output, console
     self.trainer = self.env = self.tracking = None
+    self.tensorboard = None
 
   def __enter__(self):
     self.sim_log = (self.output / "simulator.log").open("a", buffering=1)
     return self
 
   def start_tracking(self, config, reporter=WandbReporter):
-    if not self.args.wandb:
+    if not (self.args.tensorboard or self.args.wandb):
       return None
     state = rng_state()
     try:
-      self.tracking = reporter(
-        self.output,
-        config,
-        self.trainer.iteration,
-        project=self.args.wandb_project,
-        entity=self.args.wandb_entity,
-        name=self.args.wandb_name,
-        mode=self.args.wandb_mode,
-        console=self.console,
-      )
+      if self.args.tensorboard:
+        self.tensorboard = TensorBoardReporter(
+          self.output,
+          purge_step=self.trainer.iteration + 1 if self.args.resume else None,
+        )
+        self.console.message(f"TensorBoard logs are in {self.tensorboard.path}")
+      if self.args.wandb:
+        self.tracking = reporter(
+          self.output,
+          config,
+          self.trainer.iteration,
+          project=self.args.wandb_project,
+          entity=self.args.wandb_entity,
+          name=self.args.wandb_name,
+          mode=self.args.wandb_mode,
+          console=self.console,
+        )
     finally:
       restore_rng(state)
     return self.tracking
@@ -90,8 +104,12 @@ class TrainingRuntime:
         )
     finally:
       try:
-        if self.tracking is not None:
-          self.tracking.close(exit_code=int(error is not None))
+        try:
+          if self.tensorboard is not None:
+            self.tensorboard.close()
+        finally:
+          if self.tracking is not None:
+            self.tracking.close(exit_code=int(error is not None))
       finally:
         try:
           if self.env is not None:
@@ -124,6 +142,8 @@ class TrainingRuntime:
       self.console.training(window.last if args.log_format == "json" else summary)
       if self.tracking:
         self.tracking.window(summary)
+      if self.tensorboard:
+        self.tensorboard.window(summary)
       window = window_factory()
 
     with log_path.open("a") as log:
@@ -143,6 +163,8 @@ class TrainingRuntime:
         window.add(record)
         if self.tracking:
           self.tracking.training(record)
+        if self.tensorboard:
+          self.tensorboard.training(record)
         if (
           trainer.iteration % args.log_interval == 0
           or trainer.iteration == args.iterations
