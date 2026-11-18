@@ -282,6 +282,7 @@ def main():
             cfg,
             args.device,
             args.initial_evaluation_steps,
+            library=env.library,
           )
           write_json(args.output / "initial_motion_evaluation.json", report)
         trainer.bootstrap()

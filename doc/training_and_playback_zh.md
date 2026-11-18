@@ -253,6 +253,9 @@ python scripts/evaluate_supermimic.py \
 结束后即使环境自动重置，也不会继续累计该动作的奖励、误差或失败记录。
 play、实时窗口及视频导出保持单环境。JSON 中的 `evaluation_num_envs` 记录实际环境数；
 训练评估另记录 `evaluation_wall_seconds`，包含环境初始化耗时。
+训练与评估共用设备上的动作库和参考 FK 缓存，各自维护仿真、轨迹和采样状态。
+大数据集可用 `--eval-num-envs 4096` 减少评估批次。第二套仿真环境会额外占用显存，
+可用报告中的评估耗时比较不同并行数。
 
 参照 [supermimic_vibed 的评估协议](https://github.com/zita-ch/supermimic_vibed/blob/main/supermimic/evaluate.py)，
 终端输出 `Evaluation return <分数>`，例如 `Evaluation return 0.824`（仅为输出格式示例，

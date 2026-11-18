@@ -48,10 +48,17 @@ from src.tasks.supermimic.rl.training_runner import (
 
 
 def evaluate_actor(
-  actor, manifest, config, device, limit=None, max_envs=64, *, motion_load_workers=1
+  actor, manifest, config, device, limit=None, max_envs=64, *, library=None
 ):
   from src.tasks.supermimic.env import SuperMimicEnv
 
+  if max_envs < 1:
+    raise ValueError("Evaluation environment count must be positive")
+  num_envs = (
+    min(max_envs, len(library))
+    if library is not None
+    else evaluation_env_count(manifest, config.clips, max_envs)
+  )
   saved_rng, training = rng_state(), actor.training
   env = None
   try:
@@ -61,17 +68,17 @@ def evaluate_actor(
         robot=config.robot,
         manifest=manifest,
         motion_storage=config.motion_storage,
-        motion_load_workers=motion_load_workers,
         motion_load_progress=True,
         motion_fk_cache_frames=config.motion_fk_cache_frames,
         clips=config.clips,
-        num_envs=evaluation_env_count(manifest, config.clips, max_envs),
+        num_envs=num_envs,
         seed=config.seed,
         episode_length_s=1e9,
         relative_orientation=config.relative_orientation,
         motion_anchor_ori_b=config.motion_anchor_ori_b,
       ),
       device=device,
+      library=library,
     )
     return evaluate(env, actor, limit)
   finally:
@@ -429,7 +436,7 @@ def main():
           args.device,
           args.evaluation_limit,
           max_envs=args.eval_num_envs,
-          motion_load_workers=args.motion_load_workers,
+          library=env.library,
         )
       report["evaluation_wall_seconds"] = time.perf_counter() - evaluation_started
       report["iteration"] = trainer.iteration

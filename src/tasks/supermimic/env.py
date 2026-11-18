@@ -25,14 +25,18 @@ from .mdp.terminations import failure_terms
 
 class SuperMimicEnv(ManagerBasedRlEnv):
   def __init__(
-    self, config: FoundationConfig, device: str = "cuda:0", render_mode=None
+    self,
+    config: FoundationConfig,
+    device: str = "cuda:0",
+    render_mode=None,
+    *,
+    library: MotionLibrary | None = None,
   ):
     self.foundation_config = config
     self.layout = config.layout
     self.tracked_bodies = tracked_bodies(config.robot)
     super().__init__(make_env_cfg(config), device=device, render_mode=render_mode)
     self.robot = self.scene["robot"]
-    self.library = self._load_library(config, device)
     if tuple(self.action_manager.get_term("joint_pos").target_names) != tuple(
       self.robot.joint_names
     ):
@@ -40,6 +44,17 @@ class SuperMimicEnv(ManagerBasedRlEnv):
     self.body_ids = torch.tensor(
       [self.robot.body_names.index(b) for b in self.tracked_bodies], device=device
     )
+    # A supplied library is the reference source. Each environment still owns
+    # its simulator, trajectory indices, history and reset sampler.
+    if library is None:
+      library = self._load_library(config, device)
+    elif (
+      library.joint_names != tuple(self.robot.joint_names)
+      or library.body_names != tuple(self.tracked_bodies)
+      or library.lengths.device != self.body_ids.device
+    ):
+      raise ValueError("Shared motion library must match robot layout and device")
+    self.library = library
     foot_ids, _ = self.robot.find_geoms(FOOT_COLLISION_EXPR)
     if not foot_ids:
       raise ValueError("G1 foot collision geometry not found")

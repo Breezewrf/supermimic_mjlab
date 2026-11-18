@@ -298,6 +298,11 @@ batches. Each clip stops contributing rewards and errors at its first completion
 or failure, including when its environment automatically resets. Playback, viewer
 and video use one environment. Reports record `evaluation_num_envs`; training also
 reports `evaluation_wall_seconds`, including environment initialization.
+Training and evaluation share the device motion library and reference FK cache.
+Each environment pool owns its simulator, trajectories, and sampler.
+For large libraries, `--eval-num-envs 4096` reduces the number of batches.
+The second simulator pool needs additional device memory. Compare the reported
+evaluation wall time across pool sizes.
 Returns are normalized by the maximum possible return for the complete clip, so early
 failure lowers the score. `--max-steps-per-clip` is for debugging; unfinished motions
 are marked in the report. `policy_best.pt` may still contain the initial policy; use the

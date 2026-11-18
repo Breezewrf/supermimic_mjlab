@@ -152,9 +152,10 @@ class ParallelEvaluationTests(unittest.TestCase):
     before = torch.get_rng_state().clone()
     environments = []
 
-    def create(config, device):
+    def create(config, device, *, library):
       self.assertEqual(device, "cpu")
       env = VectorEnv(config.num_envs, mode="complete")
+      env.shared_library = library
       env.close = lambda: environments.append("closed")
       environments.append(env)
       torch.rand(10)
@@ -168,9 +169,21 @@ class ParallelEvaluationTests(unittest.TestCase):
       report = train.evaluate_actor(
         actor, Path("manifest.json"), OnlineConfig(), "cpu", max_envs=3
       )
+      shared_library = range(5000)
+      train.evaluate_actor(
+        actor,
+        Path("manifest.json"),
+        OnlineConfig(),
+        "cpu",
+        max_envs=4096,
+        library=shared_library,
+      )
     self.assertEqual(report["normalized_return"], 0.8)
     self.assertEqual(environments[0].num_envs, 3)
     self.assertEqual(environments[1], "closed")
+    self.assertEqual(environments[2].num_envs, 4096)
+    self.assertIs(environments[2].shared_library, shared_library)
+    self.assertEqual(environments[3], "closed")
     count.assert_called_once_with(Path("manifest.json"), (), 3)
     self.assertTrue(actor.training)
     torch.testing.assert_close(torch.get_rng_state(), before)
@@ -203,16 +216,30 @@ class ParallelSimulatorTests(unittest.TestCase):
           arrays[key] = arrays[key][:frames]
         np.savez(path, **arrays)
       manifest.write_text(json.dumps(metadata))
-      reports = []
-      for width in (1, 2):
-        env = SuperMimicEnv(
-          FoundationConfig(manifest=manifest, num_envs=width, episode_length_s=1e9),
+      serial_env = SuperMimicEnv(
+        FoundationConfig(manifest=manifest, num_envs=1, episode_length_s=1e9),
+        device="cpu",
+      )
+      self.addCleanup(serial_env.close)
+      before_frames = serial_env.frame_id.clone()
+
+      def unexpected_load(*_args):
+        self.fail("Evaluation reloaded the shared motion library")
+
+      with patch.object(SuperMimicEnv, "_load_library", side_effect=unexpected_load):
+        parallel_env = SuperMimicEnv(
+          FoundationConfig(manifest=manifest, num_envs=2, episode_length_s=1e9),
           device="cpu",
+          library=serial_env.library,
         )
-        try:
-          reports.append(evaluate(env))
-        finally:
-          env.close()
+      try:
+        self.assertIs(parallel_env.library, serial_env.library)
+        self.assertIsNot(parallel_env.sampler, serial_env.sampler)
+        parallel_report = evaluate(parallel_env)
+      finally:
+        parallel_env.close()
+      torch.testing.assert_close(serial_env.frame_id, before_frames)
+      reports = [evaluate(serial_env), parallel_report]
       for serial, parallel in zip(reports[0]["motions"], reports[1]["motions"]):
         for key in (
           "steps",
