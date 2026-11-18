@@ -55,6 +55,8 @@ class FoundationConfig:
   robot: str = "g1_29dof"
   motion: Path | None = None
   motion_dir: Path | None = None
+  motion_load_workers: int = 1
+  motion_load_progress: bool = False
 
   @property
   def observation_dim(self) -> int:

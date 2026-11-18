@@ -1,14 +1,20 @@
 """Name-mapped reference motions from a manifest, NPZ file, or directory."""
 
 import json
+import multiprocessing
+import sys
+from collections import deque
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 from pathlib import Path
 
 import numpy as np
 import torch
 from torch import Tensor
+from tqdm import tqdm
 
 from ..config.task_cfg import STEP_DT
-from .motion_sources import motion_entries, select_motion_entries
+from .motion_sources import MotionEntry, motion_entries, select_motion_entries
 
 MOTION_FIELDS = (
   "joint_pos",
@@ -18,6 +24,116 @@ MOTION_FIELDS = (
   "body_lin_vel_w",
   "body_ang_vel_w",
 )
+
+
+def _read_clip(
+  entry: MotionEntry, *, joint_names, body_names, compact, require_frame_count
+):
+  selected = {}
+  joints = len(joint_names)
+  columns = {
+    "body_pos_w": slice(0, 3),
+    "body_quat_w": slice(3, 7),
+    "joint_pos": slice(7, 7 + joints),
+    "body_lin_vel_w": slice(7 + joints, 10 + joints),
+    "body_ang_vel_w": slice(10 + joints, 13 + joints),
+    "joint_vel": slice(13 + joints, 13 + 2 * joints),
+  }
+  name = entry.name
+  with np.load(entry.path, allow_pickle=False) as source:
+    required = set(MOTION_FIELDS) | {
+      "fps",
+      "quaternion_order",
+      "joint_names",
+      "body_names",
+    }
+    missing = required - set(source.files)
+    if missing:
+      raise ValueError(
+        f"Motion {name} lacks required fields: {', '.join(sorted(missing))}"
+      )
+    joint_pos = source["joint_pos"]
+    if joint_pos.ndim != 2:
+      raise ValueError(f"Invalid joint_pos array in {name}")
+    if source["quaternion_order"].item() != "wxyz" or not np.isclose(
+      source["fps"].item(), 50
+    ):
+      raise ValueError(f"Invalid motion frequency/quaternion order: {name}")
+    stored_joints, stored_bodies = (
+      source["joint_names"].tolist(),
+      source["body_names"].tolist(),
+    )
+    if len(set(stored_joints)) != len(stored_joints) or set(stored_joints) != set(
+      joint_names
+    ):
+      raise ValueError(f"Joint names do not match robot: {name}")
+    if len(set(stored_bodies)) != len(stored_bodies) or not set(body_names).issubset(
+      stored_bodies
+    ):
+      raise ValueError(f"Body names do not match robot: {name}")
+    joint_ids = [stored_joints.index(j) for j in joint_names]
+    body_ids = [stored_bodies.index(b) for b in body_names]
+    if require_frame_count and entry.frames is None:
+      raise ValueError(f"Manifest lacks frame count: {name}")
+    count = int(entry.frames) if entry.frames is not None else joint_pos.shape[0]
+    if count < 2:
+      raise ValueError(f"Clip must have at least two frames: {name}")
+    state = np.empty((count, 13 + 2 * joints), dtype=np.float32) if compact else None
+    for key in MOTION_FIELDS:
+      raw = joint_pos if key == "joint_pos" else source[key]
+      expected = (
+        (count, len(stored_joints))
+        if key.startswith("joint_")
+        else (
+          count,
+          len(stored_bodies),
+          4 if key == "body_quat_w" else 3,
+        )
+      )
+      if raw.shape != expected or not np.isfinite(raw).all():
+        raise ValueError(f"Invalid {key} array in {name}: {raw.shape}")
+      if key == "body_quat_w" and not np.allclose(
+        np.linalg.norm(raw, axis=-1), 1, atol=1e-5
+      ):
+        raise ValueError(f"Non-unit body quaternion in {name}")
+      if state is None:
+        indices = joint_ids if key.startswith("joint_") else body_ids
+        selected[key] = raw[:, indices].astype(np.float32, order="C", copy=False)
+      else:
+        state[:, columns[key]] = (
+          raw[:, joint_ids] if key.startswith("joint_") else raw[:, body_ids[0]]
+        )
+  return count, state if compact else selected
+
+
+def _read_batch(read_clip, entries):
+  return [read_clip(entry) for entry in entries]
+
+
+def _read_clips(entries, read_clip, workers):
+  if workers == 1 or len(entries) == 1:
+    yield from map(read_clip, entries)
+    return
+
+  batch_size = min(16, (len(entries) + workers - 1) // workers)
+  batches = (entries[i : i + batch_size] for i in range(0, len(entries), batch_size))
+  # Spawn avoids forking the parent's CUDA runtime. Bound pending results and
+  # consume in manifest order so clip IDs remain stable.
+  with ProcessPoolExecutor(
+    max_workers=workers, mp_context=multiprocessing.get_context("spawn")
+  ) as pool:
+    pending = deque()
+    for _ in range(2 * workers):
+      batch = next(batches, None)
+      if batch is None:
+        break
+      pending.append(pool.submit(_read_batch, read_clip, batch))
+    while pending:
+      loaded = pending.popleft().result()
+      batch = next(batches, None)
+      if batch is not None:
+        pending.append(pool.submit(_read_batch, read_clip, batch))
+      yield from loaded
 
 
 class MotionLibrary:
@@ -33,9 +149,13 @@ class MotionLibrary:
     motion_dir: Path | None = None,
     storage: str = "full",
     fk_cache_frames: int = 262144,
+    load_workers: int = 1,
+    show_progress: bool = False,
   ):
     if storage not in ("full", "compact") or fk_cache_frames < 0:
       raise ValueError("Invalid motion storage or FK cache capacity")
+    if load_workers < 1:
+      raise ValueError("Motion loading needs at least one worker")
     self.storage = storage
     self.compact_state = None
     if manifest is not None:
@@ -81,92 +201,38 @@ class MotionLibrary:
           with np.load(entry.path, allow_pickle=False) as source:
             total += source["joint_pos"].shape[0]
       compact_cpu = torch.empty((total, 13 + 2 * len(joint_names)))
-    for entry in entries:
-      name = entry.name
-      with np.load(entry.path, allow_pickle=False) as source:
-        required = set(MOTION_FIELDS) | {
-          "fps",
-          "quaternion_order",
-          "joint_names",
-          "body_names",
-        }
-        missing = required - set(source.files)
-        if missing:
-          raise ValueError(
-            f"Motion {name} lacks required fields: {', '.join(sorted(missing))}"
-          )
-        if source["joint_pos"].ndim != 2:
-          raise ValueError(f"Invalid joint_pos array in {name}")
-        if source["quaternion_order"].item() != "wxyz" or not np.isclose(
-          source["fps"].item(), 50
-        ):
-          raise ValueError(f"Invalid motion frequency/quaternion order: {name}")
-        stored_joints, stored_bodies = (
-          source["joint_names"].tolist(),
-          source["body_names"].tolist(),
-        )
-        if len(set(stored_joints)) != len(stored_joints) or set(stored_joints) != set(
-          joint_names
-        ):
-          raise ValueError(f"Joint names do not match robot: {name}")
-        if len(set(stored_bodies)) != len(stored_bodies) or not set(
-          body_names
-        ).issubset(stored_bodies):
-          raise ValueError(f"Body names do not match robot: {name}")
-        joint_ids = [stored_joints.index(j) for j in joint_names]
-        body_ids = [stored_bodies.index(b) for b in body_names]
-        if manifest is not None and entry.frames is None:
-          raise ValueError(f"Manifest lacks frame count: {name}")
-        count = (
-          int(entry.frames)
-          if entry.frames is not None
-          else source["joint_pos"].shape[0]
-        )
-        if count < 2:
-          raise ValueError(f"Clip must have at least two frames: {name}")
-        for key in MOTION_FIELDS:
-          raw = source[key]
-          expected = (
-            (count, len(stored_joints))
-            if key.startswith("joint_")
-            else (
-              count,
-              len(stored_bodies),
-              4 if key == "body_quat_w" else 3,
-            )
-          )
-          if raw.shape != expected or not np.isfinite(raw).all():
-            raise ValueError(f"Invalid {key} array in {name}: {raw.shape}")
-          if key == "body_quat_w" and not np.allclose(
-            np.linalg.norm(raw, axis=-1), 1, atol=1e-5
-          ):
-            raise ValueError(f"Non-unit body quaternion in {name}")
-          if compact_cpu is None:
-            selected = raw[
-              :, joint_ids if key.startswith("joint_") else body_ids
-            ].copy()
-            arrays[key].append(torch.from_numpy(selected).float())
-          else:
-            joints = len(joint_names)
-            columns = {
-              "body_pos_w": slice(0, 3),
-              "body_quat_w": slice(3, 7),
-              "joint_pos": slice(7, 7 + joints),
-              "body_lin_vel_w": slice(7 + joints, 10 + joints),
-              "body_ang_vel_w": slice(10 + joints, 13 + joints),
-              "joint_vel": slice(13 + joints, 13 + 2 * joints),
-            }
-            selected = (
-              raw[:, joint_ids]
-              if key.startswith("joint_")
-              else raw[:, stored_bodies.index("pelvis")]
-            )
-            compact_cpu[cursor : cursor + count, columns[key]] = torch.from_numpy(
-              selected.copy()
-            )
-      cursor += count
-      lengths.append(count)
-      self.names.append(name)
+    read_clip = partial(
+      _read_clip,
+      joint_names=joint_names,
+      body_names=body_names,
+      compact=storage == "compact",
+      require_frame_count=manifest is not None,
+    )
+    with tqdm(
+      total=len(entries),
+      desc=f"Loading motions ({storage}, {min(load_workers, len(entries))} worker(s))",
+      unit="clip",
+      file=sys.stderr,
+      mininterval=2,
+      disable=not show_progress,
+    ) as progress:
+      loaded = _read_clips(entries, read_clip, min(load_workers, len(entries)))
+      for entry, (count, data) in zip(entries, loaded, strict=True):
+        if compact_cpu is None:
+          for key, value in data.items():
+            arrays[key].append(torch.from_numpy(value))
+        else:
+          compact_cpu[cursor : cursor + count].copy_(torch.from_numpy(data))
+        cursor += count
+        lengths.append(count)
+        self.names.append(entry.name)
+        progress.update()
+    if show_progress:
+      print(
+        f"Finalizing {cursor:,} motion frames on {device}...",
+        file=sys.stderr,
+        flush=True,
+      )
     self.lengths = torch.tensor(lengths, dtype=torch.long, device=device)
     self.offsets = self.lengths.cumsum(0) - self.lengths
     if compact_cpu is None:

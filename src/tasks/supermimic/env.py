@@ -87,6 +87,8 @@ class SuperMimicEnv(ManagerBasedRlEnv):
       motion_dir=config.motion_dir,
       storage=config.motion_storage,
       fk_cache_frames=config.motion_fk_cache_frames,
+      load_workers=config.motion_load_workers,
+      show_progress=config.motion_load_progress,
     )
 
   def _initialize_task(self):
