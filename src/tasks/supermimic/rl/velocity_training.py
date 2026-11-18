@@ -534,9 +534,14 @@ class VelocityTrainer(OnlineTrainer):
       )
     # Base resume expects one replay row per environment; mixed replay only has
     # the motion half, so restore the common pieces explicitly here.
-    if ({"robot": "g1_29dof", **saved["config"]}) != asdict(self.config) or saved[
-      "clips"
-    ] != self.env.library.names:
+    if (
+      {
+        "robot": "g1_29dof",
+        "motion_storage": "full",
+        "motion_fk_cache_frames": 262144,
+        **saved["config"],
+      }
+    ) != asdict(self.config) or saved["clips"] != self.env.library.names:
       raise ValueError("Training configuration or motion library mismatch")
     validate_robot_metadata(saved["robot_metadata"], self.metadata)
     if saved["simulation"] != self.simulation_parameters:

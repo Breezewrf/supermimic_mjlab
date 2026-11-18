@@ -36,6 +36,8 @@ STEP_DT = 0.02
 @dataclass(frozen=True)
 class FoundationConfig:
   manifest: Path | None = None
+  motion_storage: str = "full"
+  motion_fk_cache_frames: int = 262144
   clips: tuple[str, ...] = ()
   num_envs: int = 4
   seed: int = 0
@@ -65,7 +67,14 @@ class FoundationConfig:
     return robot_layout(self.robot)
 
   def __post_init__(self):
-    if sum(value is not None for value in (self.manifest, self.motion, self.motion_dir)) > 1:
+    if (
+      self.motion_storage not in ("full", "compact") or self.motion_fk_cache_frames < 0
+    ):
+      raise ValueError("Invalid motion storage or FK cache capacity")
+    if (
+      sum(value is not None for value in (self.manifest, self.motion, self.motion_dir))
+      > 1
+    ):
       raise ValueError("Select exactly one motion source")
     if self.manifest is None and self.motion is None and self.motion_dir is None:
       object.__setattr__(self, "manifest", self.layout.manifest)

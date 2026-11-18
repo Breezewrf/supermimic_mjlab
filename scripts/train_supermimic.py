@@ -58,6 +58,8 @@ def evaluate_actor(actor, manifest, config, device, limit=None, max_envs=64):
       FoundationConfig(
         robot=config.robot,
         manifest=manifest,
+        motion_storage=config.motion_storage,
+        motion_fk_cache_frames=config.motion_fk_cache_frames,
         clips=config.clips,
         num_envs=evaluation_env_count(manifest, config.clips, max_envs),
         seed=config.seed,
@@ -291,6 +293,8 @@ def main():
         FoundationConfig.training(
           robot=args.robot,
           manifest=args.manifest,
+          motion_storage=config.motion_storage,
+          motion_fk_cache_frames=config.motion_fk_cache_frames,
           num_envs=config.num_envs,
           clips=config.clips,
           seed=config.seed,

@@ -433,3 +433,32 @@ from src.tasks.supermimic.data.replay_buffer import ReplayBuffer
 from src.tasks.supermimic.models.world_model import WorldModel
 from src.tasks.supermimic.rl.online_training import OnlineTrainer
 ```
+
+## Large motion libraries: compact storage and FK caching
+
+Add `--motion-storage compact --motion-fk-cache-frames 262144` to training,
+evaluation or playback commands. Existing manifests and NPZ files require no
+conversion. The default remains `full`.
+
+Compact storage keeps FP32 root pose/twist and joint positions/velocities on the
+training device: 71 values for 29DoF, 59 for 23DoF. At 47.3 million frames the
+29DoF arrays require approximately 12.51 GiB, versus 42.29 GiB for the existing
+14-body full representation. Simulation, replay, networks, temporary tensors
+and evaluation environments need additional memory.
+
+Reference body poses and velocities are reconstructed without gradients using
+G1 FK. Requests deduplicate frame indices, reuse a bounded device cache and
+compute missing frames in chunks of at most 8192. Imagined reference windows
+are still fetched together and reused as views. The default cache holds up to
+262144 frames (approximately 182 MiB for 14 bodies, plus tags), capped by the
+library length. Set the capacity to zero to disable caching. Cache contents are
+not checkpointed; training configuration preserves storage and cache settings.
+
+Validation used a 16 GiB RTX 4090 Laptop GPU, PyTorch 2.14.1+cu130 and eager FP32.
+Small one-iteration CPU/GPU training, limited evaluation and checkpoint saving
+passed; this does not establish convergence. One real 6574-frame LAFAN clip
+matched full body states within 1e-5 absolute error. A warm-cache CUDA lookup
+microbenchmark (4096 fixed starts, 42 frames each, 3 warmups, 10 synchronized
+repeats) measured about 0.52 ms full, 8.28 ms compact without cache and 0.77 ms
+compact with cache. The clip fits entirely in cache; these are not full-library
+hit rates or end-to-end training timings. Full BONES-SEED remains untested here.

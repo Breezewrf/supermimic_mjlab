@@ -5,6 +5,18 @@ from .morphology import ROBOTS, robot_layout
 
 def add_robot_argument(parser):
   parser.add_argument(
+    "--motion-storage",
+    choices=("full", "compact"),
+    default=None,
+    help="Reference storage (default: full, or saved training setting)",
+  )
+  parser.add_argument(
+    "--motion-fk-cache-frames",
+    type=int,
+    default=None,
+    help="Compact reference FK cache capacity (default: 262144; 0 disables)",
+  )
+  parser.add_argument(
     "--robot",
     choices=ROBOTS,
     help="Robot variant (default: checkpoint variant, otherwise g1_29dof)",

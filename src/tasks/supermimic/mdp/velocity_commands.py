@@ -22,11 +22,9 @@ class VelocityCommands:
     self.cfg, self.library = cfg, library
     self.reference_commands = None
     if library is not None:
-      q = library.data["body_quat_w"][:, 0]
-      velocity = quat_inverse_apply(yaw_quat(q), library.data["body_lin_vel_w"][:, 0])[
-        :, :2
-      ]
-      commands = torch.cat((velocity, library.data["body_ang_vel_w"][:, 0, 2:3]), -1)
+      _, q, root_linear, root_angular = library.root_fields()
+      velocity = quat_inverse_apply(yaw_quat(q), root_linear)[:, :2]
+      commands = torch.cat((velocity, root_angular[:, 2:3]), -1)
       clips = []
       for offset, length in zip(library.offsets.tolist(), library.lengths.tolist()):
         # Replicate endpoints; never blend samples from different clips.

@@ -148,12 +148,20 @@ def main():
       raise ValueError("Expected a velocity training checkpoint")
     if args.iterations < saved["iteration"]:
       argument_parser.error("--iterations cannot be below the saved iteration")
-    cfg = OnlineConfig(**saved["config"])
+    restored = asdict(OnlineConfig()) | saved["config"]
+    for key in ("motion_storage", "motion_fk_cache_frames"):
+      if getattr(args, key) is not None and getattr(args, key) != restored[key]:
+        argument_parser.error(f"Resume requires original {key}")
+    cfg = OnlineConfig(**restored)
     velocity = VelocityConfig(**saved["velocity_config"])
     stage = saved["stage"]
   else:
     names = {f.name for f in fields(OnlineConfig)}
-    values = {key: value for key, value in vars(args).items() if key in names}
+    values = {
+      key: value
+      for key, value in vars(args).items()
+      if key in names and value is not None
+    }
     for key in ("clips", "actor_dims", "world_dims", "critic_dims"):
       values[key] = tuple(values[key])
     values.update(
@@ -240,6 +248,8 @@ def main():
         FoundationConfig.training(
           robot=args.robot,
           manifest=args.manifest,
+          motion_storage=cfg.motion_storage,
+          motion_fk_cache_frames=cfg.motion_fk_cache_frames,
           clips=cfg.clips,
           num_envs=cfg.num_envs,
           seed=cfg.seed,

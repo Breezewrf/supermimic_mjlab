@@ -370,3 +370,37 @@ from src.tasks.supermimic.data.replay_buffer import ReplayBuffer
 from src.tasks.supermimic.models.world_model import WorldModel
 from src.tasks.supermimic.rl.online_training import OnlineTrainer
 ```
+
+## 大规模动作库：紧凑加载与 FK 缓存
+
+现有 manifest 和 NPZ 无需重新转换。在原训练命令中增加：
+
+```bash
+--manifest src/assets/motions/bone-seed/manifest.json \
+--motion-storage compact --motion-fk-cache-frames 262144
+```
+
+默认 `--motion-storage full` 保留原加载方式。`compact` 使用 FP32 root position、
+root quaternion、joint position、root linear/angular velocity 和 joint velocity；
+29DoF 共 71 维（284 bytes/frame），23DoF 共 59 维。以 4730 万帧计算，
+29DoF 动作数组约 12.51 GiB；原 14 个 tracked bodies 的全身格式约 42.29 GiB。
+这些数字不含仿真、Replay、网络、临时张量及评估环境。
+
+紧凑数组仍整库驻留训练设备；CPU 加载时逐文件校验并填入预分配数组。
+参考刚体位置、四元数、线速度、角速度使用现有 G1 FK 重建，不参与反向传播。
+请求内先去重，再复用固定容量帧缓存；缺失帧按最多 8192 帧分块计算。
+同一条想象轨迹的参考窗口仍批量读取、通过视图复用，不逐时间步重新计算。
+
+`--motion-fk-cache-frames` 控制缓存上限，实际容量不超过动作总帧数；默认 262144，
+14 个 tracked bodies 的 FP32 缓存主体约 182 MiB，另有帧号标签。
+设置为 `0` 可关闭缓存进行对照。缓存槽冲突会替换旧帧，不影响结果正确性。
+缓存不会自动增长，也不写入 checkpoint；训练配置会记录加载模式和缓存容量，
+续训使用原设置。评估/播放也可显式传入这两个参数。
+
+验证记录：RTX 4090 Laptop GPU（16 GiB），PyTorch 2.14.1+cu130，eager FP32。
+CPU 和 GPU 上均完成小规模一轮在线训练、受限评估及 checkpoint 保存；
+这属于功能检查，不是收敛验证。真实 LAFAN 单片段 6574 帧对照中，各刚体状态
+最大绝对误差低于 1e-5。固定 4096 个起点、每次请求 42 帧、预热 3 次后重复
+10 次并同步 CUDA 的微基准：full 约 0.52 ms，compact 无缓存约 8.28 ms，
+compact 有缓存约 0.77 ms。单片段可完全缓存，这些数字不能代表全量 BONES-SEED
+缓存命中率或整体训练耗时；服务器全量数据尚未验证。
