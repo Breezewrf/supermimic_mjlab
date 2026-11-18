@@ -440,21 +440,24 @@ Add `--motion-storage compact --motion-fk-cache-frames 262144` to training,
 evaluation or playback commands. Existing manifests and NPZ files require no
 conversion. The default remains `full`.
 
-Compact storage keeps FP32 root pose/twist and joint positions/velocities on the
-training device: 71 values for 29DoF, 59 for 23DoF. At 47.3 million frames the
-29DoF arrays require approximately 12.51 GiB, versus 42.29 GiB for the existing
-14-body full representation. Simulation, replay, networks, temporary tensors
-and evaluation environments need additional memory.
+Compact storage keeps root position in FP32 and stores root orientation,
+root velocities, joint positions and joint velocities in FP16 on the training
+device. This uses 148 bytes per frame for 29DoF and 124 for 23DoF. At 47.3 million
+frames the 29DoF arrays take about 6.52 GiB. The 14-body full representation
+takes about 42.29 GiB. Simulation, replay, networks, temporary tensors and
+evaluation environments need additional memory.
 
-Reference body poses and velocities are reconstructed without gradients using
-G1 FK. Requests deduplicate frame indices, reuse a bounded device cache and
+Frame reads use FP32 for computation and renormalize quantized root quaternions.
+G1 FK reconstructs reference body poses and velocities without gradients.
+Requests deduplicate frame indices, reuse a bounded device cache and
 compute missing frames in chunks of at most 8192. Imagined reference windows
 are still fetched together and reused as views. The default cache holds up to
 262144 frames (approximately 182 MiB for 14 bodies, plus tags), capped by the
 library length. Set the capacity to zero to disable caching. Cache contents are
 not checkpointed; training configuration preserves storage and cache settings.
 
-Validation used a 16 GiB RTX 4090 Laptop GPU, PyTorch 2.14.1+cu130 and eager FP32.
+Earlier validation of all-FP32 compact storage used a 16 GiB RTX 4090 Laptop
+GPU, PyTorch 2.14.1+cu130 and eager FP32.
 Small one-iteration CPU/GPU training, limited evaluation and checkpoint saving
 passed; this does not establish convergence. One real 6574-frame LAFAN clip
 matched full body states within 1e-5 absolute error. A warm-cache CUDA lookup

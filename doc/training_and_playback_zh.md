@@ -380,13 +380,15 @@ from src.tasks.supermimic.rl.online_training import OnlineTrainer
 --motion-storage compact --motion-fk-cache-frames 262144
 ```
 
-默认 `--motion-storage full` 保留原加载方式。`compact` 使用 FP32 root position、
-root quaternion、joint position、root linear/angular velocity 和 joint velocity；
-29DoF 共 71 维（284 bytes/frame），23DoF 共 59 维。以 4730 万帧计算，
-29DoF 动作数组约 12.51 GiB；原 14 个 tracked bodies 的全身格式约 42.29 GiB。
+默认 `--motion-storage full` 使用全身 FP32 数组。`compact` 的 3 维 root
+position 用 FP32 存储，root quaternion、root linear/angular velocity 和关节位置、
+速度用 FP16 存储。29DoF 共 71 维（148 bytes/frame），23DoF 共 59 维
+（124 bytes/frame）。以 4730 万帧计算，29DoF 紧凑动作数组约 6.52 GiB，
+14 个 tracked bodies 的全身格式约 42.29 GiB。
 这些数字不含仿真、Replay、网络、临时张量及评估环境。
 
-紧凑数组仍整库驻留训练设备；CPU 加载时逐文件校验并填入预分配数组。
+紧凑数组整库驻留训练设备；CPU 加载时逐文件校验并填入预分配数组。
+取帧后以 FP32 计算，并对量化后的 root quaternion 重新归一化。
 参考刚体位置、四元数、线速度、角速度使用现有 G1 FK 重建，不参与反向传播。
 请求内先去重，再复用固定容量帧缓存；缺失帧按最多 8192 帧分块计算。
 同一条想象轨迹的参考窗口仍批量读取、通过视图复用，不逐时间步重新计算。
@@ -397,7 +399,8 @@ root quaternion、joint position、root linear/angular velocity 和 joint veloci
 缓存不会自动增长，也不写入 checkpoint；训练配置会记录加载模式和缓存容量，
 续训使用原设置。评估/播放也可显式传入这两个参数。
 
-验证记录：RTX 4090 Laptop GPU（16 GiB），PyTorch 2.14.1+cu130，eager FP32。
+历史验证使用全 FP32 的紧凑存储，设备为 RTX 4090 Laptop GPU（16 GiB），
+PyTorch 2.14.1+cu130，eager FP32。
 CPU 和 GPU 上均完成小规模一轮在线训练、受限评估及 checkpoint 保存；
 这属于功能检查，不是收敛验证。真实 LAFAN 单片段 6574 帧对照中，各刚体状态
 最大绝对误差低于 1e-5。固定 4096 个起点、每次请求 42 帧、预热 3 次后重复

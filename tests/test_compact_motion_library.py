@@ -37,25 +37,36 @@ class CompactMotionTests(unittest.TestCase):
           motion = torch.tensor([[0, 1, 0], [1, 0, 1]])
           frame = torch.tensor([[63, 71, 0], [4, 8, 4]])
           expected = full.get_future(motion, frame, 12)
+          torch.testing.assert_close(
+            compact.compact_root_pos, full.root_fields()[0], rtol=0, atol=0
+          )
           for _ in range(2):
             actual = compact.get_future(motion, frame, 12)
             for key in expected:
-              torch.testing.assert_close(
-                actual[key], expected[key], atol=2e-5, rtol=2e-5
-              )
+              if key in ("joint_pos", "joint_vel"):
+                torch.testing.assert_close(actual[key], expected[key].half().float())
+              else:
+                torch.testing.assert_close(
+                  actual[key], expected[key], atol=2e-4, rtol=2e-4
+                )
               self.assertFalse(actual[key].requires_grad)
           torch.testing.assert_close(
             compact.root_state(motion, frame),
             full.root_state(motion, frame),
+            atol=3e-5,
+            rtol=2e-5,
           )
           torch.testing.assert_close(
             VelocityCommands(VelocityConfig(), compact).reference_commands,
             VelocityCommands(VelocityConfig(), full).reference_commands,
+            atol=3e-5,
+            rtol=2e-5,
           )
           self.assertFalse(compact.data)
+          self.assertEqual(compact.compact_root_pos.dtype, torch.float32)
+          self.assertEqual(compact.compact_rest.dtype, torch.float16)
           self.assertEqual(
-            compact.compact_state.shape[1],
-            13 + 2 * len(metadata["joint_names"]),
+            compact.compact_rest.shape[1], 10 + 2 * len(metadata["joint_names"])
           )
         compact = MotionLibrary(*args, storage="compact", fk_cache_frames=200)
         with patch.object(
@@ -110,11 +121,11 @@ class CompactMotionTests(unittest.TestCase):
     states[:, 7:36] = metadata["default_q"]
     cache = ReferenceFKCache(fk, 32, "cpu")
     with patch.object(fk, "forward", wraps=fk.forward) as call:
-      result = cache.get(torch.arange(8200), states)
+      result = cache.get(torch.arange(8200), states[:, :3], states[:, 3:].half())
       self.assertEqual(call.call_count, 2)
       self.assertTrue(
         all(args.args[0].shape[0] <= 8192 for args in call.call_args_list)
       )
-    expected = fk(states)
+    expected = fk(torch.cat((states[:, :3], states[:, 3:].half().float()), dim=-1))
     for key in expected:
       torch.testing.assert_close(result[key], expected[key])

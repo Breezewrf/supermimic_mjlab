@@ -6,7 +6,7 @@ from torch.nn import functional as F
 
 from ..config.task_cfg import STEP_DT
 from ..config.velocity_cfg import VelocityConfig
-from .state import quat_inverse_apply, yaw_quat
+from .state import quat_inverse_apply, quat_normalize, yaw_quat
 
 COMMAND_FIELDS = (
   "command",
@@ -23,9 +23,17 @@ class VelocityCommands:
     self.reference_commands = None
     if library is not None:
       _, q, root_linear, root_angular = library.root_fields()
-      velocity = quat_inverse_apply(yaw_quat(q), root_linear)[:, :2]
-      commands = torch.cat((velocity, root_angular[:, 2:3]), -1)
-      clips = []
+      commands = torch.empty((len(q), 3), device=q.device, dtype=torch.float32)
+      # Convert only a batch of root fields at a time, including for large libraries.
+      for start in range(0, len(q), 65536):
+        frames = slice(start, start + 65536)
+        rotation = q[frames]
+        if rotation.dtype == torch.float16:
+          rotation = quat_normalize(rotation.float())
+        commands[frames, :2] = quat_inverse_apply(
+          yaw_quat(rotation), root_linear[frames].float()
+        )[:, :2]
+        commands[frames, 2] = root_angular[frames, 2]
       for offset, length in zip(library.offsets.tolist(), library.lengths.tolist()):
         # Replicate endpoints; never blend samples from different clips.
         padded = F.pad(
@@ -33,8 +41,8 @@ class VelocityCommands:
           (12, 12),
           mode="replicate",
         )
-        clips.append(F.avg_pool1d(padded, 25, stride=1)[0].T)
-      self.reference_commands = torch.cat(clips)
+        commands[offset : offset + length] = F.avg_pool1d(padded, 25, stride=1)[0].T
+      self.reference_commands = commands
 
   def empty(self, count: int, device) -> dict[str, Tensor]:
     return {

@@ -14,6 +14,7 @@ from torch import Tensor
 from tqdm import tqdm
 
 from ..config.task_cfg import STEP_DT
+from ..mdp.state import quat_normalize
 from .motion_sources import MotionEntry, motion_entries, select_motion_entries
 
 MOTION_FIELDS = (
@@ -31,13 +32,13 @@ def _read_clip(
 ):
   selected = {}
   joints = len(joint_names)
+  # Offsets within the half-precision portion, after the three FP32 coordinates.
   columns = {
-    "body_pos_w": slice(0, 3),
-    "body_quat_w": slice(3, 7),
-    "joint_pos": slice(7, 7 + joints),
-    "body_lin_vel_w": slice(7 + joints, 10 + joints),
-    "body_ang_vel_w": slice(10 + joints, 13 + joints),
-    "joint_vel": slice(13 + joints, 13 + 2 * joints),
+    "body_quat_w": slice(0, 4),
+    "joint_pos": slice(4, 4 + joints),
+    "body_lin_vel_w": slice(4 + joints, 7 + joints),
+    "body_ang_vel_w": slice(7 + joints, 10 + joints),
+    "joint_vel": slice(10 + joints, 10 + 2 * joints),
   }
   name = entry.name
   with np.load(entry.path, allow_pickle=False) as source:
@@ -78,7 +79,8 @@ def _read_clip(
     count = int(entry.frames) if entry.frames is not None else joint_pos.shape[0]
     if count < 2:
       raise ValueError(f"Clip must have at least two frames: {name}")
-    state = np.empty((count, 13 + 2 * joints), dtype=np.float32) if compact else None
+    if compact:
+      rest = np.empty((count, 10 + 2 * joints), dtype=np.float16)
     for key in MOTION_FIELDS:
       raw = joint_pos if key == "joint_pos" else source[key]
       expected = (
@@ -96,14 +98,19 @@ def _read_clip(
         np.linalg.norm(raw, axis=-1), 1, atol=1e-5
       ):
         raise ValueError(f"Non-unit body quaternion in {name}")
-      if state is None:
+      if not compact:
         indices = joint_ids if key.startswith("joint_") else body_ids
         selected[key] = raw[:, indices].astype(np.float32, order="C", copy=False)
+      elif key == "body_pos_w":
+        root_pos = np.ascontiguousarray(raw[:, body_ids[0]], dtype=np.float32)
       else:
-        state[:, columns[key]] = (
-          raw[:, joint_ids] if key.startswith("joint_") else raw[:, body_ids[0]]
-        )
-  return count, state if compact else selected
+        values = raw[:, joint_ids] if key.startswith("joint_") else raw[:, body_ids[0]]
+        with np.errstate(over="ignore"):
+          target = rest[:, columns[key]]
+          target[:] = values
+        if not np.isfinite(target).all():
+          raise ValueError(f"Motion {name}: {key} exceeds FP16 storage range")
+  return count, (root_pos, rest) if compact else selected
 
 
 def _read_batch(read_clip, entries):
@@ -157,7 +164,8 @@ class MotionLibrary:
     if load_workers < 1:
       raise ValueError("Motion loading needs at least one worker")
     self.storage = storage
-    self.compact_state = None
+    self.compact_root_pos = None
+    self.compact_rest = None
     if manifest is not None:
       manifest = Path(manifest).resolve()
       metadata = json.loads(manifest.read_text())
@@ -200,7 +208,10 @@ class MotionLibrary:
         else:
           with np.load(entry.path, allow_pickle=False) as source:
             total += source["joint_pos"].shape[0]
-      compact_cpu = torch.empty((total, 13 + 2 * len(joint_names)))
+      compact_cpu = (
+        torch.empty((total, 3), dtype=torch.float32),
+        torch.empty((total, 10 + 2 * len(joint_names)), dtype=torch.float16),
+      )
     read_clip = partial(
       _read_clip,
       joint_names=joint_names,
@@ -222,7 +233,8 @@ class MotionLibrary:
           for key, value in data.items():
             arrays[key].append(torch.from_numpy(value))
         else:
-          compact_cpu[cursor : cursor + count].copy_(torch.from_numpy(data))
+          for target, values in zip(compact_cpu, data, strict=True):
+            target[cursor : cursor + count].copy_(torch.from_numpy(values))
         cursor += count
         lengths.append(count)
         self.names.append(entry.name)
@@ -239,12 +251,14 @@ class MotionLibrary:
       self.data = {key: torch.cat(value).to(device) for key, value in arrays.items()}
       data_bytes = sum(x.numel() * x.element_size() for x in self.data.values())
     else:
-      self.compact_state = compact_cpu.to(device)
+      self.compact_root_pos, self.compact_rest = (
+        part.to(device) for part in compact_cpu
+      )
       self.data = {}  # Full-body tensors must never be materialized for the whole library.
       self.fk_cache = ReferenceFKCache(
         self.kinematics, min(fk_cache_frames, cursor), device
       )
-      data_bytes = self.compact_state.numel() * self.compact_state.element_size()
+      data_bytes = sum(part.numel() * part.element_size() for part in compact_cpu)
     print(
       f"MotionLibrary: {len(lengths)} clips, {cursor} frames, {storage}, "
       f"{data_bytes / 2**30:.3f} GiB arrays; FK cache "
@@ -281,31 +295,36 @@ class MotionLibrary:
 
   @torch.no_grad()
   def _frames(self, indices: Tensor) -> dict[str, Tensor]:
-    if self.compact_state is None:
+    if self.compact_rest is None:
       return {key: value[indices] for key, value in self.data.items()}
-    state = self.compact_state[indices]
+    rest = self.compact_rest[indices]
     joints = len(self.joint_names)
     return {
-      "joint_pos": state[..., 7 : 7 + joints],
-      "joint_vel": state[..., 13 + joints :],
-      **self.fk_cache.get(indices, self.compact_state),
+      "joint_pos": rest[..., 4 : 4 + joints].float(),
+      "joint_vel": rest[..., 10 + joints :].float(),
+      **self.fk_cache.get(indices, self.compact_root_pos, self.compact_rest),
     }
 
   def root_fields(self) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    """Whole-library root views without reconstructing body states."""
-    if self.compact_state is None:
+    """Whole-library root views in storage precision, without FK or copies."""
+    if self.compact_rest is None:
       return tuple(self.data[key][:, 0] for key in MOTION_FIELDS[2:])
-    state, joints = self.compact_state, len(self.joint_names)
+    rest, joints = self.compact_rest, len(self.joint_names)
     return (
-      state[:, :3],
-      state[:, 3:7],
-      state[:, 7 + joints : 10 + joints],
-      state[:, 10 + joints : 13 + joints],
+      self.compact_root_pos,
+      rest[:, :4],
+      rest[:, 4 + joints : 7 + joints],
+      rest[:, 7 + joints : 10 + joints],
     )
 
   def root_state(self, motion_id: Tensor, frame_id: Tensor) -> Tensor:
     indices = self._indices(motion_id, frame_id)
-    return torch.cat([value[indices] for value in self.root_fields()], dim=-1)
+    pos, quat, linear, angular = (
+      value[indices].float() for value in self.root_fields()
+    )
+    if self.compact_rest is not None:
+      quat = quat_normalize(quat)
+    return torch.cat((pos, quat, linear, angular), dim=-1)
 
 
 class ReferenceFKCache:
@@ -314,12 +333,14 @@ class ReferenceFKCache:
   def __init__(self, kinematics, capacity: int, device):
     self.kinematics, self.capacity = kinematics, capacity
     self.tags = torch.full((capacity,), -1, dtype=torch.long, device=device)
-    self.values = torch.empty((capacity, len(kinematics.body_names), 13), device=device)
+    self.values = torch.empty(
+      (capacity, len(kinematics.body_names), 13), device=device, dtype=torch.float32
+    )
 
   @torch.no_grad()
-  def get(self, indices: Tensor, states: Tensor) -> dict[str, Tensor]:
+  def get(self, indices: Tensor, root_pos: Tensor, rest: Tensor) -> dict[str, Tensor]:
     unique, inverse = indices.flatten().unique(return_inverse=True)
-    result = states.new_empty((len(unique), len(self.kinematics.body_names), 13))
+    result = self.values.new_empty((len(unique), len(self.kinematics.body_names), 13))
     if self.capacity:
       slots = unique % self.capacity
       hit = self.tags[slots] == unique
@@ -330,7 +351,9 @@ class ReferenceFKCache:
     for chunk in missing.split(8192):
       if not chunk.numel():
         continue
-      bodies = self.kinematics(states[unique[chunk]])
+      frames = unique[chunk]
+      state = torch.cat((root_pos[frames], rest[frames].float()), dim=-1)
+      bodies = self.kinematics(state)
       result[chunk] = torch.cat([bodies[key] for key in MOTION_FIELDS[2:]], -1)
     if self.capacity and missing.numel():
       # Pick one deterministic winner per slot, with no duplicate-index writes.
