@@ -8,6 +8,7 @@ from dataclasses import asdict, fields
 from pathlib import Path
 
 import torch
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.tasks.supermimic.config.cli import add_robot_argument, resolve_robot_arguments
@@ -80,7 +81,13 @@ def evaluate_actor(
       device=device,
       library=library,
     )
-    return evaluate(env, actor, limit)
+    with tqdm(
+      total=len(env.library.names),
+      desc="Evaluating motions",
+      unit="clip",
+      file=sys.stderr,
+    ) as progress:
+      return evaluate(env, actor, limit, on_motion=lambda _: progress.update())
   finally:
     if env is not None:
       env.close()
