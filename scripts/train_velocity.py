@@ -12,7 +12,11 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.tasks.supermimic.config.cli import add_robot_argument, resolve_robot_arguments
+from src.tasks.supermimic.config.cli import (
+  add_reset_sampling_arguments,
+  add_robot_argument,
+  resolve_robot_arguments,
+)
 from src.tasks.supermimic.config.morphology import robot_layout
 from src.tasks.supermimic.config.rl_cfg import OnlineConfig
 from src.tasks.supermimic.config.task_cfg import FoundationConfig
@@ -40,6 +44,7 @@ from src.tasks.supermimic.velocity_env import VelocityEnv
 def parser():
   p = argparse.ArgumentParser(description=__doc__)
   add_robot_argument(p)
+  add_reset_sampling_arguments(p)
   p.add_argument("--manifest", type=Path)
   p.add_argument(
     "--actor-checkpoint",
@@ -149,7 +154,7 @@ def main():
     if args.iterations < saved["iteration"]:
       argument_parser.error("--iterations cannot be below the saved iteration")
     restored = asdict(OnlineConfig()) | saved["config"]
-    for key in ("motion_storage", "motion_fk_cache_frames"):
+    for key in ("motion_storage", "motion_fk_cache_frames", "reset_softmax_cap"):
       if getattr(args, key) is not None and getattr(args, key) != restored[key]:
         argument_parser.error(f"Resume requires original {key}")
     cfg = OnlineConfig(**restored)
@@ -256,6 +261,7 @@ def main():
           num_envs=cfg.num_envs,
           seed=cfg.seed,
           episode_length_s=cfg.episode_length_s,
+          reset_softmax_cap=cfg.reset_softmax_cap,
         ),
         velocity,
         args.device,

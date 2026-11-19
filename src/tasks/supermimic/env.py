@@ -63,7 +63,12 @@ class SuperMimicEnv(ManagerBasedRlEnv):
       self.robot.indexing.body_ids[self.robot.body_names.index("torso_link")]
     )
     self.sampler = (
-      ResetSampler(self.library.lengths, mode=config.sampling, seed=config.seed)
+      ResetSampler(
+        self.library.lengths,
+        mode=config.sampling,
+        seed=config.seed,
+        softmax_cap=config.reset_softmax_cap,
+      )
       if self.library is not None
       else None
     )
@@ -332,9 +337,10 @@ class SuperMimicEnv(ManagerBasedRlEnv):
       terminated = torch.zeros_like(terminated)
     self.episode_length_buf += 1
     self.common_step_counter += 1
-    time_out = self.episode_length_buf >= math.ceil(
+    max_episode_steps = math.ceil(
       self.foundation_config.episode_length_s / self.step_dt
     )
+    time_out = self.episode_length_buf >= max_episode_steps
     motion_end = next_frame == self.library.lengths[self.motion_id] - 1
     done = terminated | time_out | motion_end
     self.previous_action.copy_(action)
@@ -371,9 +377,8 @@ class SuperMimicEnv(ManagerBasedRlEnv):
         self.motion_id[reset_ids],
         self.episode_start_frame[reset_ids],
         self.episode_discounted_return[reset_ids],
-        self.episode_reward_sum[reset_ids],
         self.episode_length_buf[reset_ids],
-        terminated[reset_ids],
+        max_episode_steps,
       )
     self.frame_id.copy_(next_frame)
     self.reset_buf = done.clone()

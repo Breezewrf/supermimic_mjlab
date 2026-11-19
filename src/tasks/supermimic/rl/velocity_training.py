@@ -6,6 +6,7 @@ from dataclasses import asdict
 
 import torch
 
+from ..config.task_cfg import DEFAULT_RESET_SOFTMAX_CAP
 from ..data.episode_statistics import EpisodeSummary
 from ..data.replay_buffer import ReplayBuffer
 from ..mdp.velocity import measured_velocity
@@ -539,6 +540,7 @@ class VelocityTrainer(OnlineTrainer):
         "robot": "g1_29dof",
         "motion_storage": "full",
         "motion_fk_cache_frames": 262144,
+        "reset_softmax_cap": DEFAULT_RESET_SOFTMAX_CAP,
         **saved["config"],
       }
     ) != asdict(self.config) or saved["clips"] != self.env.library.names:

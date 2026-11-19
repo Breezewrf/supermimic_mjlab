@@ -31,6 +31,7 @@ OBS_DIM = 93
 ACTION_DIM = 29
 CONTEXT_DIM = 33
 STEP_DT = 0.02
+DEFAULT_RESET_SOFTMAX_CAP = 50.0
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,7 @@ class FoundationConfig:
   randomization: bool = False
   sensor_noise: bool = False
   sampling: str = "uniform"
+  reset_softmax_cap: float = DEFAULT_RESET_SOFTMAX_CAP
   action_clip: float | None = None
   relative_orientation: bool = False
   motion_anchor_ori_b: bool = False

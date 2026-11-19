@@ -11,13 +11,18 @@ import torch
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.tasks.supermimic.config.cli import add_robot_argument, resolve_robot_arguments
+from src.tasks.supermimic.config.cli import (
+  add_reset_sampling_arguments,
+  add_robot_argument,
+  resolve_robot_arguments,
+)
 from src.tasks.supermimic.config.rl_cfg import OnlineConfig
 from src.tasks.supermimic.config.task_cfg import (
   FoundationConfig,
 )
 from src.tasks.supermimic.data.world_model_data import file_sha256
 from src.tasks.supermimic.models.kinematics import robot_metadata
+from src.tasks.supermimic.mdp.reset_sampler import ResetSampler
 from src.tasks.supermimic.models.policy import schema_for_dimension
 from src.tasks.supermimic.rl.checkpoints import (
   evaluation_score,
@@ -98,6 +103,7 @@ def evaluate_actor(
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
   add_robot_argument(parser)
+  add_reset_sampling_arguments(parser)
   parser.add_argument("--manifest", type=Path)
   parser.add_argument(
     "--motion-load-workers", type=int, default=1,
@@ -247,7 +253,7 @@ def main():
       "--resume requires a full online training checkpoint (last.pt); policy weights cannot resume training"
     )
   if saved:
-    if saved.get("sampler", {}).get("schema_version") != 2:
+    if saved.get("sampler", {}).get("schema_version") not in ResetSampler.SUPPORTED_SCHEMAS:
       parser.error(
         "Legacy reset scores are incompatible with this fix; start a new run. Old actors remain usable for evaluation."
       )
@@ -329,6 +335,7 @@ def main():
           clips=config.clips,
           seed=config.seed,
           episode_length_s=config.episode_length_s,
+          reset_softmax_cap=config.reset_softmax_cap,
           relative_orientation=config.relative_orientation,
           motion_anchor_ori_b=config.motion_anchor_ori_b,
         ),
@@ -342,6 +349,8 @@ def main():
       )
       if saved:
         trainer.load_state_dict(saved)
+        if saved["sampler"]["schema_version"] != ResetSampler.SCHEMA_VERSION:
+          console.message("Reset sampler scores and history rebuilt for the new scoring rules.")
       else:
         trainer.bootstrap()
     runtime_versions = {
