@@ -156,6 +156,12 @@ def main():
     choices=("state_delta", "velocity_residual"),
     help="World-model targets (new runs: state_delta; resume: saved mode)",
   )
+  parser.add_argument(
+    "--actor-layer-norm",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="Add LayerNorm before ELU in each Actor hidden layer (default: disabled)",
+  )
   for name in ("actor-input-normalization", "critic-input-normalization"):
     parser.add_argument(
       "--" + name,
@@ -281,6 +287,8 @@ def main():
   except ValueError as error:
     parser.error(str(error))
   manifest_hash = file_sha256(args.manifest)
+  if saved and config.actor_layer_norm != saved_config["actor_layer_norm"]:
+    parser.error("Resume cannot change --actor-layer-norm; start a new run")
   if saved and any(
     getattr(config, name) != saved_config[name]
     for name in ("actor_input_normalization", "critic_input_normalization")

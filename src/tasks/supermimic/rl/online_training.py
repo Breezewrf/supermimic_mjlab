@@ -153,6 +153,7 @@ class OnlineTrainer:
       reference_dim=config.reference_dim,
       input_normalization=config.actor_input_normalization,
       motion_anchor_ori_b=config.motion_anchor_ori_b,
+      layer_norm=config.actor_layer_norm,
     ).to(self.device)
     self.critic = MotionCritic(
       metadata["default_q"],

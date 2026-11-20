@@ -659,6 +659,7 @@ class OnlineIntegrationTests(unittest.TestCase):
       "compile",
       "wm_only_iters",
       "actor_input_normalization",
+      "actor_layer_norm",
       "critic_input_normalization",
       "world_prediction",
       "world_model_normalization",
@@ -789,7 +790,7 @@ class OnlineCliTests(unittest.TestCase):
   def test_full_body_cpu_train_resume_and_checkpoint_inference(self):
     self.run_cli_training(2680)
 
-  def test_running_norm_cpu_train_resume_and_checkpoint_inference(self):
+  def test_normalized_cpu_train_resume_and_checkpoint_inference(self):
     self.run_cli_training(2680, normalize=True)
 
   def run_cli_training(self, reference_dim, normalize=False):
@@ -863,6 +864,7 @@ class OnlineCliTests(unittest.TestCase):
       if normalize:
         common += [
           "--actor-input-normalization",
+          "--actor-layer-norm",
           "--critic-input-normalization",
           "--world-model-normalization",
         ]
@@ -889,6 +891,7 @@ class OnlineCliTests(unittest.TestCase):
             del command[offset : offset + 2]
           if normalize:
             command.remove("--actor-input-normalization")
+            command.remove("--actor-layer-norm")
             command.remove("--critic-input-normalization")
             command.remove("--world-model-normalization")
           # Resume infers either layout without an explicit dimension argument.
@@ -904,6 +907,7 @@ class OnlineCliTests(unittest.TestCase):
               "amp",
               "compile",
               "actor_input_normalization",
+              "actor_layer_norm",
               "critic_input_normalization",
               "world_prediction",
               "world_model_normalization",
@@ -949,7 +953,10 @@ class OnlineCliTests(unittest.TestCase):
         self.assertEqual(saved["config"]["world_prediction"], prediction)
         self.assertEqual(saved["config"]["world_model_normalization"], normalize)
         self.assertEqual(saved["config"]["actor_input_normalization"], normalize)
+        self.assertEqual(saved["config"]["actor_layer_norm"], normalize)
         self.assertEqual(saved["config"]["critic_input_normalization"], normalize)
+        for network in ("encoder", "decoder"):
+          self.assertEqual(f"{network}.1.weight" in saved["actor"], normalize)
         if normalize:
           for name in ("in_norm", "out_norm"):
             self.assertEqual(

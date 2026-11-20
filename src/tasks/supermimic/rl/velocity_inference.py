@@ -32,6 +32,7 @@ def load_velocity_actor(checkpoint: Path, device="cpu"):
     amp=cfg.get("amp", "none"),
     reference_dim=cfg["reference_dim"],
     input_normalization=cfg["actor_input_normalization"],
+    layer_norm=cfg.get("actor_layer_norm", False),
   )
   actor = VelocityActor(
     motion,

@@ -541,6 +541,7 @@ class VelocityTrainer(OnlineTrainer):
         "motion_storage": "full",
         "motion_fk_cache_frames": 262144,
         "reset_softmax_cap": DEFAULT_RESET_SOFTMAX_CAP,
+        "actor_layer_norm": False,
         **saved["config"],
       }
     ) != asdict(self.config) or saved["clips"] != self.env.library.names:

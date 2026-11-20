@@ -39,10 +39,15 @@ def schema_for_dimension(reference_dim: int) -> str:
   return REFERENCE_SCHEMAS[reference_dim]
 
 
-def mlp(input_dim: int, hidden: tuple[int, ...], output_dim: int) -> nn.Sequential:
+def mlp(
+  input_dim: int, hidden: tuple[int, ...], output_dim: int, *, layer_norm: bool = False
+) -> nn.Sequential:
   layers = []
   for left, right in pairwise((input_dim, *hidden)):
-    layers.extend((nn.Linear(left, right), nn.ELU()))
+    layers.append(nn.Linear(left, right))
+    if layer_norm:
+      layers.append(nn.LayerNorm(right))
+    layers.append(nn.ELU())
   layers.append(nn.Linear(hidden[-1], output_dim))
   return nn.Sequential(*layers)
 
@@ -132,6 +137,7 @@ class MotionActor(nn.Module):
     reference_dim: int | None = None,
     input_normalization: bool = False,
     motion_anchor_ori_b: bool = False,
+    layer_norm: bool = False,
   ):
     super().__init__()
     self.hidden_dims = tuple(hidden_dims)
@@ -165,9 +171,12 @@ class MotionActor(nn.Module):
         + [1.0] * (self.observation_dim - (2 * layout.num_joints + 3))
       ),
     )
-    self.encoder = mlp(reference_dim, self.hidden_dims, 32)
+    self.encoder = mlp(reference_dim, self.hidden_dims, 32, layer_norm=layer_norm)
     self.decoder = mlp(
-      32 + 10 * self.observation_dim, self.hidden_dims, layout.num_joints
+      32 + 10 * self.observation_dim,
+      self.hidden_dims,
+      layout.num_joints,
+      layer_norm=layer_norm,
     )
     nn.init.normal_(self.decoder[-1].weight, std=0.001)
     nn.init.zeros_(self.decoder[-1].bias)

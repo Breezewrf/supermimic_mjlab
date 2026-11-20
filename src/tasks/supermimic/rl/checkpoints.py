@@ -86,6 +86,7 @@ def training_config(saved: dict) -> dict:
     "amp": "none",
     "reference_dim": dimensions[schema],
     "actor_input_normalization": False,
+    "actor_layer_norm": False,
     "critic_input_normalization": False,
     "world_prediction": "velocity_residual",
     "world_model_normalization": False,

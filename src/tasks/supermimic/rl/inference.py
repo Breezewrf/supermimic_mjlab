@@ -47,6 +47,7 @@ def load_actor(
     **reference_options,
     input_normalization=saved["config"].get("actor_input_normalization", False),
     motion_anchor_ori_b=saved["config"].get("motion_anchor_ori_b", False),
+    layer_norm=saved["config"].get("actor_layer_norm", False),
   )
   policy.load_state_dict(saved["actor"])
   # An empty selection means all clips in the current manifest, including new data.

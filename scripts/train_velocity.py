@@ -98,6 +98,12 @@ def parser():
     help="Used only with --from-scratch",
   )
   p.add_argument(
+    "--actor-layer-norm",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="Enable MotionActor hidden LayerNorm from scratch; otherwise use the saved architecture",
+  )
+  p.add_argument(
     "--world-dims",
     nargs="+",
     type=int,
@@ -154,7 +160,12 @@ def main():
     if args.iterations < saved["iteration"]:
       argument_parser.error("--iterations cannot be below the saved iteration")
     restored = asdict(OnlineConfig()) | saved["config"]
-    for key in ("motion_storage", "motion_fk_cache_frames", "reset_softmax_cap"):
+    for key in (
+      "motion_storage",
+      "motion_fk_cache_frames",
+      "reset_softmax_cap",
+      "actor_layer_norm",
+    ):
       if getattr(args, key) is not None and getattr(args, key) != restored[key]:
         argument_parser.error(f"Resume requires original {key}")
     cfg = OnlineConfig(**restored)
@@ -190,7 +201,19 @@ def main():
         raise ValueError(
           "Initialization requires a matching robot and proprioceptive decoder"
         )
-      for key in ("actor_dims", "reference_dim", "actor_input_normalization"):
+      if (
+        args.actor_layer_norm is not None
+        and args.actor_layer_norm != actor_cfg["actor_layer_norm"]
+      ):
+        argument_parser.error(
+          "Initialization requires the Actor checkpoint's LayerNorm setting"
+        )
+      for key in (
+        "actor_dims",
+        "reference_dim",
+        "actor_input_normalization",
+        "actor_layer_norm",
+      ):
         values[key] = actor_cfg[key]
       world_saved = torch.load(
         args.world_checkpoint, map_location="cpu", weights_only=True, mmap=True

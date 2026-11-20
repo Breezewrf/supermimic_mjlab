@@ -46,6 +46,7 @@ class OnlineConfig:
   world_prediction: str = "state_delta"
   world_model_normalization: bool = False
   robot: str = "g1_29dof"
+  actor_layer_norm: bool = False
 
   def __post_init__(self):
     if (
