@@ -330,6 +330,8 @@ class VelocityTrainer(OnlineTrainer):
         -trace["objective"], self.actor, self.actor_optimizer, element_clip=0.1
       )
     objective = float(trace["objective"].detach())
+    raw_value_max = float(trace["critic_raw_value_max"])
+    value_above_cap_fraction = float(trace["critic_value_above_cap_fraction"])
     critic_trace = {
       key: trace[key].detach()
       for key in ("rewards", "continuation", "values", "critic_features", "mask")
@@ -343,6 +345,8 @@ class VelocityTrainer(OnlineTrainer):
       "motion/objective": objective,
       "motion/actor_gradient_norm": norm,
       "motion/critic_loss": loss,
+      "motion/critic_raw_value_max": raw_value_max,
+      "motion/critic_value_above_cap_fraction": value_above_cap_fraction,
     }
 
   def update_velocity(self):

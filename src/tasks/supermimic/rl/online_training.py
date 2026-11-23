@@ -352,6 +352,8 @@ class OnlineTrainer:
     inputs = trajectory["critic_features"]
     survival = float(trajectory["survival"].detach().mean())
     reward = float(trajectory["rewards"].detach()[mask].mean())
+    raw_value_max = float(trajectory["critic_raw_value_max"])
+    value_above_cap_fraction = float(trajectory["critic_value_above_cap_fraction"])
     # Release the 32-step actor graph before the twenty small critic updates.
     critic_source = {
       key: trajectory[key].detach() for key in ("rewards", "continuation", "values")
@@ -412,6 +414,8 @@ class OnlineTrainer:
       "survival_at_horizon": survival,
       "critic_loss": sum(losses) / len(losses),
       "critic_gradient_norm": max(norms),
+      "critic_raw_value_max": raw_value_max,
+      "critic_value_above_cap_fraction": value_above_cap_fraction,
     }
 
   def train_iteration(self) -> dict:

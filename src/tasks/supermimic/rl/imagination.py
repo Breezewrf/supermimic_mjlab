@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import torch
 from torch import Tensor
 
+from ..mdp.rewards import MAX_MOTION_STEP_REWARD
 from ..mdp.state import add_sensor_noise
 
 
@@ -46,6 +47,11 @@ def critic_loss(values: Tensor, targets: Tensor, mask: Tensor) -> Tensor:
   # mean fits FP32. Keep the same objective and gradients, using FP64 arithmetic
   # until the scalar is formed; genuinely unrepresentable losses still fail.
   return error.double().square().sum(dim=1).mean().to(values.dtype)
+
+
+def _cap_bootstrap_value(values: Tensor, max_value: float) -> Tensor:
+  # Preserve nonfinite predictions so the optimizer's checks still catch them.
+  return torch.where(torch.isfinite(values), values.clamp_max(max_value), values)
 
 
 def imagination_step(actor, world, state, history, goal, context, reference_quats):
@@ -149,12 +155,16 @@ def imagine(
   before = torch.cat((torch.ones_like(alive[:, :1]), alive[:, :-1]), 1)
   discount = gamma ** torch.arange(horizon, device=state.device, dtype=state.dtype)
   reward_objective = (discount * before * rewards).sum(1)
+  max_value = MAX_MOTION_STEP_REWARD / (1 - gamma)
   feature_fn = kernels.critic_features if kernels is not None else critic.features
   value_fn = kernels.critic_targets if kernels is not None else critic.forward_features
   # Detached, batched target values must not train the actor or retain its graph.
   with torch.no_grad():
     features = feature_fn(states.detach(), windows, contexts, goals)
-    values = value_fn(features).squeeze(-1)
+    raw_values = value_fn(features).squeeze(-1)
+    values = _cap_bootstrap_value(raw_values, max_value)
+    raw_value_max = raw_values.amax()
+    value_above_cap_fraction = (raw_values > max_value).float().mean()
   terminal_reference = {
     key: value[:, horizon : horizon + 10] for key, value in future.items()
   }
@@ -163,7 +173,9 @@ def imagine(
   bootstrap_fn = (
     kernels.critic_bootstrap if kernels is not None else critic.forward_features
   )
-  terminal_value = bootstrap_fn(terminal_features).squeeze(-1)
+  terminal_value = _cap_bootstrap_value(
+    bootstrap_fn(terminal_features).squeeze(-1), max_value
+  )
   bootstrap_objective = gamma**horizon * survival * terminal_value
   objective = reward_objective + bootstrap_objective
   return {
@@ -173,6 +185,8 @@ def imagine(
     "rewards": rewards,
     "continuation": continuation,
     "values": values,
+    "critic_raw_value_max": raw_value_max,
+    "critic_value_above_cap_fraction": value_above_cap_fraction,
     "critic_features": features[:, :-1],
     "mask": torch.ones_like(rewards, dtype=torch.bool),
     "survival": survival,

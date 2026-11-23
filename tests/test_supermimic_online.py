@@ -206,13 +206,13 @@ class ImaginationTests(unittest.TestCase):
     with torch.no_grad():
       for parameter in critic.parameters():
         parameter.zero_()
-      critic.value[-1].bias.fill_(5.0)
+      critic.value[-1].bias.fill_(0.5)
     original_heads = world.task_heads
     for failure in (0.0, 1.0):
 
       def constant_heads(*args, failure=failure):
         result = original_heads(*args)
-        result["reward"] = torch.ones_like(result["reward"])
+        result["reward"] = torch.full_like(result["reward"], 0.1)
         result["termination_probability"] = torch.full_like(result["reward"], failure)
         return result
 
@@ -235,8 +235,10 @@ class ImaginationTests(unittest.TestCase):
         torch.testing.assert_close(
           trace["continuation"], torch.full((2, horizon), 1 - failure)
         )
-        bootstrap = gamma**horizon * (1 - failure) ** horizon * 5
-        expected_reward = sum((gamma * (1 - failure)) ** t for t in range(horizon))
+        bootstrap = gamma**horizon * (1 - failure) ** horizon * 0.5
+        expected_reward = 0.1 * sum(
+          (gamma * (1 - failure)) ** t for t in range(horizon)
+        )
         torch.testing.assert_close(
           trace["bootstrap_objective"], torch.tensor(bootstrap)
         )
@@ -248,12 +250,67 @@ class ImaginationTests(unittest.TestCase):
         )
         expected = torch.tensor(
           [
-            sum((gamma * (1 - failure)) ** t for t in range(steps))
-            + (gamma * (1 - failure)) ** steps * 5
+            0.1 * sum((gamma * (1 - failure)) ** t for t in range(steps))
+            + (gamma * (1 - failure)) ** steps * 0.5
             for steps in range(horizon, 0, -1)
           ]
         )
         torch.testing.assert_close(targets, expected.expand(2, -1))
+
+  def test_motion_value_cap_bounds_both_bootstraps_but_critic_fits_raw_values(self):
+    actor, world, critic = self.models()
+    starts = make_starts(self.library, actor.default_q)
+
+    def perfect_reward(state, *_):
+      return {
+        "reward": state.new_full(state.shape[:-1], 0.1),
+        "termination_probability": state.new_zeros(state.shape[:-1]),
+      }
+
+    last_layer = critic.value[-1]
+    for gamma, horizon, bias, expected in (
+      (0.99, 32, 20.0, 10.0),
+      (0.9, 4, 20.0, 1.0),
+      (0.9, 4, -20.0, -20.0),
+      (0.9, 4, float("inf"), float("inf")),
+    ):
+      with self.subTest(gamma=gamma, bias=bias):
+        with torch.no_grad():
+          last_layer.weight.zero_()
+          last_layer.bias.fill_(bias)
+        with (
+          frozen_parameters(world, critic),
+          patch.object(world, "task_heads", side_effect=perfect_reward),
+        ):
+          trace = imagine(
+            actor,
+            world,
+            critic,
+            self.library,
+            starts,
+            horizon,
+            gamma,
+            sensor_noise=False,
+          )
+        torch.testing.assert_close(
+          trace["values"], torch.full((2, horizon + 1), expected)
+        )
+        torch.testing.assert_close(
+          trace["bootstrap_objective"], torch.tensor(gamma**horizon * expected)
+        )
+        torch.testing.assert_close(trace["critic_raw_value_max"], torch.tensor(bias))
+        if bias == 20.0:
+          targets = gae_targets(
+            trace["rewards"], trace["continuation"], trace["values"], gamma
+          )
+          torch.testing.assert_close(targets, torch.full((2, horizon), expected))
+          torch.testing.assert_close(
+            trace["critic_value_above_cap_fraction"], torch.tensor(1.0)
+          )
+          predictions = critic.forward_features(trace["critic_features"]).squeeze(-1)
+          loss = critic_loss(predictions, targets, trace["mask"])
+          (bias_gradient,) = torch.autograd.grad(loss, last_layer.bias)
+          self.assertGreater(bias_gradient.item(), 0)
 
   def test_collection_timeout_does_not_cut_imagination_or_gae_bootstrap(self):
     actor, world, critic = self.models()
@@ -301,7 +358,7 @@ class ImaginationTests(unittest.TestCase):
     torch.testing.assert_close(actual, torch.tensor([[1.9, 2.0, 3.36]]))
     self.assertFalse(actual.requires_grad)
 
-  def test_terminal_bootstrap_keeps_its_state_gradient(self):
+  def test_terminal_bootstrap_keeps_its_state_gradient_below_the_cap(self):
     actor, world, critic = self.models()
     starts = make_starts(
       self.library, actor.default_q, frame_id=int(self.library.lengths[0]) - 3
@@ -314,29 +371,37 @@ class ImaginationTests(unittest.TestCase):
       result["termination_probability"] = torch.full_like(result["reward"], 0.5)
       return result
 
-    with (
-      frozen_parameters(world, critic),
-      patch.object(world, "task_heads", side_effect=zero_reward),
-    ):
-      trace = imagine(
-        actor,
-        world,
-        critic,
-        self.library,
-        starts,
-        horizon=2,
-        gamma=0.9,
-        sensor_noise=False,
-      )
-      trace["objective"].backward()
-    self.assertGreater(
-      sum(float(p.grad.abs().sum()) for p in actor.parameters() if p.grad is not None),
-      0.0,
-    )
-    self.assertTrue(all(p.grad is None for p in critic.parameters()))
-    torch.testing.assert_close(
-      trace["objective"].detach(), 0.9**2 * 0.5**2 * trace["values"][:, -1].mean()
-    )
+    for bias in (-2.0, 20.0):
+      with self.subTest(bias=bias):
+        with torch.no_grad():
+          critic.value[-1].bias.fill_(bias)
+        actor.zero_grad(set_to_none=True)
+        with (
+          frozen_parameters(world, critic),
+          patch.object(world, "task_heads", side_effect=zero_reward),
+        ):
+          trace = imagine(
+            actor,
+            world,
+            critic,
+            self.library,
+            starts,
+            horizon=2,
+            gamma=0.9,
+            sensor_noise=False,
+          )
+          trace["objective"].backward()
+        grad_sum = sum(
+          float(p.grad.abs().sum()) for p in actor.parameters() if p.grad is not None
+        )
+        if bias < 0:
+          self.assertGreater(grad_sum, 0.0)
+        else:
+          self.assertEqual(grad_sum, 0.0)
+        self.assertTrue(all(p.grad is None for p in critic.parameters()))
+        torch.testing.assert_close(
+          trace["objective"].detach(), 0.9**2 * 0.5**2 * trace["values"][:, -1].mean()
+        )
 
   def test_sensor_noise_is_added_only_to_the_new_observation(self):
     actor, world, critic = self.models()
