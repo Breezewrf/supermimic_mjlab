@@ -8,15 +8,21 @@ from dataclasses import asdict, fields
 from pathlib import Path
 
 import torch
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.tasks.supermimic.config.cli import add_robot_argument, resolve_robot_arguments
+from src.tasks.supermimic.config.cli import (
+  add_reset_sampling_arguments,
+  add_robot_argument,
+  resolve_robot_arguments,
+)
 from src.tasks.supermimic.config.rl_cfg import OnlineConfig
 from src.tasks.supermimic.config.task_cfg import (
   FoundationConfig,
 )
 from src.tasks.supermimic.data.world_model_data import file_sha256
 from src.tasks.supermimic.models.kinematics import robot_metadata
+from src.tasks.supermimic.mdp.reset_sampler import ResetSampler
 from src.tasks.supermimic.models.policy import schema_for_dimension
 from src.tasks.supermimic.rl.checkpoints import (
   evaluation_score,
@@ -47,9 +53,18 @@ from src.tasks.supermimic.rl.training_runner import (
 )
 
 
-def evaluate_actor(actor, manifest, config, device, limit=None, max_envs=64):
+def evaluate_actor(
+  actor, manifest, config, device, limit=None, max_envs=64, *, library=None
+):
   from src.tasks.supermimic.env import SuperMimicEnv
 
+  if max_envs < 1:
+    raise ValueError("Evaluation environment count must be positive")
+  num_envs = (
+    min(max_envs, len(library))
+    if library is not None
+    else evaluation_env_count(manifest, config.clips, max_envs)
+  )
   saved_rng, training = rng_state(), actor.training
   env = None
   try:
@@ -58,16 +73,26 @@ def evaluate_actor(actor, manifest, config, device, limit=None, max_envs=64):
       FoundationConfig(
         robot=config.robot,
         manifest=manifest,
+        motion_storage=config.motion_storage,
+        motion_load_progress=True,
+        motion_fk_cache_frames=config.motion_fk_cache_frames,
         clips=config.clips,
-        num_envs=evaluation_env_count(manifest, config.clips, max_envs),
+        num_envs=num_envs,
         seed=config.seed,
         episode_length_s=1e9,
         relative_orientation=config.relative_orientation,
         motion_anchor_ori_b=config.motion_anchor_ori_b,
       ),
       device=device,
+      library=library,
     )
-    return evaluate(env, actor, limit)
+    with tqdm(
+      total=len(env.library.names),
+      desc="Evaluating motions",
+      unit="clip",
+      file=sys.stderr,
+    ) as progress:
+      return evaluate(env, actor, limit, on_motion=lambda _: progress.update())
   finally:
     if env is not None:
       env.close()
@@ -78,7 +103,12 @@ def evaluate_actor(actor, manifest, config, device, limit=None, max_envs=64):
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
   add_robot_argument(parser)
+  add_reset_sampling_arguments(parser)
   parser.add_argument("--manifest", type=Path)
+  parser.add_argument(
+    "--motion-load-workers", type=int, default=1,
+    help="CPU workers for NPZ loading and validation (default: 1, serial)",
+  )
   parser.add_argument("--device", default="cuda:0")
   parser.add_argument("--output", type=Path)
   parser.add_argument("--resume", type=Path)
@@ -89,6 +119,11 @@ def main():
     help="Total update rounds and cosine LR decay horizon, including WM-only warmup and saved rounds",
   )
   parser.add_argument("--eval-interval", type=int, default=100)
+  parser.add_argument(
+    "--skip-initial-evaluation",
+    action="store_true",
+    help="Skip evaluation before training starts; keep periodic and final evaluations",
+  )
   parser.add_argument(
     "--eval-num-envs",
     type=int,
@@ -192,6 +227,7 @@ def main():
   if min(
     args.iterations,
     args.eval_interval,
+    args.motion_load_workers,
     args.eval_num_envs,
     args.checkpoint_interval,
     args.log_interval,
@@ -217,7 +253,7 @@ def main():
       "--resume requires a full online training checkpoint (last.pt); policy weights cannot resume training"
     )
   if saved:
-    if saved.get("sampler", {}).get("schema_version") != 2:
+    if saved.get("sampler", {}).get("schema_version") not in ResetSampler.SUPPORTED_SCHEMAS:
       parser.error(
         "Legacy reset scores are incompatible with this fix; start a new run. Old actors remain usable for evaluation."
       )
@@ -291,10 +327,15 @@ def main():
         FoundationConfig.training(
           robot=args.robot,
           manifest=args.manifest,
+          motion_storage=config.motion_storage,
+          motion_load_workers=args.motion_load_workers,
+          motion_load_progress=True,
+          motion_fk_cache_frames=config.motion_fk_cache_frames,
           num_envs=config.num_envs,
           clips=config.clips,
           seed=config.seed,
           episode_length_s=config.episode_length_s,
+          reset_softmax_cap=config.reset_softmax_cap,
           relative_orientation=config.relative_orientation,
           motion_anchor_ori_b=config.motion_anchor_ori_b,
         ),
@@ -308,6 +349,8 @@ def main():
       )
       if saved:
         trainer.load_state_dict(saved)
+        if saved["sampler"]["schema_version"] != ResetSampler.SCHEMA_VERSION:
+          console.message("Reset sampler scores and history rebuilt for the new scoring rules.")
       else:
         trainer.bootstrap()
     runtime_versions = {
@@ -330,6 +373,9 @@ def main():
       },
       "simulation": trainer.simulation_parameters,
       "evaluation_limit": args.evaluation_limit,
+      "skip_initial_evaluation": args.skip_initial_evaluation,
+      "tensorboard": args.tensorboard,
+      "motion_load_workers": args.motion_load_workers,
       "evaluation_max_envs": args.eval_num_envs,
       "full_checkpoint_interval": args.full_checkpoint_interval,
       "best_checkpoint_selection": "successes_then_normalized_return",
@@ -407,6 +453,7 @@ def main():
           args.device,
           args.evaluation_limit,
           max_envs=args.eval_num_envs,
+          library=env.library,
         )
       report["evaluation_wall_seconds"] = time.perf_counter() - evaluation_started
       report["iteration"] = trainer.iteration
@@ -431,11 +478,14 @@ def main():
       if tracking:
         tracking.evaluation(report)
         tracking.diagnostics(diagnostics)
+      if runtime.tensorboard:
+        runtime.tensorboard.evaluation(report, trainer.iteration)
 
     if not saved:
-      validate()
+      if not args.skip_initial_evaluation:
+        validate()
       save_checkpoint(output / "last.pt", checkpoint())
-    elif best_evaluation is None:
+    elif best_evaluation is None and not args.skip_initial_evaluation:
       # A checkpoint copied to a new directory may have no retained best weights.
       validate()
     save_weights("last")

@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass
 
 from .morphology import robot_layout
+from .task_cfg import DEFAULT_RESET_SOFTMAX_CAP
 
 
 @dataclass(frozen=True)
@@ -26,9 +27,12 @@ class OnlineConfig:
   gae_lambda: float = 0.95
   action_noise: float = 0.1
   episode_length_s: float = 10.0
+  reset_softmax_cap: float = DEFAULT_RESET_SOFTMAX_CAP
   world_dims: tuple[int, ...] = (2048, 2048, 2048)
   actor_dims: tuple[int, ...] = (2048, 1024, 512, 256)
   critic_dims: tuple[int, ...] = (256, 128)
+  motion_storage: str = "full"
+  motion_fk_cache_frames: int = 262144
   clips: tuple[str, ...] = ()
   termination_mode: str = "learned"
   relative_orientation: bool = False
@@ -44,6 +48,10 @@ class OnlineConfig:
   robot: str = "g1_29dof"
 
   def __post_init__(self):
+    if (
+      self.motion_storage not in ("full", "compact") or self.motion_fk_cache_frames < 0
+    ):
+      raise ValueError("Invalid motion storage or FK cache capacity")
     if self.world_prediction not in ("state_delta", "velocity_residual"):
       raise ValueError("world_prediction must be state_delta or velocity_residual")
     layout = robot_layout(self.robot)
@@ -70,6 +78,10 @@ class OnlineConfig:
       raise ValueError("Positive counts, capacity >= 10 and warmup_steps >= 8 required")
     if self.wm_only_iters < 0:
       raise ValueError("wm_only_iters must be nonnegative")
+    if not math.isfinite(self.reset_softmax_cap) or (
+      self.reset_softmax_cap != 0 and self.reset_softmax_cap < 1
+    ):
+      raise ValueError("Reset softmax cap must be zero or at least one")
     if self.critic_minibatches > self.policy_batch_size:
       raise ValueError("Critic minibatches must not exceed the rollout batch size")
     if (

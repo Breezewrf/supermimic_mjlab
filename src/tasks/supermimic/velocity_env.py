@@ -307,9 +307,8 @@ class VelocityEnv(SuperMimicEnv):
           self.motion_id[reset_motion],
           self.episode_start_frame[reset_motion],
           self.episode_discounted_return[reset_motion],
-          self.episode_reward_sum[reset_motion],
           self.episode_length_buf[reset_motion],
-          terminated[reset_motion],
+          self.episode_timeout_steps[reset_motion],
         )
     self.reset_buf = done.clone()
     self.reset_terminated = terminated.clone()

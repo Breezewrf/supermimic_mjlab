@@ -6,6 +6,7 @@ from pathlib import Path
 
 import torch
 
+from ..config.task_cfg import DEFAULT_RESET_SOFTMAX_CAP
 from ..models.policy import REFERENCE_SCHEMAS
 
 TRAINING_KIND = "supermimic_online"
@@ -78,6 +79,9 @@ def training_config(saved: dict) -> dict:
   config = {
     "robot": "g1_29dof",
     "wm_only_iters": 0,
+    "motion_storage": "full",
+    "motion_fk_cache_frames": 262144,
+    "reset_softmax_cap": DEFAULT_RESET_SOFTMAX_CAP,
     "compile": False,
     "amp": "none",
     "reference_dim": dimensions[schema],

@@ -31,11 +31,14 @@ OBS_DIM = 93
 ACTION_DIM = 29
 CONTEXT_DIM = 33
 STEP_DT = 0.02
+DEFAULT_RESET_SOFTMAX_CAP = 50.0
 
 
 @dataclass(frozen=True)
 class FoundationConfig:
   manifest: Path | None = None
+  motion_storage: str = "full"
+  motion_fk_cache_frames: int = 262144
   clips: tuple[str, ...] = ()
   num_envs: int = 4
   seed: int = 0
@@ -45,6 +48,7 @@ class FoundationConfig:
   randomization: bool = False
   sensor_noise: bool = False
   sampling: str = "uniform"
+  reset_softmax_cap: float = DEFAULT_RESET_SOFTMAX_CAP
   action_clip: float | None = None
   relative_orientation: bool = False
   motion_anchor_ori_b: bool = False
@@ -53,6 +57,8 @@ class FoundationConfig:
   robot: str = "g1_29dof"
   motion: Path | None = None
   motion_dir: Path | None = None
+  motion_load_workers: int = 1
+  motion_load_progress: bool = False
 
   @property
   def observation_dim(self) -> int:
@@ -65,7 +71,14 @@ class FoundationConfig:
     return robot_layout(self.robot)
 
   def __post_init__(self):
-    if sum(value is not None for value in (self.manifest, self.motion, self.motion_dir)) > 1:
+    if (
+      self.motion_storage not in ("full", "compact") or self.motion_fk_cache_frames < 0
+    ):
+      raise ValueError("Invalid motion storage or FK cache capacity")
+    if (
+      sum(value is not None for value in (self.manifest, self.motion, self.motion_dir))
+      > 1
+    ):
       raise ValueError("Select exactly one motion source")
     if self.manifest is None and self.motion is None and self.motion_dir is None:
       object.__setattr__(self, "manifest", self.layout.manifest)

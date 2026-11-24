@@ -231,6 +231,18 @@ wandb sync outputs/supermimic/online_offline/wandb/offline-run-*
 通过 `parent_run_id` 关联，保留原有曲线。日志参数可以在续训时调整，模型和训练规模
 参数仍须与断点一致。已经启动的训练进程需要从已保存断点重启后才会使用新的日志代码。
 
+### TensorBoard
+
+在动作跟踪或速度训练命令加上 `--tensorboard`，即可把训练和评估的标量写入
+输出目录下的 `tensorboard/`。它可以与 `--wandb` 同时开启。
+
+```bash
+tensorboard --logdir outputs/supermimic/bones_seed_trial/tensorboard
+```
+
+在浏览器打开 `http://localhost:6006`。续训时再次传入 `--tensorboard`，
+曲线沿用训练轮数，TensorBoard 会隐藏比恢复断点更新的旧事件。
+
 ## 策略评估
 
 加载在线 checkpoint，从每段动作首帧进行真实物理仿真，关闭域随机化和观测噪声：
@@ -253,6 +265,9 @@ python scripts/evaluate_supermimic.py \
 结束后即使环境自动重置，也不会继续累计该动作的奖励、误差或失败记录。
 play、实时窗口及视频导出保持单环境。JSON 中的 `evaluation_num_envs` 记录实际环境数；
 训练评估另记录 `evaluation_wall_seconds`，包含环境初始化耗时。
+训练与评估共用设备上的动作库和参考 FK 缓存，各自维护仿真、轨迹和采样状态。
+大数据集可用 `--eval-num-envs 4096` 减少评估批次。第二套仿真环境会额外占用显存，
+可用报告中的评估耗时比较不同并行数。
 
 参照 [supermimic_vibed 的评估协议](https://github.com/zita-ch/supermimic_vibed/blob/main/supermimic/evaluate.py)，
 终端输出 `Evaluation return <分数>`，例如 `Evaluation return 0.824`（仅为输出格式示例，
@@ -370,3 +385,41 @@ from src.tasks.supermimic.data.replay_buffer import ReplayBuffer
 from src.tasks.supermimic.models.world_model import WorldModel
 from src.tasks.supermimic.rl.online_training import OnlineTrainer
 ```
+
+## 大规模动作库：紧凑加载与 FK 缓存
+
+现有 manifest 和 NPZ 无需重新转换。在原训练命令中增加：
+
+```bash
+--manifest src/assets/motions/bone-seed-unisupermimic/manifest.json \
+--motion-storage compact --motion-fk-cache-frames 262144
+```
+
+默认 `--motion-storage full` 使用全身 FP32 数组。`compact` 的 3 维 root
+position 用 FP32 存储，root quaternion、root linear/angular velocity 和关节位置、
+速度用 FP16 存储。29DoF 共 71 维（148 bytes/frame），23DoF 共 59 维
+（124 bytes/frame）。以 4730 万帧计算，29DoF 紧凑动作数组约 6.52 GiB，
+14 个 tracked bodies 的全身格式约 42.29 GiB。
+这些数字不含仿真、Replay、网络、临时张量及评估环境。
+
+紧凑数组整库驻留训练设备；CPU 加载时逐文件校验并填入预分配数组。
+取帧后以 FP32 计算，并对量化后的 root quaternion 重新归一化。
+参考刚体位置、四元数、线速度、角速度使用现有 G1 FK 重建，不参与反向传播。
+请求内先去重，再复用固定容量帧缓存；缺失帧按最多 8192 帧分块计算。
+同一条想象轨迹的参考窗口仍批量读取、通过视图复用，不逐时间步重新计算。
+
+`--motion-fk-cache-frames` 控制缓存上限，实际容量不超过动作总帧数；默认 262144，
+14 个 tracked bodies 的 FP32 缓存主体约 182 MiB，另有帧号标签。
+设置为 `0` 可关闭缓存进行对照。缓存槽冲突会替换旧帧，不影响结果正确性。
+缓存不会自动增长，也不写入 checkpoint；训练配置会记录加载模式和缓存容量，
+续训使用原设置。评估/播放也可显式传入这两个参数。
+
+历史验证使用全 FP32 的紧凑存储，设备为 RTX 4090 Laptop GPU（16 GiB），
+PyTorch 2.14.1+cu130，eager FP32。
+CPU 和 GPU 上均完成小规模一轮在线训练、受限评估及 checkpoint 保存；
+这属于功能检查，不是收敛验证。真实 LAFAN 单片段 6574 帧对照中，各刚体状态
+最大绝对误差低于 1e-5。固定 4096 个起点、每次请求 42 帧、预热 3 次后重复
+10 次并同步 CUDA 的微基准：full 约 0.52 ms，compact 无缓存约 8.28 ms，
+compact 有缓存约 0.77 ms。单片段可完全缓存，这些数字不能代表全量 BONES-SEED
+缓存命中率或整体训练耗时。使用混合精度紧凑动作存储的全量训练和评估耗时见
+[BONES-SEED 权重与评估](../README_zh.md#bones-seed-权重与评估)。

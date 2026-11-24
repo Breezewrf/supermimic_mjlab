@@ -62,6 +62,10 @@ def main():
   try:
     env = VelocityEnv(
       FoundationConfig(
+        motion_storage=args.motion_storage or "full",
+        motion_fk_cache_frames=(
+          262144 if args.motion_fk_cache_frames is None else args.motion_fk_cache_frames
+        ),
         robot=args.robot,
         num_envs=1,
         episode_length_s=1e9,

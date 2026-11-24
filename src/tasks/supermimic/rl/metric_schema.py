@@ -48,6 +48,8 @@ UPDATE_METRICS = {
   "critic_loss": "loss/critic/motion",
   "actor_gradient_norm": "gradient/motion/actor_preclip_norm",
   "critic_gradient_norm": "gradient/motion/critic_preclip_max_norm",
+  "critic_raw_value_max": "diagnostic/motion/critic_raw_value_max",
+  "critic_value_above_cap_fraction": "diagnostic/motion/critic_value_above_cap_fraction",
   "imagined_reward": "diagnostic/motion/imagined_reward_per_step",
   "survival_at_horizon": "diagnostic/motion/imagined_survival",
 }
@@ -57,6 +59,8 @@ TASK_UPDATE_METRICS = {
   "bootstrap_objective": "objective/{task}/bootstrap_value",
   "alignment_loss": "loss/{task}/latent_alignment_mse",
   "critic_loss": "loss/critic/{task}",
+  "critic_raw_value_max": "diagnostic/{task}/critic_raw_value_max",
+  "critic_value_above_cap_fraction": "diagnostic/{task}/critic_value_above_cap_fraction",
   "actor_gradient_norm": "gradient/{task}/actor_preclip_norm",
   "survival": "diagnostic/{task}/imagined_survival",
   "warmup_skipped": "diagnostic/{task}/warmup_skipped",

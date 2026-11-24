@@ -6,6 +6,7 @@ from dataclasses import asdict
 
 import torch
 
+from ..config.task_cfg import DEFAULT_RESET_SOFTMAX_CAP
 from ..data.episode_statistics import EpisodeSummary
 from ..data.replay_buffer import ReplayBuffer
 from ..mdp.velocity import measured_velocity
@@ -329,6 +330,8 @@ class VelocityTrainer(OnlineTrainer):
         -trace["objective"], self.actor, self.actor_optimizer, element_clip=0.1
       )
     objective = float(trace["objective"].detach())
+    raw_value_max = float(trace["critic_raw_value_max"])
+    value_above_cap_fraction = float(trace["critic_value_above_cap_fraction"])
     critic_trace = {
       key: trace[key].detach()
       for key in ("rewards", "continuation", "values", "critic_features", "mask")
@@ -342,6 +345,8 @@ class VelocityTrainer(OnlineTrainer):
       "motion/objective": objective,
       "motion/actor_gradient_norm": norm,
       "motion/critic_loss": loss,
+      "motion/critic_raw_value_max": raw_value_max,
+      "motion/critic_value_above_cap_fraction": value_above_cap_fraction,
     }
 
   def update_velocity(self):
@@ -534,9 +539,15 @@ class VelocityTrainer(OnlineTrainer):
       )
     # Base resume expects one replay row per environment; mixed replay only has
     # the motion half, so restore the common pieces explicitly here.
-    if ({"robot": "g1_29dof", **saved["config"]}) != asdict(self.config) or saved[
-      "clips"
-    ] != self.env.library.names:
+    if (
+      {
+        "robot": "g1_29dof",
+        "motion_storage": "full",
+        "motion_fk_cache_frames": 262144,
+        "reset_softmax_cap": DEFAULT_RESET_SOFTMAX_CAP,
+        **saved["config"],
+      }
+    ) != asdict(self.config) or saved["clips"] != self.env.library.names:
       raise ValueError("Training configuration or motion library mismatch")
     validate_robot_metadata(saved["robot_metadata"], self.metadata)
     if saved["simulation"] != self.simulation_parameters:

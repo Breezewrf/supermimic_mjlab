@@ -54,7 +54,9 @@ def main(*, playback=False):
   source = parser.add_mutually_exclusive_group(required=True)
   source.add_argument("--manifest", type=Path, help="Existing motion manifest")
   source.add_argument("--motion", type=Path, help="Single NPZ reference motion")
-  source.add_argument("--motion-dir", type=Path, help="Recursively load NPZ motions from a directory")
+  source.add_argument(
+    "--motion-dir", type=Path, help="Recursively load NPZ motions from a directory"
+  )
   parser.add_argument("--clips", nargs="*", default=[])
   parser.add_argument("--device", default="cuda:0")
   parser.add_argument("--seed", type=int, default=0)
@@ -213,12 +215,19 @@ def main(*, playback=False):
 
   try:
     num_envs = evaluation_env_count(
-      args.manifest, tuple(args.clips), max_envs,
-      motion=args.motion, motion_dir=args.motion_dir,
+      args.manifest,
+      tuple(args.clips),
+      max_envs,
+      motion=args.motion,
+      motion_dir=args.motion_dir,
     )
   except (ValueError, OSError, KeyError) as error:
     parser.error(str(error))
   config = FoundationConfig(
+    motion_storage=args.motion_storage or "full",
+    motion_fk_cache_frames=(
+      262144 if args.motion_fk_cache_frames is None else args.motion_fk_cache_frames
+    ),
     robot=args.robot,
     manifest=args.manifest,
     motion=args.motion,

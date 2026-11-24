@@ -48,7 +48,6 @@ class ResetScoreTests(unittest.TestCase):
         0,
         torch.arange(start, start + steps),
         torch.full((steps,), 0.1),
-        terminated=False,
       )
     torch.testing.assert_close(sampler.probabilities(), before, atol=1e-7, rtol=1e-5)
     torch.testing.assert_close(
@@ -57,7 +56,7 @@ class ResetScoreTests(unittest.TestCase):
 
   def test_early_failure_is_scored_against_possible_remaining_length(self):
     sampler = ResetSampler(torch.tensor([10001]), mode="return", ema=1.0)
-    sampler.update_episode(0, torch.arange(5), torch.full((5,), 0.1), terminated=True)
+    sampler.update_episode(0, torch.arange(5), torch.full((5,), 0.1))
     self.assertLess(float(sampler.returns[0] / sampler.max_return), 0.05)
     self.assertGreater(
       float(sampler.probabilities()[0]), float(sampler.probabilities()[1])
@@ -69,17 +68,62 @@ class ResetScoreTests(unittest.TestCase):
 
   def test_shared_start_bin_aggregates_episodes_before_ema(self):
     sampler = ResetSampler(torch.tensor([1001]), mode="return", ema=0.2)
+    sampler.update_episode(0, torch.arange(500), torch.full((500,), 0.1))
     sampler.update_episodes(
       torch.tensor([0, 0]),
       torch.tensor([0, 10]),
       torch.tensor([0.0, 0.0]),
-      torch.tensor([0.0, 0.0]),
       torch.tensor([1, 1]),
-      torch.tensor([True, True]),
+      500,
     )
     self.assertAlmostEqual(float(sampler.returns[0]), 8.0)
-    self.assertEqual(sampler.history_updates, 1)
+    self.assertEqual(sampler.history_updates, 2)
     self.assertAlmostEqual(float(sampler.probabilities().sum()), 1.0, places=6)
+
+  def test_short_tail_cannot_dominate_current_or_historical_sampling(self):
+    sampler = ResetSampler(torch.tensor([50_003]), mode="return")
+    tail_bin = len(sampler.returns) - 1
+    sampler.update_episode(0, torch.tensor([50_000]), torch.tensor([-0.2]))
+    self.assertEqual(sampler.returns[tail_bin], 0)
+    self.assertTrue(sampler.visited[tail_bin])
+    n = len(sampler.returns)
+    for _ in range(3):
+      sampler.update_episode(0, torch.tensor([50_000]), torch.tensor([-0.2]))
+      self.assertLessEqual(float(sampler.historical.max()), 50 / n + 1e-8)
+      probabilities = sampler.probabilities()
+      self.assertAlmostEqual(float(probabilities.sum()), 1.0, places=6)
+      self.assertAlmostEqual(float(probabilities[tail_bin]), 25.5 / n, places=7)
+
+  def test_per_environment_time_limits_and_first_visit_scoring(self):
+    sampler = ResetSampler(torch.tensor([1001, 1001]), mode="return")
+    sampler.update_episodes(
+      torch.tensor([0, 1]),
+      torch.tensor([0, 0]),
+      torch.tensor([0.05, 0.05 + 0.99 * 0.05]),
+      torch.tensor([1, 2]),
+      torch.tensor([1, 2]),
+    )
+    torch.testing.assert_close(
+      sampler.returns[sampler.bin_offsets] / sampler.max_return,
+      torch.tensor([0.5, 0.5]),
+    )
+
+  def test_v2_resume_discards_old_scores_and_history_but_restores_rng(self):
+    sampler = ResetSampler(torch.tensor([101]), mode="return", seed=3)
+    sampler.sample(20)
+    state = {
+      "schema_version": 2,
+      "returns": torch.tensor([-12.0, 10.0]),
+      "historical": torch.tensor([1.0, 0.0]),
+      "history_updates": 200,
+      "generator": sampler.generator.get_state(),
+    }
+    restored = ResetSampler(torch.tensor([101]), mode="return")
+    restored.load_state_dict(state)
+    self.assertEqual(restored.history_updates, 0)
+    self.assertFalse(restored.visited.any())
+    torch.testing.assert_close(restored.probabilities(), torch.tensor([0.5, 0.5]))
+    torch.testing.assert_close(restored.generator.get_state(), state["generator"])
 
   def test_legacy_sampler_scores_are_not_silently_reused(self):
     sampler = ResetSampler(torch.tensor([101]))

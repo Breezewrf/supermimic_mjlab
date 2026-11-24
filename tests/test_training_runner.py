@@ -27,6 +27,7 @@ class TrainingRuntimeTests(unittest.TestCase):
       log_format="table",
       verbose_sim=False,
       wandb=False,
+      tensorboard=False,
       resume=None,
       checkpoint_interval=2,
       full_checkpoint_interval=3,
@@ -145,3 +146,36 @@ class TrainingRuntimeTests(unittest.TestCase):
       runtime.start_tracking({}, reporter=reporter)
       torch.testing.assert_close(torch.get_rng_state(), before)
     runtime.tracking.close.assert_called_once_with(exit_code=0)
+
+  def test_tensorboard_logs_training_and_evaluation_and_purges_rollback(self):
+    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+
+    self.args.tensorboard = True
+    self.args.iterations = 3
+    trainer = SimpleNamespace(iteration=0)
+
+    def step():
+      trainer.iteration += 1
+      return record(trainer.iteration)
+
+    trainer.train_iteration = step
+    with TrainingRuntime(self.args, self.output, self.console) as runtime:
+      runtime.trainer = trainer
+      self.assertIsNone(runtime.start_tracking({}))
+      runtime.train(MetricWindow, checkpoint=lambda _: None)
+      runtime.tensorboard.evaluation({"normalized_return": 0.25}, 3)
+
+    self.args.resume = self.output / "last.pt"
+    self.args.iterations = 2
+    trainer.iteration = 1
+    with TrainingRuntime(self.args, self.output, self.console) as runtime:
+      runtime.trainer = trainer
+      runtime.start_tracking({})
+      runtime.train(MetricWindow, checkpoint=lambda _: None)
+      runtime.tensorboard.evaluation({"normalized_return": 0.5}, 2)
+
+    events = EventAccumulator(str(self.output / "tensorboard")).Reload()
+    training = events.Scalars("loss/world_model/total")
+    evaluation = events.Scalars("evaluation/normalized_return")
+    self.assertEqual([event.step for event in training], [1, 2])
+    self.assertEqual([(event.step, event.value) for event in evaluation], [(2, 0.5)])

@@ -1,9 +1,31 @@
 """Resolve robot selection and variant-specific defaults at script boundaries."""
 
 from .morphology import ROBOTS, robot_layout
+from .task_cfg import DEFAULT_RESET_SOFTMAX_CAP
+
+
+def add_reset_sampling_arguments(parser):
+  parser.add_argument(
+    "--reset-softmax-cap",
+    type=float,
+    help=f"Cap each bin's hard-sampling probability at this multiple of uniform mass "
+    f"(default: {DEFAULT_RESET_SOFTMAX_CAP:g}; 0 disables the cap)",
+  )
 
 
 def add_robot_argument(parser):
+  parser.add_argument(
+    "--motion-storage",
+    choices=("full", "compact"),
+    default=None,
+    help="Reference storage (default: full, or saved training setting)",
+  )
+  parser.add_argument(
+    "--motion-fk-cache-frames",
+    type=int,
+    default=None,
+    help="Compact reference FK cache capacity (default: 262144; 0 disables)",
+  )
   parser.add_argument(
     "--robot",
     choices=ROBOTS,

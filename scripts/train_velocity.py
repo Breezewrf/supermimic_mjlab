@@ -12,7 +12,11 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.tasks.supermimic.config.cli import add_robot_argument, resolve_robot_arguments
+from src.tasks.supermimic.config.cli import (
+  add_reset_sampling_arguments,
+  add_robot_argument,
+  resolve_robot_arguments,
+)
 from src.tasks.supermimic.config.morphology import robot_layout
 from src.tasks.supermimic.config.rl_cfg import OnlineConfig
 from src.tasks.supermimic.config.task_cfg import FoundationConfig
@@ -40,6 +44,7 @@ from src.tasks.supermimic.velocity_env import VelocityEnv
 def parser():
   p = argparse.ArgumentParser(description=__doc__)
   add_robot_argument(p)
+  add_reset_sampling_arguments(p)
   p.add_argument("--manifest", type=Path)
   p.add_argument(
     "--actor-checkpoint",
@@ -148,12 +153,20 @@ def main():
       raise ValueError("Expected a velocity training checkpoint")
     if args.iterations < saved["iteration"]:
       argument_parser.error("--iterations cannot be below the saved iteration")
-    cfg = OnlineConfig(**saved["config"])
+    restored = asdict(OnlineConfig()) | saved["config"]
+    for key in ("motion_storage", "motion_fk_cache_frames", "reset_softmax_cap"):
+      if getattr(args, key) is not None and getattr(args, key) != restored[key]:
+        argument_parser.error(f"Resume requires original {key}")
+    cfg = OnlineConfig(**restored)
     velocity = VelocityConfig(**saved["velocity_config"])
     stage = saved["stage"]
   else:
     names = {f.name for f in fields(OnlineConfig)}
-    values = {key: value for key, value in vars(args).items() if key in names}
+    values = {
+      key: value
+      for key, value in vars(args).items()
+      if key in names and value is not None
+    }
     for key in ("clips", "actor_dims", "world_dims", "critic_dims"):
       values[key] = tuple(values[key])
     values.update(
@@ -228,22 +241,27 @@ def main():
     "manifest": str(args.manifest.resolve()),
     "manifest_sha256": file_sha256(args.manifest),
     "timing_override_on_resume": bool(args.resume and timing_override),
+    "tensorboard": args.tensorboard,
   }
   args.output.mkdir(parents=True, exist_ok=bool(saved))
   write_json(args.output / "config.json", run)
   console = VelocityConsoleReporter(args.iterations, args.log_format)
   console.message(f"Initializing simulation; details: {args.output / 'simulator.log'}")
   metadata = robot_metadata(args.robot)
+  initial_motion_report = None
   with TrainingRuntime(args, args.output, console) as runtime:
     with simulator_output(runtime.sim_log, verbose=args.verbose_sim):
       env = runtime.env = VelocityEnv(
         FoundationConfig.training(
           robot=args.robot,
           manifest=args.manifest,
+          motion_storage=cfg.motion_storage,
+          motion_fk_cache_frames=cfg.motion_fk_cache_frames,
           clips=cfg.clips,
           num_envs=cfg.num_envs,
           seed=cfg.seed,
           episode_length_s=cfg.episode_length_s,
+          reset_softmax_cap=cfg.reset_softmax_cap,
         ),
         velocity,
         args.device,
@@ -266,14 +284,15 @@ def main():
         if args.initial_evaluation_steps:
           from train_supermimic import evaluate_actor
 
-          report = evaluate_actor(
+          initial_motion_report = evaluate_actor(
             trainer.actor,
             args.manifest,
             cfg,
             args.device,
             args.initial_evaluation_steps,
+            library=env.library,
           )
-          write_json(args.output / "initial_motion_evaluation.json", report)
+          write_json(args.output / "initial_motion_evaluation.json", initial_motion_report)
         trainer.bootstrap()
 
     console.start(
@@ -300,6 +319,8 @@ def main():
     )
 
     tracking = runtime.start_tracking(run, reporter=VelocityWandbReporter)
+    if runtime.tensorboard and initial_motion_report is not None:
+      runtime.tensorboard.evaluation(initial_motion_report, trainer.iteration)
 
     def save(historical=False):
       full = trainer.state_dict() | {

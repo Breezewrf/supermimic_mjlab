@@ -13,6 +13,9 @@ from .state import (
   yaw_quat,
 )
 
+# Four unit-weight tracking terms and two half-weight pelvis terms.
+MAX_MOTION_STEP_REWARD = 5.0 * STEP_DT
+
 
 def tracking_reward(
   state: Tensor,
