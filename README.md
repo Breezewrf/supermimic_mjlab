@@ -13,6 +13,10 @@ English | [简体中文](README_zh.md)
   - [Online training](#online-training)
     - [Ablation results and released checkpoint](#ablation-results-and-released-checkpoint)
     - [Resume training](#resume-training)
+  - [BONES-SEED](#bones-seed)
+    - [Prepare BONES-SEED motions](#prepare-bones-seed-motions)
+    - [Train on BONES-SEED](#train-on-bones-seed)
+    - [BONES-SEED checkpoint and evaluation](#bones-seed-checkpoint-and-evaluation)
   - [Play OOD motions](#play-ood-motions)
   - [Sim2Real](#sim2real)
   - [Training logs and W\&B](#training-logs-and-wb)
@@ -27,10 +31,11 @@ A reproduction of [SuperMimic](doc/supermimic.pdf) for multi-motion tracking on 
 Unitree G1. The current policy collects simulator transitions, a differentiable world model learns from 8-step autoregressive
 windows, and the Actor and Critic train through 32-step imagined rollouts.
 
-The current dataset contains 40 G1-retargeted LAFAN clips, approximately 2.45 hours
-of motion, at a control rate of 50 Hz.
+Training supports G1-retargeted LAFAN and [BONES-SEED](#bones-seed) at 50 Hz.
+The LAFAN set has 40 clips (about 2.45 hours). The filtered BONES-SEED set used
+for the checkpoint below has 128,961 clips (about 261.8 hours).
 
-Full-scale training uses a single **NVIDIA RTX A6000 with 48 GB of GPU memory**;
+The LAFAN run uses a single **NVIDIA RTX A6000 with 48 GB of GPU memory**.
 **15000 iterations take approximately 4 hours** with 4096 environments and FP32
 networks. GPUs with less memory can use fewer environments and smaller batches;
 see the [reduced-workload configuration](doc/training_and_playback_en.md#reduced-training-workload), but performance not verified.
@@ -141,6 +146,8 @@ The `offline/` scripts support diagnostics and offline experiments; online train
 can start directly without running them.
 
 ## Prepare motion data
+
+For BONES-SEED, use the [BONES-SEED conversion workflow](#prepare-bones-seed-motions).
 
 G1 29DoF and 23DoF share the same workflow. Select the robot with `--robot`
 (default: `g1_29dof`) and use matching retargeted motion data. The example below
@@ -299,6 +306,102 @@ python scripts/train_supermimic.py \
   --iterations 32000
 ```
 
+
+## BONES-SEED
+
+<details>
+<summary>Show BONES-SEED setup, training, and evaluation</summary>
+
+### Prepare BONES-SEED motions
+
+Accept the dataset terms and download `g1.tar.gz` from the
+[BONES-SEED dataset](https://huggingface.co/datasets/bones-studio/seed). Extract it
+under `src/assets/motions/bone-seed/` so the source CSVs are in `g1/csv/<date>/`.
+From the repository root, run the filter used for this training recipe.
+
+```bash
+python scripts/data/filter_bones_seed_unisupermimic.py \
+  src/assets/motions/bone-seed \
+  --output-dir src/assets/motions/bone-seed-unisupermimic \
+  --robot g1_29dof --workers 8
+```
+
+The filter resamples 120 Hz G1 CSVs to 50 Hz. It checks filenames and uses MuJoCo
+to screen for elevated support, floor penetration, and floating feet during
+stationary standing. The geometry and filename rules are based on
+[Uni-SuperMimic](https://github.com/Motphys/Uni-SuperMimic/blob/e8da48fa20d62d41235d364ae0170a4cc58bcfc8/src/unisupermimic/data/boneseed.py).
+It also [filters out motions that require external support](scripts/data/bones_seed_support.py).
+
+Output includes `g1/npz/`, `manifest.json`, and `filter_decisions.jsonl`. The same
+command can resume from those decisions. The command above preserves the source
+CSVs. Only use `--override` when you intend to delete each handled source CSV,
+including rejected clips.
+
+The [interactive MuJoCo review tool](scripts/data/iteractive_review_bones_seed.py) records
+keep or discard decisions for each clip. It exports a separate keep-only manifest
+and preserves the original NPZs.
+
+### Train on BONES-SEED
+
+For large libraries, `--motion-storage compact` keeps 71 values per G1 29DoF frame
+on the training GPU to save memory. The three root position values use FP32 and
+the other 68 use FP16.
+MuJoCo-compatible G1 forward kinematics reconstructs body states on demand with a
+bounded **frame cache** that reuses FK results. The 47.13 million frames in this run use about 6.50 GiB for
+the compact motion arrays alone. Training and in-process evaluation share the
+motion library. CPU workers load NPZs in parallel with a progress bar. The policy
+still uses 2680D full-body references. See the
+[compact storage and FK guide](doc/training_and_playback_en.md#large-motion-libraries-compact-storage-and-fk-caching).
+
+```bash
+python scripts/train_supermimic.py \
+  --manifest src/assets/motions/bone-seed-unisupermimic/manifest.json \
+  --robot g1_29dof --device cuda:0 --seed 0 \
+  --motion-storage compact --motion-fk-cache-frames 262144 --motion-load-workers 8 \
+  --reference-dim 2680 --world-prediction state_delta --termination-mode learned \
+  --actor-input-normalization --critic-input-normalization \
+  --world-model-normalization --motion-anchor-ori-b \
+  --amp none --no-compile --reset-softmax-cap 50 \
+  --num-envs 4096 --capacity 1000 --warmup-steps 32 --wm-only-iters 0 \
+  --collect-steps 5 --updates-per-collect 2 --wm-batches 10 --wm-batch-size 2048 \
+  --policy-batch-size 4096 --horizon 32 --critic-epochs 5 --critic-minibatches 4 \
+  --learning-rate 2e-4 --world-dims 2048 2048 2048 \
+  --actor-dims 2048 1024 512 256 --critic-dims 256 128 \
+  --iterations 10000 --checkpoint-interval 2000 \
+  --skip-initial-evaluation --eval-interval 10000 --eval-num-envs 4096 \
+  --tensorboard --output outputs/supermimic/bones-seed
+```
+
+Run `tensorboard --logdir outputs/supermimic/bones-seed/tensorboard` to view the training curves.
+
+### BONES-SEED checkpoint and evaluation
+
+The G1 29DoF checkpoint was trained for 10,000 iterations with FP32 networks and
+4,096 environments on one **NVIDIA RTX 6000 Ada Generation**. The logged
+iterations total **4 h 18 min** for collection and optimization. Peak PyTorch
+allocation during training was **39.39 GiB**. The final full evaluation took
+**1 h 45 min** with 4,096 environments.
+
+| Evaluation set | Successful motions | Mean completion | Normalized return |
+| --- | ---: | ---: | ---: |
+| Filtered BONES-SEED training set | **128,728 / 128,961 (99.82%)** | **99.90%** | **0.9212** |
+
+```bash
+python scripts/play_supermimic.py \
+  --device cuda:0 --checkpoint checkpoints/bones-seed/policy_best.pt \
+  --manifest src/assets/motions/bone-seed-unisupermimic/manifest.json \
+  --clips g1/npz/210531/jump_and_land_heavy_001__A001 --loop
+```
+
+```bash
+python scripts/evaluate_supermimic.py \
+  --device cuda:0 --checkpoint checkpoints/bones-seed/policy_best.pt \
+  --manifest src/assets/motions/bone-seed-unisupermimic/manifest.json \
+  --motion-storage compact --motion-fk-cache-frames 262144 --num-envs 4096 \
+  --output outputs/supermimic/bones_seed_evaluation.json
+```
+
+</details>
 
 ## Play OOD motions
 

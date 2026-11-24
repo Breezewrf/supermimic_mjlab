@@ -483,4 +483,6 @@ matched full body states within 1e-5 absolute error. A warm-cache CUDA lookup
 microbenchmark (4096 fixed starts, 42 frames each, 3 warmups, 10 synchronized
 repeats) measured about 0.52 ms full, 8.28 ms compact without cache and 0.77 ms
 compact with cache. The clip fits entirely in cache; these are not full-library
-hit rates or end-to-end training timings. Full BONES-SEED remains untested here.
+hit rates or end-to-end training timings. The
+[BONES-SEED run](../README.md#bones-seed-checkpoint-and-evaluation) reports full-set
+training and evaluation timings with mixed-precision compact motion storage.

@@ -13,6 +13,10 @@
   - [在线训练](#在线训练)
     - [消融结果与发布模型](#消融结果与发布模型)
     - [断点恢复](#断点恢复)
+  - [BONES-SEED](#bones-seed)
+    - [准备 BONES-SEED 动作](#准备-bones-seed-动作)
+    - [训练 BONES-SEED](#训练-bones-seed)
+    - [BONES-SEED 权重与评估](#bones-seed-权重与评估)
   - [Play OOD 动作](#play-ood-动作)
   - [Sim2Real](#sim2real)
   - [训练日志与 W\&B](#训练日志与-wb)
@@ -27,12 +31,14 @@
 真实仿真转移，世界模型用 8 步自回归窗口学习动力学，再通过 32 步可微想象训练
 Actor 和 Critic。
 
-当前数据集包含 40 段 G1 重定向 LAFAN 动作，约 2.45 小时，控制频率为 50 Hz。
+训练支持 G1 重定向的 LAFAN 和 [BONES-SEED](#bones-seed)，控制频率为 50 Hz。
+LAFAN 包含 40 段动作，约 2.45 小时。下方 BONES-SEED 权重使用筛选后的
+128,961 段动作，约 261.8 小时。
 
 新增 93 维观测的速度控制接口，支持速度 encoder 预热、motion/velocity 联合训练以及
 不依赖参考动作的独立播放。训练方法与短跑验证结果见[速度控制说明](doc/velocity_controller_zh.md)。
 
-完整规模训练使用单张 **NVIDIA RTX A6000（48 GB 显存）**，在 4096 环境、FP32
+LAFAN 训练使用单张 **NVIDIA RTX A6000（48 GB 显存）**，在 4096 环境、FP32
 配置下训练 **15000 轮约需 4 小时**。显存较小的 GPU 可通过减少环境数和 batch size
 缩小训练规模，具体配置见[训练操作指南](doc/training_and_playback_zh.md#缩小训练规模)，性能未经验证。
 
@@ -136,6 +142,8 @@ scripts/
 在线训练不需要先运行这些脚本。
 
 ## 准备动作数据
+
+BONES-SEED 使用[独立的筛选和转换流程](#准备-bones-seed-动作)。
 
 G1 29DoF 和 23DoF 使用相同流程，通过 `--robot` 选择机器人（默认 `g1_29dof`），
 并准备与之匹配的 retarget 动作数据。下面以
@@ -281,6 +289,96 @@ python scripts/train_supermimic.py \
   --device cuda:0 --resume outputs/supermimic/run/last.pt \
   --iterations 32000
 ```
+
+## BONES-SEED
+
+<details>
+<summary>展开 BONES-SEED 数据准备、训练和评估</summary>
+
+### 准备 BONES-SEED 动作
+
+在 [BONES-SEED 数据集](https://huggingface.co/datasets/bones-studio/seed) 页面接受数据集条款，
+下载 `g1.tar.gz`，解压到 `src/assets/motions/bone-seed/`，使原始 CSV 位于
+`g1/csv/<date>/`。在仓库根目录运行以下筛选和转换命令。
+
+```bash
+python scripts/data/filter_bones_seed_unisupermimic.py \
+  src/assets/motions/bone-seed \
+  --output-dir src/assets/motions/bone-seed-unisupermimic \
+  --robot g1_29dof --workers 8
+```
+
+脚本将 G1 的 120 Hz CSV 重采样到 50 Hz，按文件名和 MuJoCo 几何检查过滤依赖高处支撑、
+穿地或静止站立时双脚悬空的动作，
+几何和文件名规则基于
+[Uni-SuperMimic](https://github.com/Motphys/Uni-SuperMimic/blob/e8da48fa20d62d41235d364ae0170a4cc58bcfc8/src/unisupermimic/data/boneseed.py)。
+并[额外过滤了需要外部支撑才能完成的动作](scripts/data/bones_seed_support.py)。
+
+产物包括 `g1/npz/`、`manifest.json` 和 `filter_decisions.jsonl`。可用同一命令
+按已记录的决定续跑。上述命令保留原始 CSV。`--override` 会在记录决定后删除已处理的
+CSV，包括被筛掉的动作。
+
+仓库还提供[MuJoCo 交互可视化Review工具](scripts/data/iteractive_review_bones_seed.py)。审片工具逐条记录去留，
+导出仅包含人工保留动作的独立 manifest，并保留原始 NPZ。
+
+### 训练 BONES-SEED
+
+`--motion-storage compact` 将 G1 29DoF 的每帧状态以 71 维紧凑格式驻留在训练 GPU 来节省训练时占用的显存。
+根位置 3 维用 FP32，其余 68 维用 FP16。读取参考时通过 G1 FK 重建刚体状态，并用固定
+容量的**帧缓存**复用FK结果。本次训练约 4,713 万帧，紧凑动作数组本身占约 6.50 GiB。
+训练和进程内评估共享动作库，多个 CPU worker 并行加载 NPZ 并显示进度。
+策略仍使用 2680 维全身参考。详见[紧凑加载与 FK 缓存](doc/training_and_playback_zh.md#大规模动作库紧凑加载与-fk-缓存)。
+
+```bash
+python scripts/train_supermimic.py \
+  --manifest src/assets/motions/bone-seed-unisupermimic/manifest.json \
+  --robot g1_29dof --device cuda:0 --seed 0 \
+  --motion-storage compact --motion-fk-cache-frames 262144 --motion-load-workers 8 \
+  --reference-dim 2680 --world-prediction state_delta --termination-mode learned \
+  --actor-input-normalization --critic-input-normalization \
+  --world-model-normalization --motion-anchor-ori-b \
+  --amp none --no-compile --reset-softmax-cap 50 \
+  --num-envs 4096 --capacity 1000 --warmup-steps 32 --wm-only-iters 0 \
+  --collect-steps 5 --updates-per-collect 2 --wm-batches 10 --wm-batch-size 2048 \
+  --policy-batch-size 4096 --horizon 32 --critic-epochs 5 --critic-minibatches 4 \
+  --learning-rate 2e-4 --world-dims 2048 2048 2048 \
+  --actor-dims 2048 1024 512 256 --critic-dims 256 128 \
+  --iterations 10000 --checkpoint-interval 2000 \
+  --skip-initial-evaluation --eval-interval 10000 --eval-num-envs 4096 \
+  --tensorboard --output outputs/supermimic/bones-seed
+```
+
+运行
+`tensorboard --logdir outputs/supermimic/bones-seed/tensorboard` 查看训练曲线。
+
+### BONES-SEED 权重与评估
+
+G1 29DoF 权重使用单张 **NVIDIA RTX 6000 Ada Generation**、4,096 个环境和 FP32 网络
+训练 10,000 轮。日志记录的采集与优化累计 **4 小时 18 分钟**，训练期间 PyTorch
+峰值分配 **39.39 GiB**。最终全量评估使用 4,096 个环境，耗时 **1 小时 45 分钟**。
+
+| 评估集 | 成功动作 | 平均完成率 | 归一化回报 |
+| --- | ---: | ---: | ---: |
+| 筛选后的 BONES-SEED 训练集 | **128,728 / 128,961（99.82%）** | **99.90%** | **0.9212** |
+
+
+
+```bash
+python scripts/play_supermimic.py \
+  --device cuda:0 --checkpoint checkpoints/bones-seed/policy_best.pt \
+  --manifest src/assets/motions/bone-seed-unisupermimic/manifest.json \
+  --clips g1/npz/210531/jump_and_land_heavy_001__A001 --loop
+```
+
+```bash
+python scripts/evaluate_supermimic.py \
+  --device cuda:0 --checkpoint checkpoints/bones-seed/policy_best.pt \
+  --manifest src/assets/motions/bone-seed-unisupermimic/manifest.json \
+  --motion-storage compact --motion-fk-cache-frames 262144 --num-envs 4096 \
+  --output outputs/supermimic/bones_seed_evaluation.json
+```
+
+</details>
 
 ## Play OOD 动作
 

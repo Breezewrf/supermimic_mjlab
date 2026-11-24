@@ -21,6 +21,7 @@ from tqdm import tqdm
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts/data"))
+from bones_seed_support import SUPPORT_KEYWORDS, WALL_JUMP_KEYWORD
 from convert_lafan_to_npz import (
   CSV_JOINT_NAMES,
   load_robot,
@@ -74,10 +75,24 @@ KEYWORDS = (
   "walking_on_edge",
   "push_obstacle",
   "jump_off_50cm",
+  WALL_JUMP_KEYWORD,
   "look_over_fence",
   "_box_",
   "box_",
-)
+) + SUPPORT_KEYWORDS
+THRESHOLDS = {
+  "z_high_m": 0.2,
+  "z_high_frames": 30,
+  "z_penetration_m": -0.12,
+  "z_penetration_fraction_m": -0.08,
+  "z_penetration_fraction": 0.8,
+  "foot_distance_m": 0.02,
+  "floating_frames": 25,
+  "standing_height_m": [0.65, 1.0],
+  "upright_deg": 20,
+  "stationary_speed_mps": 0.15,
+  "stationary_omega_rps": 0.5,
+}
 
 
 def read_csv(path):
@@ -124,8 +139,8 @@ def longest(mask):
   return best
 
 
-def build_reference_states(model, motion, joint_names):
-  """Map CSV joints into MuJoCo state order and differentiate adjacent poses."""
+def build_reference_positions(model, motion, joint_names):
+  """Map CSV joints into MuJoCo state order."""
   free_joint = int(np.flatnonzero(model.jnt_type == mujoco.mjtJoint.mjJNT_FREE)[0])
   root_address = model.jnt_qposadr[free_joint]
   joint_addresses = np.array(
@@ -135,6 +150,12 @@ def build_reference_states(model, motion, joint_names):
   positions = np.tile(model.qpos0, (len(motion), 1))
   positions[:, root_address : root_address + 7] = motion[:, :7]
   positions[:, joint_addresses] = motion[:, 7:][:, csv_joint_indices]
+  return positions
+
+
+def build_reference_states(model, motion, joint_names):
+  """Map CSV poses and differentiate adjacent poses."""
+  positions = build_reference_positions(model, motion, joint_names)
   velocities = np.zeros((len(positions), model.nv))
   velocity_buffer = np.zeros(model.nv)
   for i in range(len(positions)):
@@ -198,9 +219,8 @@ def measure_geometry(model, positions, velocities, body_names):
   return (lowest_heights, foot_distances)
 
 
-def convert(source_path, output_path, model, joint_names, body_names):
-  """Filter one motion and save its NPZ only when all feasibility checks pass."""
-  (motion, input_frames) = read_csv(source_path)
+def check_feasibility(model, motion, joint_names, body_names):
+  """Apply the original local geometry checks."""
   (positions, velocities) = build_reference_states(model, motion, joint_names)
   (lowest_heights, foot_distances) = measure_geometry(
     model, positions, velocities, body_names
@@ -216,17 +236,27 @@ def convert(source_path, output_path, model, joint_names, body_names):
     reasons.append("ground_penetration")
   if floating[2] >= 25:
     reasons.append("floating_feet")
-  result = {
-    "status": "filtered" if reasons else "keep",
+  return {
     "reason": reasons,
-    "input_frames": input_frames,
-    "frames": len(positions),
     "zmin_min_m": float(lowest_heights.min()),
     "zmin_below_minus_008_fraction": float(np.mean(lowest_heights < -0.08)),
     "elevated_frames": elevated[2],
     "floating_frames": floating[2],
   }
-  if not reasons:
+
+
+def convert(
+  source_path, output_path, model, joint_names, body_names, feasibility=check_feasibility
+):
+  """Filter one motion and save its NPZ only when all feasibility checks pass."""
+  motion, input_frames = read_csv(source_path)
+  result = feasibility(model, motion, joint_names, body_names)
+  result.update(
+    status="filtered" if result["reason"] else "keep",
+    input_frames=input_frames,
+    frames=len(motion),
+  )
+  if result["status"] == "keep":
     arrays = motion_to_arrays(model, joint_names, body_names, motion, FPS)
     arrays.update(
       {
@@ -247,16 +277,24 @@ def convert(source_path, output_path, model, joint_names, body_names):
 _WORKER_CONTEXT = None
 
 
-def initialize_worker(root, output_path, robot, keywords):
+def initialize_worker(root, output_path, robot, keywords, feasibility=check_feasibility):
   """Compile one independent MuJoCo model per process and reuse it across clips."""
   global _WORKER_CONTEXT
   model, joints, _, _ = load_robot(model_xml=robot_layout(robot).xml, robot=robot)
-  _WORKER_CONTEXT = root, output_path, keywords, model, joints, tracked_bodies(robot)
+  _WORKER_CONTEXT = (
+    root,
+    output_path,
+    keywords,
+    model,
+    joints,
+    tracked_bodies(robot),
+    feasibility,
+  )
 
 
 def process_clip(source_path):
   """Convert one clip; the parent alone commits decisions and removes CSVs."""
-  root, output_path, keywords, model, joints, bodies = _WORKER_CONTEXT
+  root, output_path, keywords, model, joints, bodies, feasibility = _WORKER_CONTEXT
   relative_path = source_path.relative_to(root).as_posix()
   try:
     stat = source_path.stat()
@@ -267,7 +305,9 @@ def process_clip(source_path):
     if keyword:
       result = {"status": "filtered", "reason": ["name"], "keyword": keyword}
     else:
-      result = convert(source_path, output_path / destination, model, joints, bodies)
+      result = convert(
+        source_path, output_path / destination, model, joints, bodies, feasibility
+      )
       result["output"] = destination.as_posix() if result["status"] == "keep" else None
     result.update(source_size=stat.st_size, source_mtime_ns=stat.st_mtime_ns)
   except Exception as error:  # noqa: BLE001 - retain sources when individual clips fail
@@ -304,9 +344,31 @@ def process_clips(paths, workers, context):
           yield future.result()
 
 
-def main():
+def can_resume_after_name_filter_update(saved, config, previous):
+  """Accept additive local exclusions once affected keep decisions are cleared."""
+  old_keywords = saved["keywords"]
+  new_keywords = config["keywords"]
+  added = set(new_keywords) - set(old_keywords)
+  if not added or not added.issubset((*SUPPORT_KEYWORDS, WALL_JUMP_KEYWORD)):
+    return False
+  if saved != {**config, "keywords": [k for k in new_keywords if k not in added]}:
+    return False
+  return not any(
+    row["status"] == "keep" and any(k in Path(source).stem.lower() for k in added)
+    for source, row in previous.items()
+  )
+
+
+def main(
+  *,
+  keywords=KEYWORDS,
+  thresholds=THRESHOLDS,
+  feasibility=check_feasibility,
+  ruleset=None,
+  description=__doc__,
+):
   """Parse paths, resume recorded decisions, and write the loader manifest."""
-  parser = argparse.ArgumentParser(description=__doc__)
+  parser = argparse.ArgumentParser(description=description)
   parser.add_argument("input", type=Path)
   parser.add_argument("--output-dir", type=Path)
   parser.add_argument(
@@ -346,31 +408,27 @@ def main():
     "robot": args.robot,
     "fps_in": 120,
     "fps_out": FPS,
-    "keywords": list(KEYWORDS) + args.add_keywords,
-    "thresholds": {
-      "z_high_m": 0.2,
-      "z_high_frames": 30,
-      "z_penetration_m": -0.12,
-      "z_penetration_fraction_m": -0.08,
-      "z_penetration_fraction": 0.8,
-      "foot_distance_m": 0.02,
-      "floating_frames": 25,
-      "standing_height_m": [0.65, 1.0],
-      "upright_deg": 20,
-      "stationary_speed_mps": 0.15,
-      "stationary_omega_rps": 0.5,
-    },
+    "keywords": list(keywords) + args.add_keywords,
+    "thresholds": thresholds,
   }
+  if ruleset is not None:
+    config["ruleset"] = ruleset
   previous = {}
   if state.exists():
     saved = json.loads(state.read_text())
-    if saved["config"] != config:
-      parser.error("Resume settings differ from existing state")
     if report.exists():
       with report.open() as f:
         for line in f:
           row = json.loads(line)
           previous[row["source"]] = row
+    if saved["config"] != config:
+      if not report.is_file() or not can_resume_after_name_filter_update(
+        saved["config"], config, previous
+      ):
+        parser.error("Resume settings differ from existing state")
+      tmp = state.with_suffix(".json.tmp")
+      tmp.write_text(json.dumps({**saved, "config": config}, ensure_ascii=False))
+      tmp.replace(state)
   elif output_path != root and any(output_path.iterdir()):
     parser.error(f"Refusing non-empty output: {output_path}")
   else:
@@ -398,7 +456,7 @@ def main():
         source_path.unlink()
     else:
       pending_paths.append(source_path)
-  context = (root, output_path, args.robot, keywords)
+  context = (root, output_path, args.robot, keywords, feasibility)
   completed = process_clips(pending_paths, args.workers, context)
   for result in tqdm(
     completed, total=len(pending_paths), desc="Filter + convert", unit="clip"

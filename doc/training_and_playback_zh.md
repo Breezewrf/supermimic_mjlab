@@ -391,7 +391,7 @@ from src.tasks.supermimic.rl.online_training import OnlineTrainer
 现有 manifest 和 NPZ 无需重新转换。在原训练命令中增加：
 
 ```bash
---manifest src/assets/motions/bone-seed/manifest.json \
+--manifest src/assets/motions/bone-seed-unisupermimic/manifest.json \
 --motion-storage compact --motion-fk-cache-frames 262144
 ```
 
@@ -421,4 +421,5 @@ CPU 和 GPU 上均完成小规模一轮在线训练、受限评估及 checkpoint
 最大绝对误差低于 1e-5。固定 4096 个起点、每次请求 42 帧、预热 3 次后重复
 10 次并同步 CUDA 的微基准：full 约 0.52 ms，compact 无缓存约 8.28 ms，
 compact 有缓存约 0.77 ms。单片段可完全缓存，这些数字不能代表全量 BONES-SEED
-缓存命中率或整体训练耗时；服务器全量数据尚未验证。
+缓存命中率或整体训练耗时。使用混合精度紧凑动作存储的全量训练和评估耗时见
+[BONES-SEED 权重与评估](../README_zh.md#bones-seed-权重与评估)。
