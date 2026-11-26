@@ -56,13 +56,30 @@ def parser():
     type=Path,
     default=Path("checkpoints/best/world_model_best.pt"),
   )
+  p.add_argument(
+    "--freeze-world-model",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="Keep pretrained world weights and normalization fixed (new runs: disabled)",
+  )
   p.add_argument("--from-scratch", action="store_true")
   p.add_argument("--resume", type=Path)
   p.add_argument("--device", default="cuda:0")
   p.add_argument("--output", type=Path)
-  p.add_argument("--stage", choices=("motion", "warmup", "joint"), default="joint")
+  p.add_argument(
+    "--stage",
+    choices=("motion", "warmup", "joint"),
+    help="Training stage (new runs: joint)",
+  )
   p.add_argument("--iterations", type=int, default=100000)
-  p.add_argument("--warmup-updates", type=int, default=500)
+  p.add_argument(
+    "--velocity-config", type=Path, help="JSON velocity settings for a new run"
+  )
+  p.add_argument(
+    "--warmup-updates",
+    type=int,
+    help="Latent updates before joint training (default: 500)",
+  )
   p.add_argument(
     "--command-hold-seconds",
     type=float,
@@ -73,7 +90,6 @@ def parser():
   p.add_argument(
     "--randomize-initial-episode-progress",
     action=argparse.BooleanOptionalAction,
-    default=True,
     help="Stagger first episode timeouts (default: enabled, including resume)",
   )
   p.add_argument("--num-envs", type=int, default=4096)
@@ -114,7 +130,9 @@ def parser():
     default=250,
     help="Per-clip motion baseline check; 0 skips it",
   )
-  p.add_argument("--stand-still-weight", type=float, default=0.0)
+  p.add_argument(
+    "--stand-still-weight", type=float, help="Stand-still pose penalty (default: 0)"
+  )
   return p
 
 
@@ -131,10 +149,14 @@ def main():
     args.resume.resolve().parent if args.resume else Path("outputs/velocity/run")
   )
   if args.resume:
+    if args.velocity_config is not None:
+      argument_parser.error("--resume uses the saved velocity config")
     if args.output.resolve() != args.resume.resolve().parent:
       argument_parser.error("Resume into the checkpoint's existing output directory")
   elif args.output.exists():
     argument_parser.error("Output exists; choose a new directory or use --resume")
+  if not args.resume and args.from_scratch and args.freeze_world_model:
+    argument_parser.error("--freeze-world-model requires a pretrained world checkpoint")
   resolve_robot_arguments(args, argument_parser)
   if args.device.startswith("cuda") and not torch.cuda.is_available():
     raise RuntimeError("CUDA is unavailable in this process")
@@ -160,6 +182,14 @@ def main():
     cfg = OnlineConfig(**restored)
     velocity = VelocityConfig(**saved["velocity_config"])
     stage = saved["stage"]
+    freeze_world_model = saved.get("freeze_world_model", False)
+    if args.stage is not None and args.stage != stage:
+      argument_parser.error("Resume requires the saved training stage")
+    if (
+      args.freeze_world_model is not None
+      and args.freeze_world_model != freeze_world_model
+    ):
+      argument_parser.error("Resume requires the saved world model freeze setting")
   else:
     names = {f.name for f in fields(OnlineConfig)}
     values = {
@@ -212,15 +242,28 @@ def main():
       if not values["clips"]:
         raise ValueError("No locomotion clips found; supply --clips explicitly")
     cfg = OnlineConfig(**values)
-    velocity = VelocityConfig(
-      warmup_updates=args.warmup_updates,
-      stand_still_weight=args.stand_still_weight,
+    try:
+      settings = (
+        json.loads(args.velocity_config.read_text()) if args.velocity_config else {}
+      )
+      if not isinstance(settings, dict):
+        raise TypeError("Expected a JSON object")
+      for key in ("warmup_updates", "stand_still_weight"):
+        if getattr(args, key) is not None:
+          settings[key] = getattr(args, key)
+      velocity = VelocityConfig(**settings)
+    except (OSError, ValueError, TypeError) as error:
+      argument_parser.error(f"Invalid velocity configuration: {error}")
+    stage = args.stage or "joint"
+    freeze_world_model = bool(args.freeze_world_model)
+  randomize_progress = args.randomize_initial_episode_progress
+  if randomize_progress is None:
+    randomize_progress = (
+      saved is not None or velocity.randomize_initial_episode_progress
     )
-    stage = args.stage
   timing_override = (
     args.command_hold_seconds is not None
-    or velocity.randomize_initial_episode_progress
-    != args.randomize_initial_episode_progress
+    or velocity.randomize_initial_episode_progress != randomize_progress
   )
   if args.command_hold_seconds is not None:
     velocity = replace(
@@ -229,7 +272,7 @@ def main():
     )
   velocity = replace(
     velocity,
-    randomize_initial_episode_progress=args.randomize_initial_episode_progress,
+    randomize_initial_episode_progress=randomize_progress,
   )
   if cfg.relative_orientation or cfg.motion_anchor_ori_b:
     raise ValueError("Velocity training requires proprioceptive observations")
@@ -237,6 +280,7 @@ def main():
     "config": asdict(cfg),
     "velocity_config": asdict(velocity),
     "stage": stage,
+    "freeze_world_model": freeze_world_model,
     "total_iterations": args.iterations,
     "manifest": str(args.manifest.resolve()),
     "manifest_sha256": file_sha256(args.manifest),
@@ -269,7 +313,12 @@ def main():
         training=True,
       )
       trainer = runtime.trainer = VelocityTrainer(
-        env, metadata, cfg, total_iterations=args.iterations, stage=stage
+        env,
+        metadata,
+        cfg,
+        total_iterations=args.iterations,
+        stage=stage,
+        freeze_world_model=freeze_world_model,
       )
       if saved:
         trainer.load_state_dict(saved, allow_timing_override=timing_override)
@@ -303,9 +352,10 @@ def main():
       trainer.iteration,
       table_note="Table: interval means | Fail%: failure events per transition",
     )
+    world_updates = "frozen" if freeze_world_model else "online"
     console.message(
       f"Velocity: 10 x {env.foundation_config.observation_dim} observations | shared decoder | stage={stage} | "
-      f"latent warmup={velocity.warmup_updates:,} updates"
+      f"latent warmup={velocity.warmup_updates:,} updates | world model={world_updates}"
     )
     console.message(
       "Reward/s: completed episode sum / configured seconds (higher) | Error: episode mean in physical units (lower) | "

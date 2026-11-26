@@ -102,6 +102,13 @@ Motion/velocity 各占一半环境和 imagination batch；`--num-envs` 必须为
 此计数为每环境共享的控制步计数，包含预热，不乘并行环境数。
 速度训练 reset 以各 50% 概率选择站姿和 locomotion 参考姿态。
 
+新 run 可通过 `--velocity-config <settings.json>` 覆盖速度配置，未指定的字段沿用默认值。
+`curriculum_steps` 和 `final_ranges` 控制随机指令何时扩围及扩围后的范围。
+`axis_command_probability` 是随机分支中只保留一个均匀选取轴的概率。
+`command_deadband` 将范数低于或等于阈值的随机指令置零。参考指令仍逐帧从 clip 读取。
+`tracking_vertical_weight` 和 `tracking_angular_xy_weight` 可将 root 局部竖直速度和
+横滚／俯仰角速度的平方分别加到线速度和 yaw 奖励的指数误差中。默认两项权重均为 0。
+
 训练启动和恢复后的首个 episode，为 motion/velocity 两半环境独立随机安排首次超时，
 剩余时长均匀分布于 1～500 控制步（默认最大 episode 为 10 秒）。随后每个 episode
 恢复完整的 10 秒上限。使用独立超时计时，不伪造 `episode_step`、历史或折扣回报；

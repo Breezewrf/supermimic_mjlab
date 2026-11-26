@@ -74,8 +74,10 @@ class VelocityTrainingTests(unittest.TestCase):
       )
     self.addCleanup(self.env.close)
 
-  def trainer(self):
-    return VelocityTrainer(self.env, self.metadata, self.config, total_iterations=3)
+  def trainer(self, **kwargs):
+    return VelocityTrainer(
+      self.env, self.metadata, self.config, total_iterations=3, **kwargs
+    )
 
   def test_initial_timeout_phase_preserves_real_episode_age_and_return(self):
     self.trainer()
@@ -196,6 +198,7 @@ class VelocityTrainingTests(unittest.TestCase):
       torch.testing.assert_close(value, actor_before[key], rtol=0, atol=0)
     second = trainer.train_iteration()
     self.assertEqual(second["stage"], "joint")
+    self.assertEqual(trainer.world_updates, 2)
     self.assertEqual(trainer.actor_updates, 1)
     self.assertEqual(trainer.velocity_updates, 2)
     self.assertEqual(trainer.velocity_critic_updates, 1)
@@ -209,6 +212,14 @@ class VelocityTrainingTests(unittest.TestCase):
     path = self.root / "resume.pt"
     torch.save(trainer.state_dict(), path)
     snapshot = torch.load(path, weights_only=True)
+    snapshot.pop("freeze_world_model")
+    for key in (
+      "axis_command_probability",
+      "command_deadband",
+      "tracking_vertical_weight",
+      "tracking_angular_xy_weight",
+    ):
+      snapshot["velocity_config"].pop(key)
     command = {k: v.clone() for k, v in self.env.command_state.items()}
     trainer.train_iteration()
     trainer.load_state_dict(snapshot)
@@ -229,6 +240,40 @@ class VelocityTrainingTests(unittest.TestCase):
     torch.save(trainer.velocity_policy_state_dict(), export)
     actor, _ = load_velocity_actor(export)
     self.assertEqual(actor(torch.zeros(1, 10, 93), torch.zeros(1, 3)).shape, (1, 29))
+
+  def test_frozen_world_through_distillation_joint_and_resume(self):
+    for stage in ("warmup", "joint"):
+      with self.subTest(stage=stage):
+        trainer = self.trainer(stage=stage, freeze_world_model=True)
+        with self.assertRaisesRegex(ValueError, "requires pretrained weights"):
+          trainer.bootstrap()
+        trainer.world_pretrained = True
+        world = {
+          key: value.clone() for key, value in trainer.world.state_dict().items()
+        }
+        trainer.bootstrap()
+        self.assertEqual(trainer.train_iteration()["stage"], "warmup")
+        metrics = trainer.train_iteration()
+        self.assertEqual(metrics["stage"], stage)
+        self.assertGreater(metrics["velocity/actor_gradient_norm"], 0)
+        self.assertEqual(trainer.velocity_updates, 2)
+        self.assertEqual(trainer.actor_updates, int(stage == "joint"))
+        self.assertEqual(trainer.velocity_critic_updates, int(stage == "joint"))
+
+        path = self.root / "frozen.pt"
+        torch.save(trainer.state_dict(), path)
+        saved = torch.load(path, weights_only=True)
+        self.assertTrue(saved["freeze_world_model"])
+        with self.assertRaisesRegex(ValueError, "saved world model freeze setting"):
+          self.trainer(stage=stage).load_state_dict(saved)
+        resumed = self.trainer(stage=stage, freeze_world_model=True)
+        resumed.load_state_dict(saved)
+        self.assertEqual(resumed.train_iteration()["stage"], stage)
+        for instance in (trainer, resumed):
+          self.assertEqual(instance.world_updates, 0)
+          self.assertFalse(instance.world_optimizer.state)
+          for key, value in instance.world.state_dict().items():
+            torch.testing.assert_close(value, world[key], rtol=0, atol=0)
 
   def test_inference_environment_does_not_open_manifest(self):
     with (

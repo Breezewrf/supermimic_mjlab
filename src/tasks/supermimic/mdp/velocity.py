@@ -36,6 +36,15 @@ def velocity_reward(
 ) -> tuple[Tensor, dict[str, Tensor]]:
   actual = measured_velocity(state)
   error = actual - command
+  linear_error = error[..., :2].square().sum(-1)
+  yaw_error = error[..., 2].square()
+  if cfg.tracking_vertical_weight or cfg.tracking_angular_xy_weight:
+    layout = state_layout(state)
+    orientation = state[..., 3:7]
+    vertical = quat_inverse_apply(orientation, state[..., layout.v])[..., 2]
+    angular_xy = quat_inverse_apply(orientation, state[..., layout.w])[..., :2]
+    linear_error = linear_error + cfg.tracking_vertical_weight * vertical.square()
+    yaw_error = yaw_error + cfg.tracking_angular_xy_weight * angular_xy.square().sum(-1)
   heading = yaw_quat(state[..., 3:7])
   torso = bodies["body_quat_w"][..., MOTION_ANCHOR_INDEX, :]
   torso_z = quat_inverse_apply(
@@ -51,8 +60,8 @@ def velocity_reward(
     (q - joint_limits[..., 1]).clamp_min(0) + (joint_limits[..., 0] - q).clamp_min(0)
   ).sum(-1)
   terms = {
-    "linear_tracking": 2 * torch.exp(-error[..., :2].square().sum(-1) / 0.5**2),
-    "yaw_tracking": 2 * torch.exp(-error[..., 2].square() / 0.5),
+    "linear_tracking": 2 * torch.exp(-linear_error / 0.5**2),
+    "yaw_tracking": 2 * torch.exp(-yaw_error / 0.5),
     "action_smoothness": -0.3 * (action - previous_action).square().sum(-1),
     "joint_limit": -2 * limit,
     "torso_sideways": -4 * sideways,

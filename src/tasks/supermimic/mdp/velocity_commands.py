@@ -97,10 +97,20 @@ class VelocityCommands:
     command = bounds[:, 0] + torch.rand(
       len(ids), 3, device=ids.device, generator=generator
     ) * (bounds[:, 1] - bounds[:, 0])
+    if cfg.axis_command_probability and not reference_only:
+      single_axis = (
+        torch.rand(len(ids), device=ids.device, generator=generator)
+        < cfg.axis_command_probability
+      )
+      axis = torch.randint(3, (len(ids), 1), device=ids.device, generator=generator)
+      inactive_axes = axis != torch.arange(3, device=ids.device)
+      command.masked_fill_(single_axis[:, None] & inactive_axes, 0)
     standing = (
       torch.rand(len(ids), device=ids.device, generator=generator)
       < cfg.standing_probability
     )
+    if cfg.command_deadband:
+      standing |= command.norm(dim=-1) <= cfg.command_deadband
     command[standing] = 0
     state["command"][ids] = command
     low, high = cfg.resampling_time_range

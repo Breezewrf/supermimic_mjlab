@@ -7,6 +7,7 @@ from dataclasses import asdict
 import torch
 
 from ..config.task_cfg import DEFAULT_RESET_SOFTMAX_CAP
+from ..config.velocity_cfg import VelocityConfig
 from ..data.episode_statistics import EpisodeSummary
 from ..data.replay_buffer import ReplayBuffer
 from ..mdp.velocity import measured_velocity
@@ -20,7 +21,16 @@ from .world_model_training import rollout, world_model_loss
 
 
 class VelocityTrainer(OnlineTrainer):
-  def __init__(self, env, metadata, config, *, total_iterations=1000, stage="joint"):
+  def __init__(
+    self,
+    env,
+    metadata,
+    config,
+    *,
+    total_iterations=1000,
+    stage="joint",
+    freeze_world_model=False,
+  ):
     if stage not in ("motion", "warmup", "joint"):
       raise ValueError("Unknown velocity training stage")
     if env.motion_count != config.num_envs // 2 or config.num_envs % 2:
@@ -33,6 +43,9 @@ class VelocityTrainer(OnlineTrainer):
       raise ValueError("Too many critic minibatches for each interface")
     super().__init__(env, metadata, config, total_iterations=total_iterations)
     self.stage = stage
+    self.freeze_world_model = freeze_world_model
+    if self.freeze_world_model:
+      self.world.requires_grad_(False)
     self.velocity_config = env.velocity_config
     self.velocity_encoder = VelocityEncoder(
       self.velocity_config.command_scale, config.amp, self.actor.observation_dim
@@ -143,7 +156,7 @@ class VelocityTrainer(OnlineTrainer):
       _, _, _, _, extras = self.env.step(action + self.config.action_noise * noise)
       self.replay.append(extras["motion_transition"])
       self.velocity_replay.append(extras["velocity_transition"])
-      if self.config.world_model_normalization:
+      if self.config.world_model_normalization and not self.freeze_world_model:
         self.world.update_normalization(
           **{
             key: extras["transition"][key]
@@ -173,6 +186,8 @@ class VelocityTrainer(OnlineTrainer):
   def bootstrap(self):
     if self.initialized:
       raise ValueError("Trainer is already initialized")
+    if self.freeze_world_model and not self.world_pretrained:
+      raise ValueError("Freezing the world model requires pretrained weights")
     self.collect(self.config.warmup_steps)
     for replay in (self.replay, self.velocity_replay):
       if not len(replay.window_indices(8)):
@@ -232,6 +247,8 @@ class VelocityTrainer(OnlineTrainer):
     return report
 
   def update_world(self):
+    if self.freeze_world_model:
+      return {}
     cfg = self.config
     totals = {}
     for _ in range(cfg.wm_batches):
@@ -495,6 +512,7 @@ class VelocityTrainer(OnlineTrainer):
       {
         "kind": "supermimic_velocity_online",
         "stage": self.stage,
+        "freeze_world_model": self.freeze_world_model,
         "velocity_config": asdict(self.velocity_config),
         "control_steps": self.env.control_steps,
         "warmup_completed": self.warmup_completed,
@@ -526,8 +544,18 @@ class VelocityTrainer(OnlineTrainer):
       "resampling_time_range",
       "randomize_initial_episode_progress",
     }
-    if saved_velocity.keys() != current_velocity.keys():
+    added_fields = {
+      "axis_command_probability",
+      "command_deadband",
+      "tracking_vertical_weight",
+      "tracking_angular_xy_weight",
+    }
+    if (
+      saved_velocity.keys() - current_velocity.keys()
+      or current_velocity.keys() - saved_velocity.keys() - added_fields
+    ):
       raise ValueError("Velocity checkpoint/configuration mismatch")
+    saved_velocity = asdict(VelocityConfig(**saved_velocity))
     differences = {
       key for key in current_velocity if current_velocity[key] != saved_velocity[key]
     }
@@ -537,6 +565,8 @@ class VelocityTrainer(OnlineTrainer):
       raise ValueError(
         "Resume preserves stage; use initialization for a new training stage"
       )
+    if saved.get("freeze_world_model", False) != self.freeze_world_model:
+      raise ValueError("Resume requires the saved world model freeze setting")
     # Base resume expects one replay row per environment; mixed replay only has
     # the motion half, so restore the common pieces explicitly here.
     if (

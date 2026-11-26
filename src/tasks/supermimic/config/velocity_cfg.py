@@ -22,6 +22,8 @@ class VelocityConfig:
   randomize_initial_episode_progress: bool = True
   reference_probability: float = 0.5
   standing_probability: float = 0.1
+  axis_command_probability: float = 0.0
+  command_deadband: float = 0.0
   standing_reset_probability: float = 0.5
   min_height: float = 0.35
   tilt_degrees: float = 70.0
@@ -30,6 +32,8 @@ class VelocityConfig:
   stand_still_weight: float = 0.0
   standing_linear_threshold: float = 0.1
   standing_angular_threshold: float = 0.1
+  tracking_vertical_weight: float = 0.0
+  tracking_angular_xy_weight: float = 0.0
   alignment_weight: float = 0.1
   warmup_updates: int = 500
 
@@ -46,6 +50,7 @@ class VelocityConfig:
     for probability in (
       self.reference_probability,
       self.standing_probability,
+      self.axis_command_probability,
       self.standing_reset_probability,
     ):
       if not 0 <= probability <= 1:
@@ -56,8 +61,28 @@ class VelocityConfig:
       or not 0 < self.resampling_time_range[0] <= self.resampling_time_range[1]
     ):
       raise ValueError("Command holding times must be positive finite seconds")
-    if self.curriculum_steps < 0 or self.warmup_updates < 0:
+    if any(
+      type(steps) is not int or steps < 0
+      for steps in (self.curriculum_steps, self.warmup_updates)
+    ):
       raise ValueError("Invalid velocity schedule")
+    if any(
+      not math.isfinite(value) or value < 0
+      for value in (
+        self.command_deadband,
+        self.tracking_vertical_weight,
+        self.tracking_angular_xy_weight,
+      )
+    ):
+      raise ValueError(
+        "Command deadband and tracking weights must be finite and nonnegative"
+      )
+    if self.axis_command_probability and any(
+      not low <= 0 <= high
+      for ranges in (self.initial_ranges, self.final_ranges)
+      for low, high in ranges
+    ):
+      raise ValueError("Single-axis sampling requires ranges containing zero")
     if (
       not 0 < self.tilt_degrees < 180
       or min(self.min_height, self.height_softness, self.tilt_softness) <= 0

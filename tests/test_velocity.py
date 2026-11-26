@@ -176,6 +176,27 @@ class VelocityTests(unittest.TestCase):
       [False, True],
     )
 
+  def test_velocity_coupling_penalizes_vertical_and_xy_angular_speeds(self):
+    state = self.state()
+    state[:, 38] = 0.25
+    state[:, 39] = 0.5
+    action = torch.zeros(2, 29)
+    cfg = VelocityConfig(tracking_vertical_weight=2.0, tracking_angular_xy_weight=0.05)
+    _, terms = velocity_reward(
+      state,
+      self.kinematics(state),
+      torch.zeros(2, 3),
+      action,
+      action,
+      self.metadata["joint_limits"],
+      self.metadata["default_q"],
+      cfg,
+    )
+    self.assertAlmostEqual(float(terms["linear_tracking"][0]), 0.04 * 0.60653066)
+    self.assertAlmostEqual(float(terms["yaw_tracking"][0]), 0.04 * 0.97530991)
+    self.assertFalse(terms["linear_velocity_error"].any())
+    self.assertFalse(terms["yaw_rate_error"].any())
+
   def test_command_sequence_matches_simulation_across_resampling_and_clip_end(self):
     commands = VelocityCommands(
       replace(VelocityConfig(), resampling_time_range=(0.06, 0.06)), self.library
@@ -226,8 +247,33 @@ class VelocityTests(unittest.TestCase):
       with self.assertRaises(ValueError):
         VelocityConfig(resampling_time_range=interval)
 
+  def test_single_axis_commands_and_deadband_preserve_motion_references(self):
+    cfg = VelocityConfig(
+      reference_probability=0.0,
+      standing_probability=0.0,
+      axis_command_probability=1.0,
+      command_deadband=0.1,
+    )
+    commands = VelocityCommands(cfg, self.library)
+    state = commands.empty(256, "cpu")
+    ids = torch.arange(256)
+    rng = torch.Generator().manual_seed(19)
+    commands.resample(state, ids, rng, 0)
+    sampled = state["command"]
+    self.assertTrue(((sampled != 0).sum(dim=-1) <= 1).all())
+    self.assertTrue(sampled.any(dim=0).all())
+    self.assertTrue(((sampled.abs() > 0.1) | (sampled == 0)).all())
+    commands.resample(state, ids, rng, 0, reference_only=True)
+    self.assertTrue(state["command_source"].all())
+    self.assertTrue((state["command"].norm(dim=-1) > 0).all())
+
   def test_random_holding_times_are_independent_and_imagination_matches(self):
-    cfg = replace(VelocityConfig(), reference_probability=0.0, standing_probability=0.0)
+    cfg = replace(
+      VelocityConfig(),
+      reference_probability=0.0,
+      standing_probability=0.0,
+      axis_command_probability=0.6,
+    )
     commands = VelocityCommands(cfg)
     state = commands.empty(256, "cpu")
     commands.resample(state, torch.arange(256), torch.Generator().manual_seed(42), 0)
