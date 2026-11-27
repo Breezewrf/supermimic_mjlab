@@ -33,6 +33,7 @@ def velocity_reward(
   joint_limits: Tensor,
   default_q: Tensor,
   cfg: VelocityConfig,
+  self_collision_cost: Tensor | None = None,
 ) -> tuple[Tensor, dict[str, Tensor]]:
   actual = measured_velocity(state)
   error = actual - command
@@ -70,6 +71,8 @@ def velocity_reward(
     * (q - default_q).square().sum(-1)
     * standing_command(command, cfg),
   }
+  if self_collision_cost is not None:
+    terms["self_collisions"] = cfg.self_collision_weight * self_collision_cost
   terms = {key: value * STEP_DT for key, value in terms.items()}
   return torch.stack(list(terms.values())).sum(0), terms | {
     "linear_velocity_error": error[..., :2].norm(dim=-1),

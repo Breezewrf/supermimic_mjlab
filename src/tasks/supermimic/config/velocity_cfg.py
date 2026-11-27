@@ -30,6 +30,7 @@ class VelocityConfig:
   height_softness: float = 0.02
   tilt_softness: float = 0.04
   stand_still_weight: float = 0.0
+  self_collision_weight: float = -1.0
   standing_linear_threshold: float = 0.1
   standing_angular_threshold: float = 0.1
   tracking_vertical_weight: float = 0.0
@@ -90,3 +91,5 @@ class VelocityConfig:
       raise ValueError("Invalid fall thresholds")
     if self.stand_still_weight > 0 or self.alignment_weight < 0:
       raise ValueError("Invalid velocity loss weights")
+    if not math.isfinite(self.self_collision_weight) or self.self_collision_weight > 0:
+      raise ValueError("self_collision_weight must be finite and nonpositive")

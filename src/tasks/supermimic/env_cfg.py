@@ -10,20 +10,26 @@ from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.scene import SceneCfg
+from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.terrains import TerrainEntityCfg
 from mjlab.viewer import ViewerConfig
 
-from .config.robot_cfg import FOOT_COLLISION_EXPR, get_supermimic_robot_cfg
+from .config.robot_cfg import (
+  COLLISION_SUBSTEPS,
+  FOOT_COLLISION_EXPR,
+  get_supermimic_robot_cfg,
+)
 from .config.task_cfg import FoundationConfig
 
 
 class FoundationMujocoCfg(MujocoCfg):
   def apply(self, model: mujoco.MjModel) -> None:
     super().apply(model)
-    # Observations are reconstructed from synchronized physical state, including
-    # explicit observation noise. No MuJoCo built-in sensors are consumed here.
-    model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_SENSOR
+    # Proprioception is reconstructed from state. Contact sensors, when present,
+    # must still execute at every physics substep.
+    if not model.nsensor:
+      model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_SENSOR
 
 
 def make_env_cfg(config: FoundationConfig) -> ManagerBasedRlEnvCfg:
@@ -36,7 +42,22 @@ def make_env_cfg(config: FoundationConfig) -> ManagerBasedRlEnvCfg:
   com = {0: (-0.025, 0.025), 1: (-0.05, 0.05), 2: (-0.05, 0.05)}
   if not config.randomization:
     com = {i: (0.0, 0.0) for i in range(3)}
-  robot_cfg = get_supermimic_robot_cfg(config.robot)
+  robot_cfg = get_supermimic_robot_cfg(
+    config.robot, self_collisions=config.self_collisions
+  )
+  sensors = ()
+  if config.self_collisions:
+    sensors = (
+      ContactSensorCfg(
+        name="self_collision",
+        primary=ContactMatch(mode="subtree", pattern="pelvis", entity="robot"),
+        secondary=ContactMatch(mode="subtree", pattern="pelvis", entity="robot"),
+        fields=("found", "force"),
+        reduce="maxforce",
+        num_slots=1,
+        history_length=COLLISION_SUBSTEPS,
+      ),
+    )
   joint_names = [j.name for j in robot_cfg.spec_fn().joints]
   return ManagerBasedRlEnvCfg(
     seed=config.seed,
@@ -44,6 +65,7 @@ def make_env_cfg(config: FoundationConfig) -> ManagerBasedRlEnvCfg:
       terrain=TerrainEntityCfg(terrain_type="plane"),
       entities={"robot": robot_cfg},
       num_envs=config.num_envs,
+      sensors=sensors,
     ),
     actions={
       "joint_pos": JointPositionActionCfg(
@@ -81,9 +103,10 @@ def make_env_cfg(config: FoundationConfig) -> ManagerBasedRlEnvCfg:
       # Falling and dancing need full-body ground contacts and adequate capacity.
       nconmax=128,
       njmax=1024,
+      contact_sensor_maxmatch=500,
       mujoco=FoundationMujocoCfg(timestep=0.005, iterations=10, ls_iterations=20),
     ),
-    decimation=4,
+    decimation=COLLISION_SUBSTEPS,
     episode_length_s=config.episode_length_s,
     viewer=ViewerConfig(
       origin_type=ViewerConfig.OriginType.ASSET_BODY,

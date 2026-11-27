@@ -38,7 +38,11 @@ def load_actor(
   if saved.get("reference_schema") is None:
     saved = {**saved, "reference_schema": schema, "reference_schema_inferred": True}
   actor_class = LegacyMotionActor if schema == LEGACY_REFERENCE_SCHEMA else MotionActor
-  reference_options = {} if actor_class is LegacyMotionActor else {"reference_dim": {s: w for w, s in REFERENCE_SCHEMAS.items()}[schema]}
+  reference_options = (
+    {}
+    if actor_class is LegacyMotionActor
+    else {"reference_dim": {s: w for w, s in REFERENCE_SCHEMAS.items()}[schema]}
+  )
   policy = actor_class(
     saved["robot_metadata"]["default_q"],
     tuple(saved["config"]["actor_dims"]),
@@ -82,6 +86,7 @@ def load_world_model(
     world_prediction=config.get("world_prediction", "velocity_residual"),
     world_model_normalization=config.get("world_model_normalization", False),
     motion_anchor_ori_b=config.get("motion_anchor_ori_b", False),
+    self_collisions=config.get("self_collisions", False),
   )
   try:
     model.load_state_dict(saved["world"])
@@ -92,12 +97,39 @@ def load_world_model(
   return model.to(device).eval(), saved
 
 
-def validate_environment(env, saved: dict) -> None:
+def validate_environment(env, saved: dict, *, allow_collision_transfer=False) -> bool:
   from ..models.kinematics import robot_metadata, validate_robot_metadata
   from .online_training import simulation_parameters
 
   validate_robot_metadata(
-    saved["robot_metadata"], robot_metadata(env.foundation_config.robot)
+    saved["robot_metadata"],
+    robot_metadata(
+      env.foundation_config.robot,
+      self_collisions=env.foundation_config.self_collisions,
+    ),
   )
-  if saved.get("simulation") != simulation_parameters(env):
+  current, previous = simulation_parameters(env), saved.get("simulation")
+  if previous == current:
+    return False
+  if (
+    allow_collision_transfer
+    and previous is not None
+    and not previous.get("self_collisions", False)
+    and current["self_collisions"]
+  ):
+    # Only new-run initialization may cross this specific physics boundary.
+    # Resume and inference always retain the strict comparison below.
+    collision_keys = {
+      "self_collisions",
+      "self_collision_excludes",
+      "self_collision_force_threshold",
+      "self_collision_sensor_reduction",
+      "self_collision_history_length",
+    }
+    if {k: v for k, v in previous.items() if k not in collision_keys} == {
+      k: v for k, v in current.items() if k not in collision_keys
+    }:
+      return True
+  if previous != current:
     raise ValueError("Checkpoint simulation configuration does not match")
+  return False

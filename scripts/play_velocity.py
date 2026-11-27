@@ -67,6 +67,7 @@ def main():
           262144 if args.motion_fk_cache_frames is None else args.motion_fk_cache_frames
         ),
         robot=args.robot,
+        self_collisions=saved.get("config", {}).get("self_collisions", False),
         num_envs=1,
         episode_length_s=1e9,
         terminate_on_failure=args.termination,

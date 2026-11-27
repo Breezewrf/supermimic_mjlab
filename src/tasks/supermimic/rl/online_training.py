@@ -41,9 +41,11 @@ def restore_rng(state: dict) -> None:
 
 
 def simulation_parameters(env) -> dict:
-  return {
+  from ..config.robot_cfg import SELF_COLLISION_FORCE_THRESHOLD, self_collision_excludes
+
+  result = {
     "physics_protocol_version": 2,
-    "self_collisions": False,
+    "self_collisions": env.foundation_config.self_collisions,
     "training_reset_noise": dict(RESET_NOISE),
     "randomization_schedule": {
       "foot_friction": "startup",
@@ -56,6 +58,14 @@ def simulation_parameters(env) -> dict:
     "control_dt": env.step_dt,
     "solver_iterations": env.cfg.sim.mujoco.iterations,
   }
+  if env.foundation_config.self_collisions:
+    result.update(
+      self_collision_excludes=self_collision_excludes(env.foundation_config.robot),
+      self_collision_force_threshold=SELF_COLLISION_FORCE_THRESHOLD,
+      self_collision_sensor_reduction="maxforce",
+      self_collision_history_length=env.cfg.decimation,
+    )
+  return result
 
 
 def checked_step(
@@ -144,6 +154,7 @@ class OnlineTrainer:
       world_prediction=config.world_prediction,
       world_model_normalization=config.world_model_normalization,
       motion_anchor_ori_b=config.motion_anchor_ori_b,
+      self_collisions=config.self_collisions,
     ).to(self.device)
     self.actor = MotionActor(
       metadata["default_q"],

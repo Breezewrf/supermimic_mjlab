@@ -21,8 +21,8 @@ from src.tasks.supermimic.config.task_cfg import (
   FoundationConfig,
 )
 from src.tasks.supermimic.data.world_model_data import file_sha256
-from src.tasks.supermimic.models.kinematics import robot_metadata
 from src.tasks.supermimic.mdp.reset_sampler import ResetSampler
+from src.tasks.supermimic.models.kinematics import robot_metadata
 from src.tasks.supermimic.models.policy import schema_for_dimension
 from src.tasks.supermimic.rl.checkpoints import (
   evaluation_score,
@@ -72,6 +72,7 @@ def evaluate_actor(
     env = SuperMimicEnv(
       FoundationConfig(
         robot=config.robot,
+        self_collisions=config.self_collisions,
         manifest=manifest,
         motion_storage=config.motion_storage,
         motion_load_progress=True,

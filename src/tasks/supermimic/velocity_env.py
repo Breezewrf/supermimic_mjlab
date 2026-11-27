@@ -5,6 +5,7 @@ import math
 import torch
 from mjlab.envs import ManagerBasedRlEnv
 
+from .config.robot_cfg import SELF_COLLISION_FORCE_THRESHOLD
 from .config.task_cfg import FoundationConfig
 from .config.velocity_cfg import VelocityConfig
 from .data.episode_statistics import EpisodeStatistics
@@ -210,6 +211,18 @@ class VelocityEnv(SuperMimicEnv):
       "frame_id": self.frame_id[self.motion_ids].clone(),
     }
     next_state = self._step_physics(action)
+    collision_cost = None
+    if self.foundation_config.self_collisions:
+      forces = self.scene["self_collision"].data.force_history
+      if forces is None or forces.shape[-2] != self.cfg.decimation:
+        raise RuntimeError("Self-collision sensor must record every physics substep")
+      collision_cost = (
+        (forces.norm(dim=-1) > SELF_COLLISION_FORCE_THRESHOLD)
+        .any(dim=1)
+        .sum(dim=-1)
+        .float()
+      )
+      transition["self_collision_cost"] = collision_cost.clone()
     bodies = self.read_bodies()
     m, v = self.motion_ids, self.velocity_ids
     reward = torch.zeros(self.num_envs, device=self.device)
@@ -244,6 +257,7 @@ class VelocityEnv(SuperMimicEnv):
       self.robot.data.soft_joint_pos_limits[v],
       self.robot.data.default_joint_pos[v],
       self.velocity_config,
+      self_collision_cost=collision_cost[v] if collision_cost is not None else None,
     )
     failure = velocity_failure(next_state[v], self.velocity_config)
     physical_failure = failure["height_failure"] | failure["tilt_failure"]

@@ -6,6 +6,7 @@ import torch
 from torch import Tensor, nn
 
 from ..config.morphology import state_layout
+from ..config.robot_cfg import COLLISION_SUBSTEPS
 from ..config.task_cfg import STEP_DT
 from ..mdp.rewards import tracking_reward
 from ..mdp.state import (
@@ -175,6 +176,7 @@ class WorldModel(nn.Module):
     world_prediction: str = "state_delta",
     world_model_normalization: bool = False,
     motion_anchor_ori_b: bool = False,
+    self_collisions: bool = False,
   ):
     super().__init__()
     if not hidden_dims or any(width < 1 for width in hidden_dims):
@@ -190,6 +192,7 @@ class WorldModel(nn.Module):
     self.relative_orientation = relative_orientation
     self.motion_anchor_ori_b = motion_anchor_ori_b
     self.amp = amp
+    self.self_collisions = self_collisions
     self.kinematics = G1Kinematics(metadata)
     layout = self.kinematics.layout
     input_dim, output_dim = 4 * layout.num_joints + 14, layout.state_dim - 1
@@ -208,6 +211,18 @@ class WorldModel(nn.Module):
     self.termination_head = nn.Sequential(
       nn.Linear(2, 64), nn.ELU(), nn.Linear(64, 64), nn.ELU(), nn.Linear(64, 1)
     )
+    if self_collisions:
+      # Predict the expected fraction of physics substeps with force > 10 N.
+      # Real labels supervise this head; policy gradients use its input Jacobian.
+      self.collision_head = nn.Sequential(
+        nn.Linear(input_dim, 128),
+        nn.ELU(),
+        nn.Linear(128, 128),
+        nn.ELU(),
+        nn.Linear(128, 1),
+      )
+      nn.init.normal_(self.collision_head[-1].weight, std=0.01)
+      nn.init.constant_(self.collision_head[-1].bias, -4.0)
     self.register_buffer("input_mean", torch.zeros(input_dim))
     self.register_buffer("input_std", torch.ones(input_dim))
     # Retain the historical buffer name so legacy weights load without conversion.
@@ -228,6 +243,20 @@ class WorldModel(nn.Module):
       if self.world_prediction == "state_delta"
       else correction_targets(state, next_state)
     )
+
+  def collision_logit(self, state: Tensor, action: Tensor, context: Tensor) -> Tensor:
+    if not self.self_collisions:
+      raise ValueError("Collision prediction requires self_collisions=True")
+    features = self.features(state, action, context)
+    features = (
+      self.in_norm(features)
+      if self.world_model_normalization
+      else (features - self.input_mean) / self.input_std
+    )
+    return run_mlp(self.collision_head, features, self.amp).squeeze(-1)
+
+  def collision_cost(self, state: Tensor, action: Tensor, context: Tensor) -> Tensor:
+    return COLLISION_SUBSTEPS * self.collision_logit(state, action, context).sigmoid()
 
   @torch.no_grad()
   def update_normalization(

@@ -230,6 +230,7 @@ def main(*, playback=False):
     ),
     robot=args.robot,
     manifest=args.manifest,
+    self_collisions=bool(saved and saved["config"].get("self_collisions", False)),
     motion=args.motion,
     motion_dir=args.motion_dir,
     clips=tuple(args.clips),

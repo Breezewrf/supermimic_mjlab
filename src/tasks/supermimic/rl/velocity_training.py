@@ -41,6 +41,8 @@ class VelocityTrainer(OnlineTrainer):
       raise ValueError("Mixed batches require at least two samples")
     if config.critic_minibatches > config.policy_batch_size // 2:
       raise ValueError("Too many critic minibatches for each interface")
+    if env.foundation_config.self_collisions != config.self_collisions:
+      raise ValueError("Environment and world model self-collision settings differ")
     super().__init__(env, metadata, config, total_iterations=total_iterations)
     self.stage = stage
     self.freeze_world_model = freeze_world_model
@@ -242,6 +244,14 @@ class VelocityTrainer(OnlineTrainer):
           "linear_velocity_rmse": float(error[:, :2].square().mean().sqrt()),
           "yaw_rate_rmse": float(error[:, 2].square().mean().sqrt()),
         }
+        if self.config.self_collisions:
+          collision = self.world.collision_cost(
+            batch["state"], batch["action"], batch["context"]
+          )
+          report["horizons"][str(horizon)]["self_collision_cost_mae"] = float(
+            ((collision - batch["self_collision_cost"]).abs() * batch["mask"]).sum()
+            / batch["mask"].sum().clamp_min(1)
+          )
     finally:
       self.velocity_replay.generator.set_state(rng)
     return report
@@ -264,9 +274,6 @@ class VelocityTrainer(OnlineTrainer):
         diagnostics=False,
         dynamics=self.kernels.world_rollout,
       )
-      motion_loss, _ = world_model_loss(
-        motion_prediction, motion, analytic_losses=False
-      )
       velocity_prediction = {
         "next_state": self.kernels.world_rollout(
           velocity["state"][:, 0],
@@ -275,8 +282,19 @@ class VelocityTrainer(OnlineTrainer):
           velocity["mask"],
         )
       }
+      if cfg.self_collisions:
+        for prediction, batch in (
+          (motion_prediction, motion),
+          (velocity_prediction, velocity),
+        ):
+          prediction["collision_logit"] = self.world.collision_logit(
+            batch["state"], batch["action"], batch["context"]
+          )
+      motion_loss, motion_parts = world_model_loss(
+        motion_prediction, motion, analytic_losses=False
+      )
       # A motion termination head must never receive fall-only velocity labels.
-      velocity_loss, _ = world_model_loss(
+      velocity_loss, velocity_parts = world_model_loss(
         velocity_prediction, velocity, analytic_losses=False
       )
       loss = (
@@ -288,6 +306,13 @@ class VelocityTrainer(OnlineTrainer):
         "wm_motion_loss": float(motion_loss.detach()),
         "wm_velocity_loss": float(velocity_loss.detach()),
         "wm_gradient_norm": norm,
+        "wm_collision": float(
+          (
+            motion_parts["collision"] * len(motion["state"])
+            + velocity_parts["collision"] * len(velocity["state"])
+          ).detach()
+        )
+        / cfg.wm_batch_size,
       }.items():
         totals[key] = totals.get(key, 0.0) + value / cfg.wm_batches
       self.world_updates += 1
@@ -513,6 +538,9 @@ class VelocityTrainer(OnlineTrainer):
         "kind": "supermimic_velocity_online",
         "stage": self.stage,
         "freeze_world_model": self.freeze_world_model,
+        "initialization_collision_transfer": getattr(
+          self, "initialization_collision_transfer", {}
+        ),
         "velocity_config": asdict(self.velocity_config),
         "control_steps": self.env.control_steps,
         "warmup_completed": self.warmup_completed,
@@ -549,6 +577,7 @@ class VelocityTrainer(OnlineTrainer):
       "command_deadband",
       "tracking_vertical_weight",
       "tracking_angular_xy_weight",
+      "self_collision_weight",
     }
     if (
       saved_velocity.keys() - current_velocity.keys()
@@ -567,6 +596,9 @@ class VelocityTrainer(OnlineTrainer):
       )
     if saved.get("freeze_world_model", False) != self.freeze_world_model:
       raise ValueError("Resume requires the saved world model freeze setting")
+    self.initialization_collision_transfer = saved.get(
+      "initialization_collision_transfer", {}
+    )
     # Base resume expects one replay row per environment; mixed replay only has
     # the motion half, so restore the common pieces explicitly here.
     if (
@@ -575,6 +607,7 @@ class VelocityTrainer(OnlineTrainer):
         "motion_storage": "full",
         "motion_fk_cache_frames": 262144,
         "reset_softmax_cap": DEFAULT_RESET_SOFTMAX_CAP,
+        "self_collisions": False,
         **saved["config"],
       }
     ) != asdict(self.config) or saved["clips"] != self.env.library.names:

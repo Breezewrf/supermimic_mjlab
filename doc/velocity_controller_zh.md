@@ -27,9 +27,11 @@ command、上一动作和仿真 context，共 136 维；MLP 宽度为 `(256,128)
 | Torso 侧倾 | `-4 * sin(sideways_lean)²`，允许前倾 |
 | Torso 横向角速度 | `-0.05 * sum(omega_heading_xy²)` |
 | 零指令姿态约束 | 可选，`--stand-still-weight` 默认 `0`，启用时设负值 |
+| 自碰撞 | 开启自碰撞时，`self_collision_weight * 超过 10 N 的子步数`，默认权重 `-1` |
 
 每项只乘一次 `dt=0.02`。站立判断分别使用 `0.1 m/s` 和 `0.1 rad/s` 的阈值。
-仿真与 imagination 共用同一套可微奖励函数。
+仿真与 imagination 共用速度、姿态和动作等解析奖励；自碰撞在仿真中读取真实接触力，
+在 imagination 中使用由真实标签监督的可微代价预测，具体见下节。
 
 跌倒条件为 root 高度 `<0.35 m` 或 root 倾斜 `>70°`。Imagination 以相同物理量计算
 sigmoid 概率，高度宽度为 `0.02 m`，重力投影宽度为 `0.04`。时间上限属于 truncation，
@@ -40,6 +42,62 @@ sigmoid 概率，高度宽度为 `0.02 m`，重力投影宽度为 `0.04`。时�
 70° 阈值是参考 Unitree 的工程选择，论文阈值约为 73°。
 Unitree 的固定 gait、contact、air-time、soft-landing 奖励需要额外接触信息，当前不加入训练目标；
 没有将仿真接触值或 reference anchor 作为速度 Actor 的隐藏输入。
+
+## 自碰撞、排除对与惩罚
+
+新 velocity run 默认开启机器人自碰撞，并加入自碰撞惩罚。`--self-collisions` 可显式开启，
+`--no-self-collisions` 可关闭；独立 motion 训练默认仍保留原来的无自碰撞配置。
+碰撞只作用于 `.*_collision` 几何，视觉 mesh 不参与。脚部保留 `condim=3`，其余碰撞几何
+使用 `condim=1`；开启时 `contype=conaffinity=1`，地面碰撞继续生效。
+
+默认排除以下身体对，参考 Unitree 的 G1 XML，并对应本仓库的身体命名：
+
+| 变体 | 排除对 |
+| --- | --- |
+| 29DoF | 左／右 `elbow_link` 与同侧 `wrist_pitch_link` |
+| 23DoF | 左／右 `elbow_link` 与同侧 `wrist_roll_rubber_hand` |
+| 两种变体 | `pelvis` 与左／右 `hip_roll_link` |
+
+MuJoCo 原有的同刚体和父子刚体碰撞过滤仍生效。排除对集中定义于
+[`self_collision_excludes()`](../src/tasks/supermimic/config/robot_cfg.py)，需要增加指定身体对时
+修改该函数；实际列表写入 checkpoint 的 `simulation.self_collision_excludes`，恢复和播放时
+严格核对，避免使用不同的碰撞规则。训练中 motion/velocity 两半环境采用同一套碰撞物理设置。
+
+真实代价沿用 Unitree 的力阈值子步计数口径：每个 `0.005 s` 物理子步检测机器人自身接触，
+若任意自碰撞力的范数超过 `10 N`，该子步记为 1。每个控制步共 4 个子步，代价 `C_t` 为
+`0～4`，奖励为 `self_collision_weight * C_t * 0.02`。默认权重 `-1`，可通过
+`--self-collision-weight` 或 velocity JSON 的 `self_collision_weight` 设置为非正有限值。
+这里使用 `maxforce` 选择最强接触，避免 Unitree 的 `reduce="none"`、单 slot 随机保留接触时
+漏掉超过阈值的接触；接触历史在 reset 时清空，标签在 reset 前写入两类 replay。
+
+Imagination 没有真实接触力，因此开启自碰撞的 world model 增加一个
+`MLP(128,128) → 1` 代价预测头，输入为与动力学相同的归一化状态、动作和 context 特征。
+以真实 `C_t/4` 为 soft label，使用 masked BCE 与动力学损失一起训练，
+在想象轨迹中用 `4 * sigmoid(logit)` 估计代价。策略更新时固定预测头参数，但保留其对
+状态和动作的输入梯度，使碰撞惩罚能够传回 velocity encoder。该预测不读取未来参考，
+也不作为 Actor 的额外输入。共享 decoder 仍只通过 motion tracking 更新。
+
+真实惩罚和预测代价的口径一致，但预测值不保证等于真实计数；它是新增的学习模型，
+应同时检查 `loss/world_model/self_collision` 和真实 `reward/velocity/self_collisions_per_second`。
+`velocity_diagnostics.json` 另记录各窗口真实输入上的 `self_collision_cost_mae`，单位为每控制步
+的碰撞子步数；这是 replay 内预测诊断，不代表 held-out 泛化。
+开启自碰撞会改变动力学。新 run 允许从无自碰撞的 motion policy/world model 初始化，
+仅新增碰撞预测头，其余权重严格匹配，并记录 `initialization_collision_transfer`。
+这种迁移要求在线更新 world model；从旧无自碰撞 world checkpoint 初始化时不能同时指定
+`--freeze-world-model`。已经适配且含预测头的新 world checkpoint 才可冻结使用。
+
+```bash
+python scripts/train_velocity.py \
+  --actor-checkpoint outputs/policy_iteration_010000.pt \
+  --world-checkpoint checkpoints/best/world_model_best.pt \
+  --self-collisions --self-collision-weight -1.0 --no-freeze-world-model \
+  --stage joint --warmup-updates 500 --device cuda:0 --num-envs 4096 \
+  --iterations 100000 --output outputs/velocity/self_collision_run
+```
+
+旧 checkpoint 恢复时缺失的 `self_collisions` 按 `False` 处理，保留原物理设置。
+`--resume` 不允许改变碰撞开关或惩罚权重；更改物理设置应使用新 run 初始化。
+导出的 velocity/motion policy 和 world model 均保存实际碰撞配置，播放和评估自动恢复该设置。
 
 ## 初始化及分阶段训练
 
@@ -65,7 +123,7 @@ python scripts/train_velocity.py \
 
 `--stage joint` 先进行默认 500 次 latent 对齐预热，之后自动进入联合更新。
 `--warmup-updates 0` 跳过预热。`--stage warmup` 整个 run 只训练速度 encoder 的 latent 对齐，
-并持续更新世界模型；`--stage motion` 只优化 motion Actor/Critic 和世界模型，
+在线模式同时更新世界模型；`--stage motion` 优化 motion Actor/Critic，以及在线模式的世界模型，
 仍使用混合环境进行采集。需要适配 motion prior 时，可将该阶段输出的
 `motion_policy_last.pt` 和 `world_model_last.pt` 作为下一次 joint run 的初始化。
 

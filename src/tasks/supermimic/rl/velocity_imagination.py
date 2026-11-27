@@ -2,6 +2,7 @@
 
 import torch
 
+from ..config.task_cfg import STEP_DT
 from ..mdp.state import add_sensor_noise, observe
 from ..mdp.velocity import velocity_failure, velocity_reward
 
@@ -115,6 +116,10 @@ def imagine_velocity(
       reward, failure = kernels.signals(next_state, command, action, previous)
     if sensor_noise:
       observation = add_sensor_noise(observation, generator, actor.default_q.numel())
+    if world.self_collisions:
+      reward = reward + cfg.self_collision_weight * STEP_DT * world.collision_cost(
+        state, action, context
+      )
     history = torch.cat((history[:, 1:], observation[:, None]), 1)
     state, previous = next_state, action
     states.append(state)

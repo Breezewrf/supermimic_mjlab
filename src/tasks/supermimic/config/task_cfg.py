@@ -55,6 +55,7 @@ class FoundationConfig:
   reset_noise: bool = False
   terminate_on_failure: bool = True
   robot: str = "g1_29dof"
+  self_collisions: bool = False
   motion: Path | None = None
   motion_dir: Path | None = None
   motion_load_workers: int = 1

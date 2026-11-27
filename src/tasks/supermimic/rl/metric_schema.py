@@ -22,6 +22,7 @@ VELOCITY_REWARDS = (
   "torso_sideways",
   "torso_angular_velocity",
   "stand_still",
+  "self_collisions",
 )
 MOTION_ERRORS = {
   "body_position_error": "body_position_m",
@@ -39,6 +40,7 @@ UPDATE_METRICS = {
   "wm_velocity_loss": "loss/world_model/velocity",
   "wm_state": "loss/world_model/state",
   "wm_termination": "loss/world_model/termination",
+  "wm_collision": "loss/world_model/self_collision",
   "wm_observation": "error/world_model/observation_prediction",
   "wm_reward": "error/world_model/reward_prediction",
   "wm_gradient_norm": "gradient/world_model/preclip_norm",
@@ -118,7 +120,7 @@ def classified_metrics(record, *, include_collection=None):
       if key in record and record[key] is not None:
         values[term] = record[key]
         result[f"reward/{task}/{term}"] = record[key]
-    if len(values) == len(terms):
+    if all(term in values for term in terms if term != "self_collisions"):
       result[f"reward/{task}/total_per_step"] = sum(values.values())
     for key, label in errors.items():
       source = f"{task}/{key}"
