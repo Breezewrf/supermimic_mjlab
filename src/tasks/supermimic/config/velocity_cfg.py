@@ -30,6 +30,7 @@ class VelocityConfig:
   height_softness: float = 0.02
   tilt_softness: float = 0.04
   stand_still_weight: float = 0.0
+  stand_still_reference: str = "unitree"
   self_collision_weight: float = -1.0
   standing_linear_threshold: float = 0.1
   standing_angular_threshold: float = 0.1
@@ -39,6 +40,8 @@ class VelocityConfig:
   warmup_updates: int = 500
 
   def __post_init__(self):
+    if self.stand_still_reference not in ("motionbrick", "unitree"):
+      raise ValueError("stand_still_reference must be motionbrick or unitree")
     if len(self.command_scale) != 3 or any(
       not math.isfinite(x) or x <= 0 for x in self.command_scale
     ):

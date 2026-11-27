@@ -140,6 +140,11 @@ def parser():
     "--stand-still-weight", type=float, help="Stand-still pose penalty (default: 0)"
   )
   p.add_argument(
+    "--stand-still-reference",
+    choices=("motionbrick", "unitree"),
+    help="Stand-still target (new runs: motionbrick; resume: saved setting)",
+  )
+  p.add_argument(
     "--self-collision-weight",
     type=float,
     help="Self-collision penalty weight (default: -1; must be nonpositive)",
@@ -198,6 +203,11 @@ def main():
     ].get("self_collision_weight", -1.0):
       argument_parser.error("Resume requires the saved self-collision weight")
     velocity = VelocityConfig(**saved["velocity_config"])
+    if (
+      args.stand_still_reference is not None
+      and args.stand_still_reference != velocity.stand_still_reference
+    ):
+      argument_parser.error("Resume requires the saved stand-still reference")
     stage = saved["stage"]
     freeze_world_model = saved.get("freeze_world_model", False)
     if args.stage is not None and args.stage != stage:
@@ -266,7 +276,13 @@ def main():
       )
       if not isinstance(settings, dict):
         raise TypeError("Expected a JSON object")
-      for key in ("warmup_updates", "stand_still_weight", "self_collision_weight"):
+      settings.setdefault("stand_still_reference", "motionbrick")
+      for key in (
+        "warmup_updates",
+        "stand_still_weight",
+        "self_collision_weight",
+        "stand_still_reference",
+      ):
         if getattr(args, key) is not None:
           settings[key] = getattr(args, key)
       velocity = VelocityConfig(**settings)

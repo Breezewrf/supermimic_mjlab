@@ -160,6 +160,38 @@ class VelocityTests(unittest.TestCase):
       standing_command(torch.tensor([[0.0, 0.0, 1.0]]), VelocityConfig()).item()
     )
 
+  def test_stand_still_reference_switch(self):
+    from src.tasks.supermimic.mdp.velocity import STAND_STILL_JOINT_POS
+
+    state = self.state()
+    action = torch.zeros(2, 29)
+    targets = {
+      "unitree": self.metadata["default_q"],
+      "motionbrick": torch.tensor(STAND_STILL_JOINT_POS),
+    }
+    for reference, target in targets.items():
+      state[:, 7:36] = target
+      cfg = VelocityConfig(stand_still_reference=reference, stand_still_weight=-1.0)
+
+      def term(command, cfg=cfg):
+        return velocity_reward(
+          state,
+          self.kinematics(state),
+          command,
+          action,
+          action,
+          self.metadata["joint_limits"],
+          self.metadata["default_q"],
+          cfg,
+        )[1]["stand_still"].float()
+
+      torch.testing.assert_close(term(torch.zeros(2, 3)), torch.zeros(2))
+      state[:, 7] += 0.1
+      torch.testing.assert_close(term(torch.zeros(2, 3)), torch.full((2,), -0.0002))
+      torch.testing.assert_close(term(torch.ones(2, 3)), torch.zeros(2))
+    with self.assertRaises(ValueError):
+      VelocityConfig(stand_still_reference="unknown")
+
   def test_hard_and_soft_fall_thresholds(self):
     state = self.state()
     state[:, 2] = torch.tensor([0.34, 0.36])

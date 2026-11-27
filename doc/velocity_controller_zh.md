@@ -321,3 +321,31 @@ checkpoint 恢复以及不读取 manifest 的独立推理。
 本次短跑已完成 5 次预热和 20 次联合更新，并完成续训检查。
 9 类指令、每类 4 次的 5 秒测试未跌倒，但非零指令的相对误差约为 1，策略主要保持站立；
 这验证了训练和推理链路，尚未得到收敛的速度跟踪策略。完整训练与 672 条件评估尚未运行。
+
+## Stand-still 姿态参考
+
+选择 MotionBrick 时，stand-still 奖励直接使用 `mdp/velocity.py` 中的 `STAND_STILL_JOINT_POS` 固定数组，
+取自 MotionBrick `locomotion_vx_0_vy_0` 第 1617 帧（32.34 秒）。23DoF 去掉对应的
+waist roll/pitch 和 wrist pitch/yaw 角度。仿真和 imagination 共用这一参考，
+观测和 PD 的默认姿态基准保持原值。参考角度无需从外部文件加载。
+`--stand-still-weight` 默认仍为 `0`，设置负值（例如 `-1.0`）启用姿态惩罚。
+
+使用 `--stand-still-reference motionbrick` 选择上述固定数组，使用
+`--stand-still-reference unitree` 选择原来的机器人 `default_q`。
+新训练默认 `motionbrick`；选择项随 velocity 配置保存，续训使用保存值，
+旧 checkpoint 没有该字段时使用 `unitree`。续训时显式指定的值必须与保存值一致。
+这只切换 stand-still 奖励目标，权重仍通过 `--stand-still-weight` 设置。
+
+```bash
+--stand-still-reference motionbrick --stand-still-weight -1.0
+# 或使用原来的 Unitree 参考
+--stand-still-reference unitree --stand-still-weight -1.0
+```
+
+## 对照训练脚本
+
+`scripts/velocity/train_velocity_comparison.sh` 支持 `--stand-still-reference motionbrick|unitree`、
+`--stand-still-weight`、`--self-collisions`／`--no-self-collisions`、`--self-collision-weight`。
+默认使用 MotionBrick 参考、站立权重 -1、自碰撞关闭；输出目录包含所选配置。
+使用 `--dry-run` 预览，使用 `--actor-checkpoint`／`--world-checkpoint` 指定权重。
+冻结 world model 并开启自碰撞时，需要已适配自碰撞的 world checkpoint。

@@ -578,6 +578,7 @@ class VelocityTrainer(OnlineTrainer):
       "tracking_vertical_weight",
       "tracking_angular_xy_weight",
       "self_collision_weight",
+      "stand_still_reference",
     }
     if (
       saved_velocity.keys() - current_velocity.keys()

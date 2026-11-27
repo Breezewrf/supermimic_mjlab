@@ -10,6 +10,39 @@ from ..config.task_cfg import MOTION_ANCHOR_INDEX, STEP_DT
 from ..config.velocity_cfg import VelocityConfig
 from .state import quat_apply, quat_inverse_apply, yaw_quat
 
+# MotionBrick locomotion_vx_0_vy_0, frame 1617 (32.34 s), native 29DoF order.
+STAND_STILL_JOINT_POS = (
+  -0.1303912103176117,  # left_hip_pitch_joint
+  0.02017482928931713,  # left_hip_roll_joint
+  -0.006220028270035982,  # left_hip_yaw_joint
+  0.22090697288513184,  # left_knee_joint
+  -0.16351665556430817,  # left_ankle_pitch_joint
+  0.022092321887612343,  # left_ankle_roll_joint
+  -0.014323798939585686,  # right_hip_pitch_joint
+  -0.07477139681577682,  # right_hip_roll_joint
+  -0.402044415473938,  # right_hip_yaw_joint
+  0.11557622998952866,  # right_knee_joint
+  -0.1522573083639145,  # right_ankle_pitch_joint
+  0.016696227714419365,  # right_ankle_roll_joint
+  -0.015644552186131477,  # waist_yaw_joint
+  0.04290251433849335,  # waist_roll_joint
+  0.0016707987524569035,  # waist_pitch_joint
+  -0.06607262045145035,  # left_shoulder_pitch_joint
+  0.34128251671791077,  # left_shoulder_roll_joint
+  -0.7624660730361938,  # left_shoulder_yaw_joint
+  1.0942018032073975,  # left_elbow_joint
+  0.2753640115261078,  # left_wrist_roll_joint
+  0.0016952131409198046,  # left_wrist_pitch_joint
+  -0.11200642585754395,  # left_wrist_yaw_joint
+  0.14030113816261292,  # right_shoulder_pitch_joint
+  -0.30800795555114746,  # right_shoulder_roll_joint
+  0.3396586775779724,  # right_shoulder_yaw_joint
+  1.1322705745697021,  # right_elbow_joint
+  -0.5219122171401978,  # right_wrist_roll_joint
+  -0.06335048377513885,  # right_wrist_pitch_joint
+  0.014771653339266777,  # right_wrist_yaw_joint
+)
+
 
 def measured_velocity(state: Tensor) -> Tensor:
   planar = quat_inverse_apply(
@@ -35,6 +68,15 @@ def velocity_reward(
   cfg: VelocityConfig,
   self_collision_cost: Tensor | None = None,
 ) -> tuple[Tensor, dict[str, Tensor]]:
+  standing_q = default_q
+  if cfg.stand_still_reference == "motionbrick":
+    target = STAND_STILL_JOINT_POS
+    if default_q.numel() == 23:
+      # 23DoF omits waist roll/pitch and wrist pitch/yaw on both arms.
+      target = tuple(
+        q for i, q in enumerate(target) if i not in (13, 14, 20, 21, 27, 28)
+      )
+    standing_q = state.new_tensor(target)
   actual = measured_velocity(state)
   error = actual - command
   linear_error = error[..., :2].square().sum(-1)
@@ -68,7 +110,7 @@ def velocity_reward(
     "torso_sideways": -4 * sideways,
     "torso_angular_velocity": -0.05 * torso_omega[..., :2].square().sum(-1),
     "stand_still": cfg.stand_still_weight
-    * (q - default_q).square().sum(-1)
+    * (q - standing_q).square().sum(-1)
     * standing_command(command, cfg),
   }
   if self_collision_cost is not None:
