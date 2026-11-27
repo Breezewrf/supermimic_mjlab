@@ -25,7 +25,9 @@ class VelocityTrainingTests(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
     torch.set_num_threads(2)
-    cls.metadata = robot_metadata()
+    cls.metadata = robot_metadata(
+      self_collisions=getattr(cls, "self_collisions", False)
+    )
     cls.folder = tempfile.TemporaryDirectory()
     cls.root = Path(cls.folder.name)
     cls.manifest, cls.clips = make_motions(cls.root / "motions", cls.metadata)
@@ -36,6 +38,7 @@ class VelocityTrainingTests(unittest.TestCase):
 
   def setUp(self):
     self.config = OnlineConfig(
+      self_collisions=getattr(self, "self_collisions", False),
       num_envs=4,
       capacity=64,
       warmup_steps=12,
@@ -66,7 +69,12 @@ class VelocityTrainingTests(unittest.TestCase):
       simulator_output(sim_log, verbose=False),
     ):
       self.env = VelocityEnv(
-        FoundationConfig(manifest=self.manifest, clips=tuple(self.clips), num_envs=4),
+        FoundationConfig(
+          manifest=self.manifest,
+          clips=tuple(self.clips),
+          num_envs=4,
+          self_collisions=self.config.self_collisions,
+        ),
         self.velocity,
         device="cpu",
         motion_envs=2,
@@ -213,6 +221,10 @@ class VelocityTrainingTests(unittest.TestCase):
     torch.save(trainer.state_dict(), path)
     snapshot = torch.load(path, weights_only=True)
     snapshot.pop("freeze_world_model")
+    if not self.config.self_collisions:
+      # Old snapshots predate both collision settings and the optional head.
+      snapshot["config"].pop("self_collisions")
+      snapshot["velocity_config"].pop("self_collision_weight")
     for key in (
       "axis_command_probability",
       "command_deadband",

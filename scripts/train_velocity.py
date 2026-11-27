@@ -63,6 +63,12 @@ def parser():
     help="Keep pretrained world weights and normalization fixed (new runs: disabled)",
   )
   p.add_argument("--from-scratch", action="store_true")
+  p.add_argument(
+    "--self-collisions",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="Enable G1 self contacts and Unitree exclusions (new runs: enabled)",
+  )
   p.add_argument("--resume", type=Path)
   p.add_argument("--device", default="cuda:0")
   p.add_argument("--output", type=Path)
@@ -133,6 +139,16 @@ def parser():
   p.add_argument(
     "--stand-still-weight", type=float, help="Stand-still pose penalty (default: 0)"
   )
+  p.add_argument(
+    "--stand-still-reference",
+    choices=("motionbrick", "unitree"),
+    help="Stand-still target (new runs: motionbrick; resume: saved setting)",
+  )
+  p.add_argument(
+    "--self-collision-weight",
+    type=float,
+    help="Self-collision penalty weight (default: -1; must be nonpositive)",
+  )
   return p
 
 
@@ -180,7 +196,18 @@ def main():
       if getattr(args, key) is not None and getattr(args, key) != restored[key]:
         argument_parser.error(f"Resume requires original {key}")
     cfg = OnlineConfig(**restored)
+    if args.self_collisions is not None and args.self_collisions != cfg.self_collisions:
+      argument_parser.error("Resume requires the saved self-collision setting")
+    if args.self_collision_weight is not None and args.self_collision_weight != saved[
+      "velocity_config"
+    ].get("self_collision_weight", -1.0):
+      argument_parser.error("Resume requires the saved self-collision weight")
     velocity = VelocityConfig(**saved["velocity_config"])
+    if (
+      args.stand_still_reference is not None
+      and args.stand_still_reference != velocity.stand_still_reference
+    ):
+      argument_parser.error("Resume requires the saved stand-still reference")
     stage = saved["stage"]
     freeze_world_model = saved.get("freeze_world_model", False)
     if args.stage is not None and args.stage != stage:
@@ -205,6 +232,7 @@ def main():
       actor_input_normalization=True,
       critic_input_normalization=True,
       world_model_normalization=True,
+      self_collisions=True if args.self_collisions is None else args.self_collisions,
     )
     if not args.from_scratch:
       actor_saved = torch.load(
@@ -248,7 +276,13 @@ def main():
       )
       if not isinstance(settings, dict):
         raise TypeError("Expected a JSON object")
-      for key in ("warmup_updates", "stand_still_weight"):
+      settings.setdefault("stand_still_reference", "motionbrick")
+      for key in (
+        "warmup_updates",
+        "stand_still_weight",
+        "self_collision_weight",
+        "stand_still_reference",
+      ):
         if getattr(args, key) is not None:
           settings[key] = getattr(args, key)
       velocity = VelocityConfig(**settings)
@@ -256,6 +290,16 @@ def main():
       argument_parser.error(f"Invalid velocity configuration: {error}")
     stage = args.stage or "joint"
     freeze_world_model = bool(args.freeze_world_model)
+    if (
+      freeze_world_model
+      and cfg.self_collisions
+      and world_saved is not None
+      and not world_saved.get("simulation", {}).get("self_collisions", False)
+    ):
+      argument_parser.error(
+        "Enabling self-collisions from a non-collision world checkpoint requires "
+        "online adaptation (--no-freeze-world-model)"
+      )
   randomize_progress = args.randomize_initial_episode_progress
   if randomize_progress is None:
     randomize_progress = (
@@ -286,18 +330,29 @@ def main():
     "manifest_sha256": file_sha256(args.manifest),
     "timing_override_on_resume": bool(args.resume and timing_override),
     "tensorboard": args.tensorboard,
+    "initialization_collision_transfer": {
+      key: bool(
+        checkpoint is not None
+        and cfg.self_collisions
+        and not checkpoint.get("simulation", {}).get("self_collisions", False)
+      )
+      for key, checkpoint in (("actor", actor_saved), ("world", world_saved))
+    }
+    if saved is None
+    else saved.get("initialization_collision_transfer", {}),
   }
   args.output.mkdir(parents=True, exist_ok=bool(saved))
   write_json(args.output / "config.json", run)
   console = VelocityConsoleReporter(args.iterations, args.log_format)
   console.message(f"Initializing simulation; details: {args.output / 'simulator.log'}")
-  metadata = robot_metadata(args.robot)
+  metadata = robot_metadata(args.robot, self_collisions=cfg.self_collisions)
   initial_motion_report = None
   with TrainingRuntime(args, args.output, console) as runtime:
     with simulator_output(runtime.sim_log, verbose=args.verbose_sim):
       env = runtime.env = VelocityEnv(
         FoundationConfig.training(
           robot=args.robot,
+          self_collisions=cfg.self_collisions,
           manifest=args.manifest,
           motion_storage=cfg.motion_storage,
           motion_fk_cache_frames=cfg.motion_fk_cache_frames,
@@ -320,15 +375,36 @@ def main():
         stage=stage,
         freeze_world_model=freeze_world_model,
       )
+      trainer.initialization_collision_transfer = run[
+        "initialization_collision_transfer"
+      ]
       if saved:
         trainer.load_state_dict(saved, allow_timing_override=timing_override)
       else:
         if actor_saved:
-          validate_environment(env, actor_saved)
+          validate_environment(env, actor_saved, allow_collision_transfer=True)
           trainer.actor.load_state_dict(actor_saved["actor"])
         if world_saved:
-          validate_environment(env, world_saved)
-          trainer.world.load_state_dict(world_saved["world"])
+          transfer = validate_environment(
+            env, world_saved, allow_collision_transfer=True
+          )
+          if transfer:
+            incompatible = trainer.world.load_state_dict(
+              world_saved["world"], strict=False
+            )
+            expected = {
+              key
+              for key in trainer.world.state_dict()
+              if key.startswith("collision_head.")
+            }
+            if (
+              set(incompatible.missing_keys) != expected or incompatible.unexpected_keys
+            ):
+              raise ValueError(
+                "Pretrained world weights differ beyond the collision head"
+              )
+          else:
+            trainer.world.load_state_dict(world_saved["world"])
           trainer.world_pretrained = True
         if args.initial_evaluation_steps:
           from train_supermimic import evaluate_actor
@@ -341,7 +417,9 @@ def main():
             args.initial_evaluation_steps,
             library=env.library,
           )
-          write_json(args.output / "initial_motion_evaluation.json", initial_motion_report)
+          write_json(
+            args.output / "initial_motion_evaluation.json", initial_motion_report
+          )
         trainer.bootstrap()
 
     console.start(
@@ -353,6 +431,10 @@ def main():
       table_note="Table: interval means | Fail%: failure events per transition",
     )
     world_updates = "frozen" if freeze_world_model else "online"
+    console.message(
+      f"Self collisions: {'ON' if cfg.self_collisions else 'OFF'} | "
+      f"penalty weight={velocity.self_collision_weight}"
+    )
     console.message(
       f"Velocity: 10 x {env.foundation_config.observation_dim} observations | shared decoder | stage={stage} | "
       f"latent warmup={velocity.warmup_updates:,} updates | world model={world_updates}"

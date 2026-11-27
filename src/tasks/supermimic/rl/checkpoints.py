@@ -90,6 +90,7 @@ def training_config(saved: dict) -> dict:
     "world_prediction": "velocity_residual",
     "world_model_normalization": False,
     "motion_anchor_ori_b": False,
+    "self_collisions": False,
     **saved["config"],
   }
   if config["reference_dim"] != dimensions[schema]:

@@ -5,6 +5,7 @@ from torch import Tensor
 from torch.nn import functional as F
 
 from ..config.morphology import state_layout
+from ..config.robot_cfg import COLLISION_SUBSTEPS
 from ..models.world_model import (
   GROUP_NAMES,
   integrate,
@@ -92,11 +93,23 @@ def world_model_loss(
       .sum()
       / batch_size
     )
-  parts = {"state": state, "termination": termination}
+  collision = state.new_zeros(())
+  if "collision_logit" in prediction:
+    collision = (
+      F.binary_cross_entropy_with_logits(
+        prediction["collision_logit"],
+        batch["self_collision_cost"] / COLLISION_SUBSTEPS,
+        reduction="none",
+      )
+      .mul(mask)
+      .sum()
+      / batch_size
+    )
+  parts = {"state": state, "termination": termination, "collision": collision}
   if "clean_observation" not in prediction:
     if analytic_losses:
       raise ValueError("Full heads are required for analytic_losses=True")
-    return state + termination, parts
+    return state + termination + collision, parts
   n = state_layout(predicted).num_joints
   observation_error = torch.where(
     mask[..., None],
@@ -123,8 +136,9 @@ def world_model_loss(
     "observation": observation,
     "reward": reward,
     "termination": termination,
+    "collision": collision,
   }
-  total = sum(parts.values()) if analytic_losses else state + termination
+  total = sum(parts.values()) if analytic_losses else state + termination + collision
   return total, parts
 
 

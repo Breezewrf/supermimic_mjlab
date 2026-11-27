@@ -18,7 +18,7 @@ from ..mdp.state import (
 )
 
 
-def robot_metadata(robot: str = "g1_29dof") -> dict:
+def robot_metadata(robot: str = "g1_29dof", *, self_collisions=False) -> dict:
   import mujoco
   import numpy as np
   from mjlab.entity import Entity
@@ -27,8 +27,8 @@ def robot_metadata(robot: str = "g1_29dof") -> dict:
 
   cfg = (
     get_supermimic_robot_cfg()
-    if robot == "g1_29dof"
-    else get_supermimic_robot_cfg(robot)
+    if robot == "g1_29dof" and not self_collisions
+    else get_supermimic_robot_cfg(robot, self_collisions=self_collisions)
   )
   layout = robot_layout(robot)
   robot = Entity(cfg)
@@ -105,6 +105,7 @@ def robot_metadata(robot: str = "g1_29dof") -> dict:
     "geom_conaffinity",
     "geom_condim",
     "geom_priority",
+    "exclude_signature",
     "mesh_vertadr",
     "mesh_vertnum",
     "mesh_vert",

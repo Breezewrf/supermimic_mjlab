@@ -45,7 +45,10 @@ def main():
     ):
       env = VelocityEnv(
         FoundationConfig(
-          robot=args.robot, num_envs=args.num_envs, episode_length_s=1e9
+          robot=args.robot,
+          num_envs=args.num_envs,
+          episode_length_s=1e9,
+          self_collisions=saved["config"].get("self_collisions", False),
         ),
         VelocityConfig(**saved["velocity_config"]),
         args.device,
