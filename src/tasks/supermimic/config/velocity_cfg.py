@@ -17,7 +17,7 @@ class VelocityConfig:
     (-1.32, 1.32),
     (-3.35, 3.35),
   )
-  curriculum_steps: int = 120_000
+  curriculum_steps: int = 5_000
   resampling_time_range: tuple[float, float] = (3.0, 8.0)
   randomize_initial_episode_progress: bool = True
   reference_probability: float = 0.5

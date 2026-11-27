@@ -79,6 +79,11 @@ def parser():
   )
   p.add_argument("--iterations", type=int, default=100000)
   p.add_argument(
+    "--curriculum-steps",
+    type=int,
+    help="Collection control steps before command-range expansion (new runs: VelocityConfig default)",
+  )
+  p.add_argument(
     "--velocity-config", type=Path, help="JSON velocity settings for a new run"
   )
   p.add_argument(
@@ -204,6 +209,11 @@ def main():
       argument_parser.error("Resume requires the saved self-collision weight")
     velocity = VelocityConfig(**saved["velocity_config"])
     if (
+      args.curriculum_steps is not None
+      and args.curriculum_steps != velocity.curriculum_steps
+    ):
+      argument_parser.error("Resume requires the saved curriculum_steps")
+    if (
       args.stand_still_reference is not None
       and args.stand_still_reference != velocity.stand_still_reference
     ):
@@ -279,6 +289,7 @@ def main():
       settings.setdefault("stand_still_reference", "motionbrick")
       for key in (
         "warmup_updates",
+        "curriculum_steps",
         "stand_still_weight",
         "self_collision_weight",
         "stand_still_reference",
@@ -460,18 +471,18 @@ def main():
         "wandb_run": dict(tracking.state) if tracking else None,
       }
       save_checkpoint(args.output / "last.pt", full)
-      save_checkpoint(
-        args.output / "velocity_policy_last.pt",
-        trainer.velocity_policy_state_dict(),
-      )
-      save_checkpoint(
-        args.output / "motion_policy_last.pt",
-        trainer.policy_state_dict() | {"manifest_sha256": run["manifest_sha256"]},
-      )
-      save_checkpoint(
-        args.output / "world_model_last.pt",
-        trainer.world_model_state_dict() | {"manifest_sha256": run["manifest_sha256"]},
-      )
+      components = {
+        "velocity_policy_": trainer.velocity_policy_state_dict(),
+        "motion_policy_": trainer.policy_state_dict()
+        | {"manifest_sha256": run["manifest_sha256"]},
+        "world_model_": trainer.world_model_state_dict()
+        | {"manifest_sha256": run["manifest_sha256"]},
+      }
+      for prefix, payload in components.items():
+        save_checkpoint(
+          args.output / f"{prefix}iteration_{trainer.iteration:06d}.pt", payload
+        )
+        save_checkpoint(args.output / f"{prefix}last.pt", payload)
 
     starting_iteration = trainer.iteration
     runtime.train(

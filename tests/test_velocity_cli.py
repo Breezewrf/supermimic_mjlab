@@ -145,6 +145,10 @@ class VelocityCliTests(unittest.TestCase):
         "0",
         "--iterations",
         "2",
+        "--checkpoint-interval",
+        "1",
+        "--curriculum-steps",
+        "123",
         "--clips",
         "fixture_walk",
         "fixture_run",
@@ -160,6 +164,15 @@ class VelocityCliTests(unittest.TestCase):
       checkpoint = torch.load(output / "last.pt", weights_only=True)
       self.assertEqual(checkpoint["wandb_run"]["id"], previous["id"])
       self.assertEqual(checkpoint["iteration"], 2)
+      self.assertEqual(checkpoint["velocity_config"]["curriculum_steps"], 123)
+      self.assertFalse(list(output.glob("iteration_*.pt")))
+      for iteration in (1, 2):
+        for prefix in ("velocity_policy_", "motion_policy_", "world_model_"):
+          historical = output / f"{prefix}iteration_{iteration:06d}.pt"
+          self.assertTrue(historical.is_file(), historical)
+          self.assertEqual(
+            torch.load(historical, weights_only=True)["iteration"], iteration
+          )
       self.assertNotIn("resample_steps", checkpoint["velocity_config"])
       self.assertTrue(
         checkpoint["velocity_config"]["randomize_initial_episode_progress"]

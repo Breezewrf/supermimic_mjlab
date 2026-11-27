@@ -1,4 +1,4 @@
-# 93 维速度控制接口
+# Velocity Controller
 
 速度控制器接收 `(vx, vy, wz)`，使用最近 10 帧本体观测输出 29 维归一化关节位置动作。
 `vx/vy` 使用机器人 yaw-only heading 坐标系，`wz` 使用世界坐标系角速度的 z 分量。
@@ -42,6 +42,161 @@ sigmoid 概率，高度宽度为 `0.02 m`，重力投影宽度为 `0.04`。时�
 70° 阈值是参考 Unitree 的工程选择，论文阈值约为 73°。
 Unitree 的固定 gait、contact、air-time、soft-landing 奖励需要额外接触信息，当前不加入训练目标；
 没有将仿真接触值或 reference anchor 作为速度 Actor 的隐藏输入。
+
+## 训练闭环与优化目标
+
+当前做法是在已有 motion policy 上增加 velocity encoder，并在世界模型中通过可微 rollout
+优化速度回报。Motion encoder 根据未来参考动作生成 latent，velocity encoder 根据本体历史和
+速度指令生成 latent，两者使用同一个 decoder：
+
+$$
+z_t^{motion}=E_{motion}(r_t),\qquad
+z_t^{vel}=E_{vel}(h_t,c_t),\qquad
+a_t=D(h_t,z_t).
+$$
+
+这里 `h_t` 表示归一化后的最近 10 帧本体观测，`r_t` 表示未来参考特征，
+`c_t` 为三维速度指令，进入 encoder 前按 `command_scale` 缩放。
+29DoF Actor 每帧不直接读取 root 线速度；真实速度用于训练奖励和 privileged critic。
+控制周期为 `0.02 s`（50 Hz），物理仿真周期为 `0.005 s`，每个动作保持 4 个物理步。
+Decoder 输出经各关节 action scale 和默认姿态偏置转换为关节位置 PD 目标。
+
+训练数据和参数更新形成以下闭环：
+
+1. **真实采集。** 一个仿真实例中的环境各分一半执行 motion tracking 和 velocity tracking，
+   分别写入两个 replay。默认启动先采集 32 个控制步，之后每 2 轮训练采集 5 步。
+   训练采集包含域随机化、观测／reset 噪声，以及标准差为 `0.1` 的动作噪声。
+2. **动力学更新。** 在线模式每轮从两类 replay 各取一半 batch，用记录动作执行 8 步
+   world-model rollout，监督预测状态；motion termination head 只使用 motion 标签。
+   默认每轮更新 10 个 world-model batch。冻结模式跳过这一步，并固定模型归一化统计。
+3. **Motion 更新。** Joint 阶段从 motion replay 抽取起点，在世界模型中优化 motion tracking
+   回报，更新 motion encoder 和共享 decoder，再拟合 motion critic。
+4. **Velocity 更新。** 从 velocity replay 抽取真实状态、历史及指令调度状态作为起点，
+   用当前 velocity encoder 和共享 decoder 生成动作，在世界模型中预测下一状态，重新计算
+   本体观测、奖励和跌倒概率，再将观测加入历史。默认展开 32 步，即 `0.64 s`。
+   未来指令由与真实采集相同的调度器生成，包含参考速度变化和随机指令重采样。
+5. **Velocity critic 更新。** 使用 imagination 中的奖励、存活概率和价值构造 GAE/λ-return
+   目标，拟合 velocity critic；默认 `gamma=0.99`、`gae_lambda=0.95`。
+   两个 critic 各自默认训练 5 个 epoch，每个 epoch 分 4 个 minibatch。
+
+令 `p_t` 为第 `t` 次预测转移后的跌倒概率，`S_0=1`、
+`S_t=∏_{k=0}^{t-1}(1-p_k)` 为到达第 `t` 步前的累计存活概率。
+Velocity encoder 最大化折扣奖励与末端价值之和：
+
+$$
+J_{vel}=\mathbb{E}\left[
+\sum_{t=0}^{H-1}\gamma^t S_t r_t
++\gamma^H S_H V_{vel}(\hat s_H,c_H,a_{H-1},\mathrm{context})
+\right],\qquad H=32.
+$$
+
+预热阶段只优化参考来源样本上的 latent MSE。Joint 阶段的 velocity 损失为：
+
+$$
+L_{vel}=-J_{vel}+\lambda_{align}L_{align},\qquad
+L_{align}=\underset{\text{参考来源样本}}{\mathrm{mean}}
+\left[\mathrm{mean}_{32}\left((z_t^{vel}-z_t^{motion})^2\right)\right].
+$$
+
+`alignment_weight` 默认 `0.1`。随机指令没有对应的 motion latent，不计算对齐损失。
+Velocity 更新时固定 motion Actor、world model 和 velocity critic 的参数，但保留其输入
+Jacobian，使梯度能通过 decoder、预测动力学、奖励和末端价值传回 velocity encoder。
+**速度回报只更新 velocity encoder；共享 decoder 由 motion tracking 回报更新。**
+预热阶段两个 critic 都不进行价值拟合。
+
+具体实现见 [训练器](../src/tasks/supermimic/rl/velocity_training.py)、
+[velocity imagination](../src/tasks/supermimic/rl/velocity_imagination.py) 和
+[共享 decoder 接口](../src/tasks/supermimic/models/velocity_policy.py)。
+
+### Motion critic 与 velocity critic
+
+两个 critic 分别估计各自任务下的未来折扣回报：motion critic 判断当前状态能否继续跟好
+参考动作，velocity critic 判断能否继续完成速度指令。
+
+| 项目 | Motion critic | Velocity critic |
+| --- | --- | --- |
+| 任务条件 | 未来参考动作特征 | 三维速度指令 `(vx,vy,wz)` |
+| 身体状态坐标 | 相对参考 anchor 的位置、朝向和速度 | 高度、去除 yaw 的 6D 朝向、heading-frame 速度 |
+| 其他输入 | 关节状态、仿真 context | 关节状态、上一动作、仿真 context |
+| 回报目标 | Motion tracking 奖励 | Velocity tracking、stand-still、自碰撞等 velocity 奖励 |
+| 默认隐藏层／输出 | `(256,128)`／一个价值标量 | `(256,128)`／一个价值标量 |
+
+29DoF、`reference_dim=2680` 时，motion critic 输入为 `71+2680+33=2784` 维，
+velocity critic 输入为 136 维。两者均使用训练时的特权物理状态，不受 Actor 的本体观测限制。
+
+相同身体状态的任务价值可能不同：稳定站立对于零速度指令可能具有较高价值，但对于跑步
+参考动作可能具有较低价值。两个任务的奖励、终止规则和后续策略也不同，因此分别拟合
+`V_motion` 和 `V_velocity`，并分别维护归一化统计和优化器。
+
+两者都使用各自 imagination 轨迹的 GAE/λ-return 目标拟合价值，并用末端价值补充默认
+32 步 rollout 之外的未来回报。更新 Actor 时固定 critic 参数，但保留末端价值对预测状态的
+输入梯度。Motion critic 服务于 motion encoder／共享 decoder 的更新；velocity critic
+服务于 velocity encoder 的更新。两个 critic 都不参与部署推理。
+
+分别使用两个独立网络是当前的实现选择，并非理论上的唯一方案；也可以设计共享主干、
+两个价值输出头或带任务条件的统一 critic，但仍需区分两种任务的价值目标。
+具体见 [Motion critic](../src/tasks/supermimic/models/policy.py) 和
+[Velocity critic](../src/tasks/supermimic/models/velocity_policy.py)。
+
+## 与 SuperMimic 论文的对照
+
+以下以[本地论文](supermimic.pdf) §4.5、附录 B、表 A.4/A.5/A.6 和附录 G.1 为依据，
+对照当前 velocity 训练入口与对照 launcher。论文没有明确说明的设置标为“未说明”，
+不据此推断作者实现一定采用另一种方式。该对照聚焦 velocity 接口，不代表对底层仿真、
+观测和 world model 所有细节做了完整一致性验证。
+
+### 实现一致的部分
+
+| 项目 | 论文方法与当前实现 |
+| --- | --- |
+| 多接口策略 | Motion encoder 和 velocity encoder 使用同一个 decoder，并共用动力学模型 |
+| Velocity 输入与 latent | 三维速度指令、最近 10 帧本体观测信息；MLP 隐藏层 `(256,256)`，输出经过 `tanh` 的 32 维 latent；论文未进一步指定观测历史特征的全部实现细节 |
+| 共享 decoder | 输入 latent 和最近 10 帧观测，默认隐藏层 `(2048,1024,512,256)`；当前预训练初始化继承 checkpoint 的结构 |
+| 参数更新边界 | Velocity 回报只更新 velocity encoder；梯度穿过 decoder，但不更新其参数；motion tracking 回报更新 motion encoder 和共享 decoder |
+| Latent 对齐 | 参考来源样本上的 velocity latent 对齐对应 motion latent，MSE 权重默认 `0.1`；对 motion latent 停止梯度 |
+| Joint 阶段保留对齐 | 对齐并非仅用于预热，当前 joint 损失仍为 `-J_velocity + 0.1 * L_alignment`；随机来源样本不计算对齐，与论文一致 |
+| Critic | 每个接口有独立 critic，默认隐藏层 `(256,128)`；分别拟合各自任务的价值 |
+| 环境和 imagination 配比 | Motion／velocity 各占一半环境与 imagined batch；论文和当前 launcher 均使用 4096 个环境 |
+| Joint 指令来源 | 每次重采样以 50% 概率选择参考来源，否则使用随机来源；随机分支以 10% 概率置零 |
+| 指令坐标与参考平滑 | 平移速度在 yaw-only heading 系，yaw rate 为世界系角速度 z 分量；参考指令使用中心 25 帧平均 |
+| 最终随机指令范围 | `vx[-1.5,2] m/s`、`vy[-1.32,1.32] m/s`、`wz[-3.35,3.35] rad/s` |
+| 想象轨迹起点 | 每种接口从其自身仿真采集的数据中抽取状态 |
+| 基础速度奖励 | 平面速度、yaw rate、动作平滑、关节限位、torso 侧倾和横滚／俯仰角速度；默认基础公式及权重对应表 A.6，各项乘控制周期 `0.02 s` |
+| 主要优化设置 | 默认 horizon 32、discount 0.99、GAE λ 0.95、world-model 窗口 8 步、critic 5 epoch × 4 minibatch；当前 launcher 使用 4096 条 imagined rollout 和 10 × 2048 个 world-model 窗口 |
+| 在线动力学训练 | 默认持续用真实转移拟合共享 world model；策略反传期间固定模型参数，保留输入梯度 |
+
+### 差异与额外选项
+
+| 项目 | 论文描述 | 当前实现 |
+| --- | --- | --- |
+| 独立 latent 预热 | 未明确描述先做纯 MSE 预热的阶段 | 默认先做 500 次 latent MSE 更新，再进入 joint；预热不拟合 critic |
+| 随机指令课程 | G.1 直接给出上述完整随机范围，没有描述小范围扩围课程 | 初始使用较小范围，默认累计 5000 个采集控制步后扩围到论文范围；计数不乘环境数 |
+| 指令重采样周期 | Reset 时和每 250 个控制步，即固定 5 秒 | Reset 时和各环境独立采样的 3～8 秒保持时间到期时 |
+| Velocity reset 姿态 | G.1 未明确说明 velocity 环境独立的站姿／参考姿态配比 | 50% 默认站姿，50% 参考动作身体状态 |
+| 首次超时打散 | 未描述这一专门安排 | 训练启动和恢复时默认随机安排首个 episode 的超时，随后使用完整时长 |
+| 跌倒倾角 | `1 + u_z > 0.7`，约 73°；高度阈值 0.35 m | 倾角 70°；高度阈值同为 0.35 m |
+| 整个 run 冻结 world model | 算法 A.1 持续拟合模型；只在策略反传时固定模型参数 | 额外支持 `--freeze-world-model`，固定整个 run 的模型权重和归一化统计 |
+| Stand-still 姿态奖励 | 表 A.6 未列出 | 可选 Unitree 默认姿态或 MotionBrick 固定姿态；训练入口权重默认 0，对照 launcher 默认 -1 |
+| 自碰撞和代价预测头 | 表 A.6 未列出该奖励，也未描述碰撞代价预测头 | 可选物理自碰撞、指定排除对、真实接触力惩罚及 imagination 代价预测头；新 velocity 入口默认开启，对照 launcher 默认关闭 |
+| 额外指令／奖励设置 | G.1／表 A.6 未描述当前这些扩展 | `axis_command_probability`、`command_deadband`、`tracking_vertical_weight`、`tracking_angular_xy_weight` 默认均为 0，未启用时不改变对应基础行为 |
+| 动作库 | G.1 使用从 LAFAN1 和 BONES-SEED 筛选的走跑库 | Launcher 分别选择 BONES-SEED、LAFAN1 或 MotionBrick |
+| 训练长度 | Velocity 实验为 100000 轮 | 训练入口默认 100000 轮，对照 launcher 为 5000 轮 |
+| 学习率衰减 | 通用表 A.5 为 250000 轮余弦衰减到 0.03 倍，之后保持；G.1 未另说明修改 | 按当前 run 总轮数完成余弦衰减到 0.03 倍；launcher 的 5000 轮也会完成整段衰减 |
+
+论文的 distillation baseline 也不等同于当前的 latent MSE 预热：该 baseline 以参考速度作为
+command，通过 motion-tracking 回报训练 velocity encoder；RL encoder 则使用速度任务回报，
+并在参考来源 rollout 上保留 latent 对齐。原文 §6 讨论了并发 motion 训练可能并非必要，
+但 G.1 实际报告的实验仍采用联合训练，不能据此声称论文验证了固定整个 motion Actor 的方案。
+
+### Command 来源与 reset 姿态是两次不同的采样
+
+“50% 参考速度／50% 随机速度”决定机器人接收什么指令；“50% 站姿／50% 参考姿态”
+决定机器人从什么身体状态开始运动。论文和当前 joint 阶段都明确采用前一种 command 配比；
+后一种独立 reset 配比是当前代码的设置，不能将论文“未说明”理解为全部使用随机速度或随机姿态。
+
+当前两次选择分开进行，因此既可能从默认站姿开始并接收参考速度，也可能从参考动作姿态
+开始并接收随机速度。参考 command 的片段／帧游标不要求与 reset 所选参考姿态相同。
+预热时 command 全部使用参考来源，但机器人历史仍来自当前策略实际控制的真实仿真。
 
 ## 自碰撞、排除对与惩罚
 
@@ -127,6 +282,35 @@ python scripts/train_velocity.py \
 仍使用混合环境进行采集。需要适配 motion prior 时，可将该阶段输出的
 `motion_policy_last.pt` 和 `world_model_last.pt` 作为下一次 joint run 的初始化。
 
+### 预热阶段的 command 与 latent 对齐
+
+预热时，velocity 环境全部使用 motion dataset 的参考来源指令：调度器选择参考片段和帧，
+读取该帧经过中心 25 帧平均的速度作为 `c_t=(vx,vy,wz)`。`vx/vy` 使用 heading 坐标系，
+`wz` 使用世界坐标系角速度的 z 分量。参考帧逐步推进，指令按参考速度变化；目标 latent
+使用同一参考游标对应的未来 10 帧动作特征。
+
+$$
+z_t^{motion}=E_{motion}(r_{t:t+9}),\qquad
+z_t^{velocity}=E_{velocity}(h_t,c_t),\qquad
+L_{warmup}=\mathbb{E}\left[\mathrm{mean}_{32}
+\left((z_t^{velocity}-z_t^{motion})^2\right)\right].
+$$
+
+这里 `h_t` 是归一化后的最近 10 帧真实仿真观测。Velocity 环境由当前 velocity encoder
+和共享 decoder 控制，历史来自它们实际控制的机器人，而不是直接读取 dataset 的观测历史。
+Motion encoder 只提供不带梯度的 latent 监督目标，不替代 velocity 环境中的动作输出。
+参考指令游标也不要求机器人实际姿态与 dataset 中该帧姿态完全一致。
+
+预热只更新 velocity encoder 的 latent MSE，不通过速度回报优化 encoder。Motion encoder、
+共享 decoder 和共享 Actor 观测归一化统计固定；两个 critic 不进行价值拟合，但采集仍会
+更新 critic 输入归一化统计。在线模式下 world model 继续用真实采集数据监督更新，
+冻结模式则保持 world model 权重和统计不变。
+
+预热结束后进入 joint，开始速度回报优化和两个 critic 的价值拟合，参考／随机指令按正常
+调度混合；latent 对齐继续保留，但只对参考来源的样本计算。
+具体见 [预热与联合更新](../src/tasks/supermimic/rl/velocity_training.py) 和
+[参考指令调度](../src/tasks/supermimic/mdp/velocity_commands.py)。
+
 Motion/velocity 各占一半环境和 imagination batch；`--num-envs` 必须为偶数，
 `--policy-batch-size` 和 `--wm-batch-size` 表示两类任务的总 batch。
 真实物理仿真只创建一个实例，两个任务使用独立 replay。
@@ -139,12 +323,55 @@ Motion/velocity 各占一半环境和 imagination batch；`--num-envs` 必须为
 | Critic | 两个任务各自的 critic |
 | World model | 混合两类转移更新动力学；motion termination head 只使用 motion 标签 |
 
+默认在线更新 world model。使用 `--freeze-world-model` 可固定预训练动力学权重及其
+输入／输出归一化统计，并跳过动力学训练；冻结模式要求预训练 world checkpoint。
+该选项不会冻结 joint 阶段的共享 decoder，也不会切断策略优化所需的模型输入梯度。
+
 冻结参数不会关闭计算图。速度回报仍通过 decoder、世界模型和末端 critic 的输入 Jacobian
 反传到 encoder。归一化只从新采集的真实数据更新；imagination 不更新统计量。
 
 默认只选 `walk*`、`run*`、`sprint*` clip，也可显式传 `--clips`。
 训练开始前默认对所选 clip 各评估 250 步，写入 `initial_motion_evaluation.json`。
 这是有步数上限的检查，不代表完整动作成功率；`--initial-evaluation-steps 0` 可关闭。
+
+## 动作风格的继承与边界
+
+当前结构具有从 motion dataset 继承动作风格的机制，但没有保证风格一致的硬约束。
+这里的风格包括步频、步幅、摆臂、躯干姿态和接触时序等；速度跟踪误差本身不能衡量这些特征。
+
+共享 decoder 在 motion tracking 中学习 latent 与身体状态到动作的映射，可能保留数据集中的
+关节协调方式。Velocity encoder 借助已有 decoder 完成速度指令，参考来源样本上的 latent
+对齐进一步鼓励它使用 motion encoder 的表示。预热先学习这一表示，joint 阶段继续保留
+对齐损失，同时通过 motion 分支持续训练 decoder。
+
+对相同历史 `h_t`，两个 latent 的局部动作差异可近似为：
+
+$$
+\Delta a_t\approx\frac{\partial D(h_t,z_t)}{\partial z_t}\Delta z_t.
+$$
+
+Latent 接近通常有利于单步动作接近，但放大程度取决于 decoder 的 Jacobian；
+单步接近也不能保证长期轨迹和接触时序接近。具体边界包括：
+
+- **Decoder 没有限定动作分布。** 它是普通神经网络，`tanh` 只限制 latent 的数值范围，
+  不能保证每个 latent 都对应数据集中的自然动作。相同 decoder 在不同身体历史下也会输出不同动作。
+- **速度不能唯一指定风格。** 同一个 `(vx,vy,wz)` 可以通过不同步频、步幅和摆臂实现。
+  数据集包含多种风格时，当前接口没有额外的风格选择条件。
+- **随机指令缺少直接对齐监督。** 默认 joint 重采样有 50% 概率选择参考来源，其余使用
+  随机来源；参考库覆盖不足的组合指令需要策略组合或外推已有能力。
+- **速度回报允许风格偏移。** Joint 目标在速度回报与 latent 对齐之间权衡。
+  `alignment_weight=0.1` 的实际约束强度取决于两项的数值和梯度尺度。
+  当前速度奖励没有直接约束参考动作的步频、足端轨迹或接触节奏。
+- **Motion prior 在 joint 中仍会变化。** Motion encoder、共享 decoder 和共享观测统计
+  并非始终固定，因此对齐目标也不是初始化 checkpoint 中永久不变的风格模板。
+
+参考库同时影响参考指令、reset 状态、latent 对齐目标和共享 decoder 的 motion 训练；
+在线模式下还通过 motion replay 影响 world model。更接近参考库覆盖范围的指令和身体状态，
+理论上更容易沿用参考动作的协调方式，但实际保留程度需要单独评估。
+
+风格评估应在实测速度相近时比较步频、步幅、摆臂幅度、躯干姿态和足端接触时序，
+避免把速度差异当成风格差异。最近的[对比实验](experiments/velocity_tracking_2026-11-26_zh.md)
+测量了速度误差、停车漂移和跌倒，已观察到参考库选择对跟踪效果的影响；尚未直接测量风格保持程度。
 
 ## 指令、数据边界与恢复
 
@@ -155,10 +382,21 @@ Motion/velocity 各占一半环境和 imagination batch；`--num-envs` 必须为
 这是参考 Unitree 的去同步设置，与论文 G.1 的固定 250 步指令周期不同。
 参考线速度先按每帧 heading 转换，再进行中心 25 帧平均，clip 边缘复制端点，禁止跨 clip 平滑。
 
-初始随机范围为 `vx[-0.5,1.0]`、`vy[-0.5,0.5]`、`wz[-1,1]`；累计 120000 个采集控制步后
+初始随机范围为 `vx[-0.5,1.0]`、`vy[-0.5,0.5]`、`wz[-1,1]`；累计 5000 个采集控制步后
 扩展至 `vx[-1.5,2]`、`vy[-1.32,1.32]`、`wz[-3.35,3.35]`。
 此计数为每环境共享的控制步计数，包含预热，不乘并行环境数。
 速度训练 reset 以各 50% 概率选择站姿和 locomotion 参考姿态。
+
+课程配置集中在 [`VelocityConfig`](../src/tasks/supermimic/config/velocity_cfg.py)，
+默认 `curriculum_steps=5000`。对照脚本直接使用代码默认值，不再依赖附带的 JSON 配置。
+历史初始课程的门槛为 120000；提前扩围实验使用 5000。
+
+[对照脚本](../scripts/velocity/train_velocity_comparison.sh)使用 4096 个环境、
+`policy_batch_size=4096`、`wm_batch_size=2048`，从 BONES-SEED 10k motion policy 和
+world model 初始化，总共训练 5000 轮（包含 500 次 latent 预热）。
+该轮实验比较 BONES-SEED 参考子集和 LAFAN1 的 18 条 walk/run/sprint，以及 world model
+在线／冻结两种模式。训练轮数与上述采集控制步计数分别累计。
+这些历史实验没有开启自碰撞；当前对照脚本默认关闭自碰撞，也可显式开启。
 
 新 run 可通过 `--velocity-config <settings.json>` 覆盖速度配置，未指定的字段沿用默认值。
 `curriculum_steps` 和 `final_ranges` 控制随机指令何时扩围及扩围后的范围。
@@ -318,9 +556,11 @@ python -m unittest tests.test_velocity tests.test_velocity_training -v
 末端 bootstrap、eager/编译接口一致性、真实物理奖励一致性、timeout/reset、两任务更新、
 checkpoint 恢复以及不读取 manifest 的独立推理。
 
-本次短跑已完成 5 次预热和 20 次联合更新，并完成续训检查。
+早期短跑验证完成了 5 次预热和 20 次联合更新，并完成续训检查。
 9 类指令、每类 4 次的 5 秒测试未跌倒，但非零指令的相对误差约为 1，策略主要保持站立；
-这验证了训练和推理链路，尚未得到收敛的速度跟踪策略。完整训练与 672 条件评估尚未运行。
+这验证了训练和推理链路，该短跑本身尚未得到收敛的速度跟踪策略。
+后续 5000 轮训练和 672 个非零条件加站立的评估，见
+[2026-11-26 对比实验](experiments/velocity_tracking_2026-11-26_zh.md)。
 
 ## Stand-still 姿态参考
 
@@ -342,10 +582,22 @@ waist roll/pitch 和 wrist pitch/yaw 角度。仿真和 imagination 共用这一
 --stand-still-reference unitree --stand-still-weight -1.0
 ```
 
-## 对照训练脚本
+## 间隔 checkpoint 与训练课程
 
-`scripts/velocity/train_velocity_comparison.sh` 支持 `--stand-still-reference motionbrick|unitree`、
-`--stand-still-weight`、`--self-collisions`／`--no-self-collisions`、`--self-collision-weight`。
-默认使用 MotionBrick 参考、站立权重 -1、自碰撞关闭；输出目录包含所选配置。
-使用 `--dry-run` 预览，使用 `--actor-checkpoint`／`--world-checkpoint` 指定权重。
-冻结 world model 并开启自碰撞时，需要已适配自碰撞的 world checkpoint。
+Velocity 训练在 `--checkpoint-interval`（默认 1000）和训练结束时保留编号文件：
+`velocity_policy_iteration_005000.pt`、`motion_policy_iteration_005000.pt`、
+`world_model_iteration_005000.pt`，并更新对应 `*_last.pt`。
+完整可续训 checkpoint 只更新 `last.pt`，不保留带 iteration 编号的历史副本。
+编号对应实际 iteration，早期 run 已被覆盖的权重无法补回。
+
+对照 launcher 支持 `--iterations N`（默认 5000）、`--curriculum-steps N`（默认读取
+`VelocityConfig.curriculum_steps`）和 `--checkpoint-interval N`（默认 1000）。
+课程步数计数为采集控制步，不乘并行环境数。
+默认输出目录附加总迭代数和课程门槛，显式传 OUTPUT 时使用给定目录。
+续训可增加总迭代数，但课程门槛必须与 checkpoint 保存值相同。
+
+```bash
+bash scripts/velocity/train_velocity_comparison.sh motionbrick180 online cuda:0 \
+  --iterations 100000 --curriculum-steps 5000 --checkpoint-interval 1000 \
+  --stand-still-reference motionbrick --self-collisions
+```

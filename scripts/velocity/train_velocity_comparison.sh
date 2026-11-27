@@ -17,6 +17,9 @@ Options:
   --self-collision-weight VALUE               (default: -1.0; 0 disables penalty)
   --actor-checkpoint PATH
   --world-checkpoint PATH
+  --iterations N                             (default: 5000)
+  --curriculum-steps N                        (default: VelocityConfig)
+  --checkpoint-interval N                    (default: 1000)
   --dry-run                                  Show configuration without training
 EOF
 }
@@ -28,10 +31,13 @@ collision_weight=-1.0
 actor_checkpoint=
 world_checkpoint=
 dry_run=false
+iterations=5000
+curriculum_steps=
+checkpoint_interval=1000
 positional=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --stand-still-reference|--stand-still-weight|--self-collision-weight|--actor-checkpoint|--world-checkpoint)
+    --stand-still-reference|--stand-still-weight|--self-collision-weight|--actor-checkpoint|--world-checkpoint|--iterations|--curriculum-steps|--checkpoint-interval)
       if [[ $# -lt 2 || -z "$2" ]]; then echo "Missing value for $1" >&2; exit 2; fi
       case "$1" in
         --stand-still-reference) reference=$2 ;;
@@ -39,6 +45,9 @@ while [[ $# -gt 0 ]]; do
         --self-collision-weight) collision_weight=$2 ;;
         --actor-checkpoint) actor_checkpoint=$2 ;;
         --world-checkpoint) world_checkpoint=$2 ;;
+        --iterations) iterations=$2 ;;
+        --curriculum-steps) curriculum_steps=$2 ;;
+        --checkpoint-interval) checkpoint_interval=$2 ;;
       esac
       shift 2 ;;
     --self-collisions) collision=--self-collisions; collision_name=on; shift ;;
@@ -104,12 +113,8 @@ if [[ ! -x .venv/bin/python ]]; then
   echo "Python is missing or not executable: $repo/.venv/bin/python" >&2
   exit 1
 fi
-if [[ ! -f "$inputs/velocity_config.json" ]]; then
-  echo "Copy velocity_config.json alongside this launcher: $inputs" >&2
-  exit 1
-fi
 
-.venv/bin/python -B - "$stand_weight" "$collision_weight" "$mode" "$collision_name" "$world_checkpoint" "$dry_run" <<'CHECK'
+curriculum_steps=$(.venv/bin/python -B - "$stand_weight" "$collision_weight" "$mode" "$collision_name" "$world_checkpoint" "$dry_run" "$iterations" "$curriculum_steps" "$checkpoint_interval" <<'CHECK'
 import math
 import sys
 from pathlib import Path
@@ -120,13 +125,23 @@ for value in sys.argv[1:3]:
         valid = False
     if not valid:
         raise SystemExit(f"Penalty weights must be finite and nonpositive: {value}")
-mode, collision, world, dry = sys.argv[3:]
+mode, collision, world, dry = sys.argv[3:7]
+from src.tasks.supermimic.config.velocity_cfg import VelocityConfig
+curriculum = sys.argv[8] or str(VelocityConfig().curriculum_steps)
+for label, value, minimum in (("iterations", sys.argv[7], 1), ("curriculum_steps", curriculum, 0), ("checkpoint_interval", sys.argv[9], 1)):
+    if not value.isdecimal() or int(value) < minimum:
+        raise SystemExit(f"Invalid {label}: {value}")
+print(int(curriculum))
 if mode == "frozen" and collision == "on" and dry != "true":
     import torch
     checkpoint = torch.load(Path(world), map_location="cpu", weights_only=True, mmap=True)
     if not checkpoint.get("simulation", {}).get("self_collisions", False):
         raise SystemExit("Frozen + self-collisions requires an adapted collision world checkpoint. Use online mode first, or pass --world-checkpoint with adapted weights.")
 CHECK
+)
+if [[ ${#positional[@]} -lt 4 ]]; then
+  output="${output}_iters${iterations}_curriculum${curriculum_steps}"
+fi
 
 scratch=$(mktemp -d /tmp/supermimic-velocity-clips.XXXXXX)
 trap 'rm -rf "$scratch"' EXIT
@@ -181,19 +196,19 @@ mapfile -t clips < "$scratch/clips.txt"
 command=(.venv/bin/python scripts/train_velocity.py \
   --robot g1_29dof --device "$device" --seed 0 --stage joint \
   "$collision" --self-collision-weight "$collision_weight" \
-  "$freeze" --warmup-updates 500 --iterations 5000 \
+  "$freeze" --warmup-updates 500 --iterations "$iterations" --curriculum-steps "$curriculum_steps" \
   --actor-checkpoint "$actor_checkpoint" \
   --world-checkpoint "$world_checkpoint" \
   --manifest "$manifest" \
-  --velocity-config "$inputs/velocity_config.json" \
   --num-envs 4096 --policy-batch-size 4096 --wm-batch-size 2048 \
   --capacity 1000 --warmup-steps 32 --collect-steps 5 --updates-per-collect 2 \
   --wm-batches 10 --horizon 32 --critic-epochs 5 --critic-minibatches 4 \
   --learning-rate 0.0002 --stand-still-reference "$reference" --stand-still-weight "$stand_weight" --motion-storage "$storage" \
   --initial-evaluation-steps "$initial_evaluation_steps" \
-  --no-compile --checkpoint-interval 1000 --output "$output" --tensorboard
+  --no-compile --checkpoint-interval "$checkpoint_interval" --output "$output" --tensorboard
 )
 printf 'Stand-still: reference=%s weight=%s | Self-collisions: %s weight=%s | World: %s\n' "$reference" "$stand_weight" "$collision_name" "$collision_weight" "$mode"
+printf 'Schedule: iterations=%s curriculum_steps=%s checkpoint_interval=%s\n' "$iterations" "$curriculum_steps" "$checkpoint_interval"
 printf 'Output: %s\n' "$output"
 if [[ "$dry_run" == true ]]; then
   printf '%q ' "${command[@]}"
